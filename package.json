@@ -1,0 +1,21 @@
+{
+  "name": "text-to-3d-frontend",
+  "version": "1.0.0",
+  "description": "Frontend for Text to 3D application",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@xeokit/xeokit-sdk": "^2.6.104",
+    "handlebars": "^4.7.7",
+    "three": "^0.149.0",
+    "web-ifc": "^0.0.74"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^1.1.0",
+    "vite": "^5.0.0"
+  }
+}

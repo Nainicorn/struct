@@ -1,0 +1,131 @@
+.__header {
+    background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+    padding: 16px 0;
+    display: flex;
+}
+
+.__header-container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    flex: 1;
+}
+
+.__header-left {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 250px;
+    padding: 0 20px;
+    transition: all 0.35s cubic-bezier(0.4, 0.0, 0.2, 1);
+    flex-shrink: 0;
+}
+
+body[data-collapsed="true"] .__header-left {
+    width: 50px;
+    padding: 0;
+    justify-content: center;
+}
+
+body[data-collapsed="true"] .__header-toggle {
+    margin-right: 0;
+    margin-left: 0;
+}
+
+.__header-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    color: #b4a7d6;
+    flex-shrink: 0;
+    margin-left: auto;
+    margin-right: -20px;
+}
+
+.__header-toggle:hover {
+    background-color: rgba(180, 167, 214, 0.1);
+}
+
+.__header-toggle:active {
+    transform: scale(0.95);
+}
+
+.__header-toggle-icon {
+    width: 24px;
+    height: 24px;
+}
+
+.__header-logo-text {
+    font-size: 0.875rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: #b4a7d6;
+    white-space: nowrap;
+    transition: opacity 0.35s cubic-bezier(0.4, 0.0, 0.2, 1);
+}
+
+body[data-collapsed="true"] .__header-logo-text {
+    display: none;
+}
+
+.__header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 20px;
+}
+
+.__header-logout {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: linear-gradient(135deg, #e8d9f0 0%, #f0e6f8 100%);
+    border: none;
+    cursor: pointer;
+    padding: 10px 16px;
+    border-radius: 8px;
+    color: #7d6fa3;
+    font-weight: 500;
+    font-size: 0.875rem;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 8px rgba(180, 167, 214, 0.2);
+    white-space: nowrap;
+}
+
+.__header-logout:hover {
+    background: linear-gradient(135deg, #f0e6f8 0%, #f8eff6 100%);
+    box-shadow: 0 4px 12px rgba(180, 167, 214, 0.3);
+    transform: translateY(-2px);
+}
+
+.__header-logout:active {
+    transform: translateY(0);
+}
+
+.__header-logout-icon {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+}
+
+.__header-logout-text {
+    display: inline;
+}
+
+@media (max-width: 768px) {
+    .__header-logout-text {
+        display: none;
+    }
+
+    .__header-logout {
+        padding: 10px;
+    }
+}
