@@ -5,15 +5,31 @@ import sidebar from '../sidebar/sidebar';
 import renderbox from '../renderbox/renderbox';
 
 const layout = {
-    element: null,
+    // Initialize the layout component
+    async init() {
+        this._render();
+        await this._loadData();
+        this._bindListeners();
+    },
 
-    init() {
-        const body = document.body;
-        body.innerHTML = template();
+    // Render HTML using Handlebars template
+    _render() {
+        const $body = document.body;
+        let html = template({ main: true });
+        $body.innerHTML = html;
+    },
 
-        header.init();
-        sidebar.init();
-        renderbox.init();
+    // Load data and initialize child components
+    async _loadData() {
+        // Initialize all child components
+        await header.init();
+        await sidebar.init();
+        await renderbox.init();
+    },
+
+    // Bind listeners if needed
+    _bindListeners() {
+        // Any global layout listeners would go here
     }
 };
 

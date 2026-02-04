@@ -6,12 +6,28 @@ const renderbox = {
     element: null,
     viewerCanvas: null,
 
-    init() {
-        this.element = document.querySelector('.__renderbox');
-        this.element.innerHTML = template();
+    // Initialize the renderbox component
+    async init() {
+        this._render();
+        await this._loadData();
+        this._bindListeners();
+    },
 
+    // Render HTML using Handlebars template
+    _render() {
+        this.element = document.querySelector('.__renderbox');
+        let html = template({ main: true });
+        this.element.innerHTML = html;
+    },
+
+    // Load data and initialize viewer
+    async _loadData() {
+        await this._initViewer();
+    },
+
+    // Bind event listeners
+    _bindListeners() {
         this._bindEvents();
-        this._initViewer();
     },
 
     /**

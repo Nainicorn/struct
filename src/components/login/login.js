@@ -1,54 +1,74 @@
 import loginTemplate from './login.hbs';
 import './login.css';
+import authenticateService from '../../services/authenticateService.js';
 
 const login = {
-    // Check if user is logged in via local storage
-    verify() {
-        return localStorage.getItem('userEmail') !== null;
+    // Initialize the login component
+    async init() {
+        this._render();
+        await this._loadData();
+        this._bindListeners();
     },
 
-    // Clear local storage and reload
-    logout() {
-        localStorage.removeItem('userEmail');
-        window.location.reload();
+    // Render HTML using Handlebars template
+    _render() {
+        this.element = document.querySelector('body');
+        let html = loginTemplate({ main: true });
+        this.element.innerHTML = html;
     },
 
-    // Initialize login page
-    init() {
-        const body = document.body;
-        body.innerHTML = loginTemplate();
-        this._bindEvents();
+    // Load initial data
+    async _loadData() {
+        // No data loading needed for login page
     },
 
-    _bindEvents() {
-        const form = document.querySelector('#login-form');
-        const emailInput = document.querySelector('#email');
+    // Bind event listeners
+    _bindListeners() {
+        this.element.addEventListener('submit', (e) => {
+            if (e.target.id === 'login-form') {
+                e.preventDefault();
+                this._handleLogin();
+            }
+        });
 
-        if (!form) return;
-
-        form.addEventListener('submit', (e) => {
-            e.preventDefault();
-            this._handleLogin(emailInput);
+        // Optional: handle "Enter" key press
+        this.element.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && e.target.id === 'email') {
+                this._handleLogin();
+            }
         });
     },
 
-    _handleLogin(emailInput) {
-        const email = emailInput.value.trim();
-        const errorMsg = document.querySelector('#error-message');
-        const submitBtn = document.querySelector('#submit');
+    _handleLogin() {
+        const $emailInput = document.querySelector('#email');
+        const $errorMsg = document.querySelector('#error-message');
+        const $submitBtn = document.querySelector('#submit');
 
-        if (this._isValidEmail(email)) {
-            submitBtn.disabled = true;
-            // Save to local storage
-            localStorage.setItem('userEmail', email);
-            // Reload to show authenticated app
-            setTimeout(() => {
-                window.location.reload();
-            }, 300);
-        } else {
-            if (errorMsg) {
-                errorMsg.textContent = 'Please enter a valid email address.';
+        const email = $emailInput.value.trim();
+
+        if (!this._isValidEmail(email)) {
+            if ($errorMsg) {
+                $errorMsg.textContent = 'Please enter a valid email address.';
             }
+            return;
+        }
+
+        $submitBtn.disabled = true;
+        this._attemptLogin(email, $emailInput, $errorMsg, $submitBtn);
+    },
+
+    async _attemptLogin(email, $emailInput, $errorMsg, $submitBtn) {
+        try {
+            // Call authenticateService to login
+            await authenticateService.login({ email });
+            // Redirect to dashboard on success
+            window.location.href = '/';
+        } catch (error) {
+            $submitBtn.disabled = false;
+            if ($errorMsg) {
+                $errorMsg.textContent = error.message || 'Login failed. Please try again.';
+            }
+            $emailInput.focus();
         }
     },
 

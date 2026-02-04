@@ -4,14 +4,29 @@ import controls from '../controls/controls';
 import renders from '../renders/renders';
 
 const sidebar = {
-    element: null,
+    // Initialize the sidebar component
+    async init() {
+        this._render();
+        await this._loadData();
+        this._bindListeners();
+    },
 
-    init() {
+    // Render HTML using Handlebars template
+    _render() {
         this.element = document.querySelector('.__sidebar');
-        this.element.innerHTML = template();
+        let html = template({ main: true });
+        this.element.innerHTML = html;
+    },
 
-        controls.init();
-        renders.init();
+    // Load data and initialize child components
+    async _loadData() {
+        await controls.init();
+        await renders.init();
+    },
+
+    // Bind listeners if needed
+    _bindListeners() {
+        // Any sidebar listeners would go here
     }
 };
 

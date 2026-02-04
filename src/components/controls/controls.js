@@ -2,19 +2,30 @@ import template from './controls.hbs';
 import './controls.css';
 
 const controls = {
-    element: null,
-
-    init() {
-        this.element = document.querySelector('.__sidebar-controls');
-        this.element.innerHTML = template();
-
-        this._bindEvents();
+    // Initialize the controls component
+    async init() {
+        this._render();
+        await this._loadData();
+        this._bindListeners();
     },
 
-    _bindEvents() {
+    // Render HTML using Handlebars template
+    _render() {
+        this.element = document.querySelector('.__sidebar-controls');
+        let html = template({ main: true });
+        this.element.innerHTML = html;
+    },
+
+    // Load data if needed
+    async _loadData() {
+        // No data loading needed for controls
+    },
+
+    // Bind event listeners
+    _bindListeners() {
         this.element.addEventListener('click', (e) => {
-            const btn = e.target.closest('.__controls-new');
-            if (btn) {
+            const $btn = e.target.closest('.__controls-new');
+            if ($btn) {
                 this._handleNewRender();
             }
         });
