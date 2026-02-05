@@ -1,6 +1,6 @@
 import template from './renderbox.hbs';
 import './renderbox.css';
-import ifcViewer from './ifc-viewer.js';
+import ifcViewer from '../ifc-viewer/ifc-viewer.js';
 
 const renderbox = {
     element: null,
