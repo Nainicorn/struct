@@ -31,9 +31,9 @@ const header = {
     // Update user display in header
     _updateUserDisplay() {
         if (this.user) {
-            const $userEmail = this.element.querySelector('.__header-user-email');
-            if ($userEmail) {
-                $userEmail.textContent = this.user.email || 'User';
+            const $userName = this.element.querySelector('.__header-user-name');
+            if ($userName) {
+                $userName.textContent = this.user.name || 'User';
             }
         }
     },

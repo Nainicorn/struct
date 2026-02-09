@@ -76,6 +76,26 @@ body[data-collapsed="true"] .__header-logo-text {
     display: none;
 }
 
+.__header-center {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 0 20px;
+}
+
+.__header-welcome {
+    font-size: 1.125rem;
+    font-weight: 500;
+    color: #b4a7d6;
+    white-space: nowrap;
+}
+
+.__header-user-name {
+    font-weight: 600;
+    color: #e8d9f0;
+}
+
 .__header-right {
     display: flex;
     align-items: center;

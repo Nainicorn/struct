@@ -17,9 +17,15 @@
 .__renders-item {
     cursor: pointer;
     transition: all 0.2s ease;
+    padding: 12px;
+    background: rgba(180, 167, 214, 0.05);
+    border: 1px solid rgba(180, 167, 214, 0.2);
+    border-radius: 8px;
 }
 
 .__renders-item:hover {
+    background: rgba(180, 167, 214, 0.1);
+    border-color: rgba(180, 167, 214, 0.4);
     transform: translateY(-2px);
 }
 
@@ -82,5 +88,42 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    margin: 0;
+}
+
+/* New render list styles */
+.__renders-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.__renders-status {
+    font-size: 1rem;
+    flex-shrink: 0;
+}
+
+.__renders-title-text {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #e8d9f0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin: 0;
+}
+
+.__renders-date {
+    font-size: 0.75rem;
+    color: #999;
+    margin: 0;
+}
+
+.__renders-empty {
+    text-align: center;
+    color: #999;
+    font-size: 0.85rem;
+    padding: 16px;
     margin: 0;
 }

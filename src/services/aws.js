@@ -3,8 +3,8 @@ const aws = {
     // Return the base API URL depending on environment
     getBaseUrl() {
         if (window.location.hostname === 'localhost') {
-            // Development: use Vite proxy
-            return '/api';
+            // Development: use API Gateway
+            return 'https://0mc6awox4i.execute-api.us-east-1.amazonaws.com/dev';
         } else {
             // Production: use custom domain API Gateway URL
             // TODO: Replace with your actual AWS API Gateway custom domain

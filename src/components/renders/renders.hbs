@@ -1,18 +1,18 @@
 {{#if main}}
 <h3 class="__renders-title">Renders</h3>
 <div class="__renders-list">
-    {{#each renders}}
-        <div class="__renders-item" data-id="{{id}}">
-            <div class="__renders-thumbnail">
-                <div class="__renders-placeholder">{{emoji}}</div>
-                <button class="__renders-edit" title="Edit render">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
-                    </svg>
-                </button>
+    {{#if hasRenders}}
+        {{#each renders}}
+            <div class="__renders-item" data-id="{{id}}">
+                <div class="__renders-header">
+                    <span class="__renders-status">{{statusEmoji}}</span>
+                    <p class="__renders-title-text">{{title}}</p>
+                </div>
+                <p class="__renders-date">{{timestamp}}</p>
             </div>
-            <p class="__renders-name">{{name}}</p>
-        </div>
-    {{/each}}
+        {{/each}}
+    {{else}}
+        <p class="__renders-empty">No renders yet. Create your first render!</p>
+    {{/if}}
 </div>
 {{/if}}

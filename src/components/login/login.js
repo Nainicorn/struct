@@ -41,10 +41,12 @@ const login = {
 
     _handleLogin() {
         const $emailInput = document.querySelector('#email');
+        const $passwordInput = document.querySelector('#password');
         const $errorMsg = document.querySelector('#error-message');
         const $submitBtn = document.querySelector('#submit');
 
         const email = $emailInput.value.trim();
+        const password = $passwordInput ? $passwordInput.value.trim() : '';
 
         if (!this._isValidEmail(email)) {
             if ($errorMsg) {
@@ -53,14 +55,21 @@ const login = {
             return;
         }
 
+        if (!password) {
+            if ($errorMsg) {
+                $errorMsg.textContent = 'Please enter a password.';
+            }
+            return;
+        }
+
         $submitBtn.disabled = true;
-        this._attemptLogin(email, $emailInput, $errorMsg, $submitBtn);
+        this._attemptLogin(email, password, $emailInput, $errorMsg, $submitBtn);
     },
 
-    async _attemptLogin(email, $emailInput, $errorMsg, $submitBtn) {
+    async _attemptLogin(email, password, $emailInput, $errorMsg, $submitBtn) {
         try {
             // Call authenticateService to login
-            await authenticateService.login({ email });
+            await authenticateService.login(email, password);
             // Redirect to dashboard on success
             window.location.href = '/';
         } catch (error) {

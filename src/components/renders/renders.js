@@ -2,37 +2,36 @@ import template from './renders.hbs';
 import './renders.css';
 
 const renders = {
+    element: null,
+    data: [],
+
     // Initialize the renders component
     async init() {
-        this._render();
+        this.element = document.querySelector('.__sidebar-renders');
         await this._loadData();
+        this._render();
         this._bindListeners();
+    },
+
+    // Load data from API
+    async _loadData() {
+        // TODO: Implement renders API endpoint
+        this.data = [];
     },
 
     // Render HTML using Handlebars template
     _render() {
-        this.element = document.querySelector('.__sidebar-renders');
-        let html = template({ main: true, renders: this.data || [] });
+        let html = template({
+            main: true,
+            renders: this.data,
+            hasRenders: this.data.length > 0
+        });
         this.element.innerHTML = html;
-    },
-
-    // Load data from service/API
-    async _loadData() {
-        // TODO: Replace with actual API call to fetch renders
-        // const renders = await rendersService.getAll();
-        // this.data = renders;
-
-        // Placeholder data for now
-        this.data = [
-            { id: 1, name: 'Modern Office', emoji: '🏢' },
-            { id: 2, name: 'Villa Design', emoji: '🏠' },
-            { id: 3, name: 'Glass Atrium', emoji: '🏛️' },
-            { id: 4, name: 'Minimalist', emoji: '📐' }
-        ];
     },
 
     // Bind event listeners
     _bindListeners() {
+        // Handle render item clicks
         this.element.addEventListener('click', (e) => {
             const $item = e.target.closest('.__renders-item');
             if ($item) {
@@ -42,6 +41,9 @@ const renders = {
         });
     },
 
+    /**
+     * Handle render selection
+     */
     _handleRenderSelected(renderId) {
         // Dispatch event for renderbox to handle
         const event = new CustomEvent('renderSelected', {

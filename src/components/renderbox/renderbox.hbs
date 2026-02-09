@@ -1,28 +1,54 @@
 {{#if main}}
-<div class="__renderbox-viewer">
-    <div class="__renderbox-loading">
-        <span>Loading IFC model...</span>
+<div class="__renderbox-container">
+    <!-- IFC Viewer (hidden until render selected) -->
+    <div class="__renderbox-viewer">
+        <div class="__renderbox-loading">
+            <span>Loading IFC model...</span>
+        </div>
     </div>
-</div>
-<div class="__renderbox-footer">
-    <div class="__renderbox-chat">
-        <div class="__renderbox-chat-input">
-            <input
-                type="text"
-                placeholder="Generate a new render!"
-                class="__renderbox-input"
-            />
-            <div class="__renderbox-chat-actions">
-                <button class="__renderbox-attach" title="Attach file">
+
+    <!-- Main Content Area: Message + Chat -->
+    <div class="__renderbox-content">
+        <!-- Welcome Message -->
+        <div class="__renderbox-message">
+            <p class="__renderbox-message-text">What do you want to render today?</p>
+        </div>
+
+        <!-- Render Metadata (shown when viewing render) -->
+        <div class="__renderbox-metadata">
+            <div class="__renderbox-metadata-title"></div>
+            <div class="__renderbox-metadata-description"></div>
+        </div>
+    </div>
+
+    <!-- Chat Footer (always visible) -->
+    <div class="__renderbox-footer">
+        <div class="__renderbox-chat">
+            <div class="__renderbox-chat-input">
+                <input
+                    type="file"
+                    multiple
+                    id="__renderbox-file-input"
+                    style="display: none"
+                    class="__renderbox-file-input"
+                />
+                <button class="__renderbox-attach" title="Attach files">
                     <svg class="__renderbox-action-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.414a6 6 0 108.486 8.486L20.5 13"></path>
                     </svg>
                 </button>
-                <button class="__renderbox-send" title="Send message">
-                    <svg class="__renderbox-action-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
-                    </svg>
-                </button>
+                <input
+                    type="text"
+                    placeholder="Ask about this render..."
+                    class="__renderbox-input"
+                />
+                <div class="__renderbox-chat-actions">
+                    <button class="__renderbox-send" title="Send message">
+                        <svg class="__renderbox-action-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
+                        </svg>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
