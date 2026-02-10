@@ -13,7 +13,7 @@ const usersService = {
         try {
             const user = JSON.parse(userCookie);
             // Optionally fetch full user data from backend using stored identifier
-            const userData = await aws.call(`/users/${user.id || user.email}`, {
+            const userData = await aws.call(`/api/users/${user.id || user.email}`, {
                 method: 'GET'
             });
             return userData;
@@ -30,7 +30,7 @@ const usersService = {
     // Get all users (for admin/sidebar purposes)
     async getAll() {
         try {
-            const response = await aws.call('/users', {
+            const response = await aws.call('/api/users', {
                 method: 'GET'
             });
             return response.users || [];
@@ -42,7 +42,7 @@ const usersService = {
     // Get specific user by ID
     async getById(userId) {
         try {
-            const response = await aws.call(`/users/${userId}`, {
+            const response = await aws.call(`/api/users/${userId}`, {
                 method: 'GET'
             });
             return response;
