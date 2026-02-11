@@ -6,13 +6,12 @@ const hbsLoader = {
   name: 'hbs-loader',
   resolveId(id) {
     if (id.endsWith('.hbs')) {
-      return id;
+      return { id, moduleSideEffects: false };
     }
   },
-  async load(id) {
+  load(id) {
     if (id.endsWith('.hbs')) {
-      const filePath = path.resolve(id);
-      const content = fs.readFileSync(filePath, 'utf-8');
+      const content = fs.readFileSync(id, 'utf-8');
       return `import Handlebars from 'handlebars';
 const template = Handlebars.compile(${JSON.stringify(content)});
 export default function(context) {

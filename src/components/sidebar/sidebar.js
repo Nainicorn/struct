@@ -1,7 +1,6 @@
 import template from './sidebar.hbs';
 import './sidebar.css';
 import controls from '../controls/controls';
-import renders from '../renders/renders';
 
 const sidebar = {
     // Initialize the sidebar component
@@ -21,7 +20,6 @@ const sidebar = {
     // Load data and initialize child components
     async _loadData() {
         await controls.init();
-        await renders.init();
     },
 
     // Bind listeners if needed

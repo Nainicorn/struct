@@ -1,6 +1,6 @@
 import loginTemplate from './login.hbs';
 import './login.css';
-import authenticateService from '../../services/authenticateService.js';
+import authService from '../../services/authService.js';
 
 const login = {
     // Initialize the login component
@@ -24,22 +24,22 @@ const login = {
 
     // Bind event listeners
     _bindListeners() {
-        this.element.addEventListener('submit', (e) => {
+        this.element.addEventListener('submit', async (e) => {
             if (e.target.id === 'login-form') {
                 e.preventDefault();
-                this._handleLogin();
+                await this._handleLogin();
             }
         });
 
         // Optional: handle "Enter" key press
-        this.element.addEventListener('keypress', (e) => {
+        this.element.addEventListener('keypress', async (e) => {
             if (e.key === 'Enter' && e.target.id === 'email') {
-                this._handleLogin();
+                await this._handleLogin();
             }
         });
     },
 
-    _handleLogin() {
+    async _handleLogin() {
         const $emailInput = document.querySelector('#email');
         const $passwordInput = document.querySelector('#password');
         const $errorMsg = document.querySelector('#error-message');
@@ -63,13 +63,13 @@ const login = {
         }
 
         $submitBtn.disabled = true;
-        this._attemptLogin(email, password, $emailInput, $errorMsg, $submitBtn);
+        await this._attemptLogin(email, password, $emailInput, $errorMsg, $submitBtn);
     },
 
     async _attemptLogin(email, password, $emailInput, $errorMsg, $submitBtn) {
         try {
-            // Call authenticateService to login
-            await authenticateService.login(email, password);
+            // Call authService to login
+            await authService.login(email, password);
             // Redirect to dashboard on success
             window.location.href = '/';
         } catch (error) {

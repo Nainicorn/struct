@@ -10,6 +10,7 @@ const aws = {
   async call(endpoint, options = {}) {
     const url = `${this.getBaseUrl()}${endpoint}`;
     const response = await fetch(url, {
+      credentials: 'include', // Send cookies with cross-origin requests
       headers: {
         "Content-Type": "application/json",
         ...options.headers,

@@ -1,7 +1,7 @@
 import template from './header.hbs';
 import './header.css';
 import usersService from '../../services/usersService.js';
-import authenticateService from '../../services/authenticateService.js';
+import authService from '../../services/authService.js';
 
 const header = {
     // Initialize the header component
@@ -64,7 +64,7 @@ const header = {
     },
 
     _handleLogout() {
-        authenticateService.logout();
+        authService.logout();
     }
 };
 

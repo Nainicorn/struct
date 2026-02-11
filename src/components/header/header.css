@@ -38,7 +38,7 @@ body[data-collapsed="true"] .__header-toggle {
     background: none;
     border: none;
     cursor: pointer;
-    padding: 6px;
+    padding: 4px 8px;
     border-radius: 8px;
     display: flex;
     align-items: center;
@@ -48,6 +48,8 @@ body[data-collapsed="true"] .__header-toggle {
     flex-shrink: 0;
     margin-left: auto;
     margin-right: -20px;
+    min-width: 44px;
+    min-height: 44px;
 }
 
 .__header-toggle:hover {
@@ -59,8 +61,12 @@ body[data-collapsed="true"] .__header-toggle {
 }
 
 .__header-toggle-icon {
-    width: 24px;
-    height: 24px;
+    font-size: 24px;
+    vertical-align: middle;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
 }
 
 .__header-logo-text {
