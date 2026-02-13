@@ -34,17 +34,29 @@ A full-stack application for converting text descriptions + files into 3D IFC fi
 - All 4 Lambda functions with correct DynamoDB key schema (user_id, render_id)
 
 **🚧 IN PROGRESS**:
-- Lambda function deployment to AWS (read-metadata, bedrock-ifc, store-ifc, orchestrator-trigger)
-- S3 → SNS event configuration
-- Step Function state machine definition with correct key mapping
+- Lambda function testing and Step Function execution
+- Fixed Bedrock model to Claude 3 Sonnet v1 (on-demand throughput support)
 
 **📋 REMAINING WORK**:
-- Deploy Lambda functions with IAM roles and environment variables
+- Re-deploy bedrock-ifc Lambda with updated zip
+- Deploy remaining Lambda functions if not done
 - Configure S3 event notifications to SNS
-- Create/update Step Function with correct Lambda ARNs
-- End-to-end testing
+- Test end-to-end pipeline
 - Error handling & retry logic improvements
 - Reach goals (human-in-the-loop, edit renders)
+
+---
+
+## 🐛 Recent Fixes
+
+### Bedrock Model Error (2026-02-12)
+**Problem**: `ValidationException: Invocation of model ID anthropic.claude-3-5-sonnet-20241022-v2:0 with on-demand throughput isn't supported`
+
+**Root Cause**: Claude 3.5 Sonnet requires inference profile (provisioned throughput), not available on-demand
+
+**Solution**: Switched to `anthropic.claude-3-sonnet-20240229-v1:0` (Claude 3 Sonnet v1) which supports on-demand invocation
+
+**Updated File**: `src/builting-bedrock-ifc/index.mjs` (line 56)
 
 ---
 
