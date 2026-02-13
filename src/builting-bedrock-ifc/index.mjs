@@ -50,10 +50,10 @@ Return the complete IFC file content in valid IFC format.`;
 
     console.log('Calling Bedrock with prompt...');
 
-    // Call Bedrock API (Claude 3.5 Sonnet)
+    // Call Bedrock API (Claude 3 Sonnet - supports on-demand throughput)
     const response = await bedrock.send(
       new InvokeModelCommand({
-        modelId: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+        modelId: 'anthropic.claude-3-sonnet-20240229-v1:0',
         body: JSON.stringify({
           anthropic_version: 'bedrock-2023-05-31',
           max_tokens: 100000,
