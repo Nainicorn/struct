@@ -1,11 +1,18 @@
 import template from './renderbox.hbs';
 import './renderbox.css';
 import ifcViewer from '../ifc-viewer/ifc-viewer.js';
+import uploadService from '../../services/uploadService.js';
+import usersService from '../../services/usersService.js';
+import rendersService from '../../services/rendersService.js';
 
 const renderbox = {
     element: null,
     viewerCanvas: null,
     stagedFiles: [], // Files waiting to be uploaded
+    MAX_FILES: 10, // Maximum number of files allowed
+    pollingInterval: null,
+    currentRenderId: null,
+    pollingStartTime: null,
 
     // Initialize the renderbox component
     async init() {
@@ -25,7 +32,23 @@ const renderbox = {
 
     // Load data and initialize viewer
     async _loadData() {
+        try {
+            this.user = await usersService.getCurrentUser();
+            this._updateUserDisplay();
+        } catch (error) {
+            console.error('Failed to load user:', error);
+        }
         await this._initViewer();
+    },
+
+    // Update user display in renderbox
+    _updateUserDisplay() {
+        if (this.user) {
+            const $userName = this.element.querySelector('.__renderbox-user-name');
+            if ($userName) {
+                $userName.textContent = this.user.name || 'User';
+            }
+        }
     },
 
     // Bind event listeners
@@ -143,6 +166,7 @@ const renderbox = {
      */
     _handleNewRender() {
         console.log('New render requested');
+        this._stopPolling();
         this.element.dataset.state = 'new-render';
         delete this.element.dataset.renderId;
         this._updateMessage('What do you want to render today?');
@@ -156,8 +180,7 @@ const renderbox = {
         console.log('Render selected:', renderId);
 
         try {
-            const renders = await rendersapi.getRenders();
-            const render = renders.find(r => r.id === renderId);
+            const render = await rendersService.getRender(renderId);
 
             if (!render) {
                 this._showError('Render not found');
@@ -166,7 +189,7 @@ const renderbox = {
 
             if (render.status === 'completed') {
                 // Load IFC from S3
-                const { downloadUrl } = await rendersapi.getDownloadUrl(renderId);
+                const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
                 await this.loadIFCFromS3(downloadUrl);
 
                 this.element.dataset.state = 'viewing-render';
@@ -192,8 +215,22 @@ const renderbox = {
             return;
         }
 
-        // Add new files to staged files
-        this.stagedFiles = Array.from(files);
+        const newFiles = Array.from(files);
+        const availableSlots = this.MAX_FILES - this.stagedFiles.length;
+
+        if (newFiles.length > availableSlots) {
+            if (availableSlots === 0) {
+                this._showError(`Maximum ${this.MAX_FILES} files allowed. Remove some files first.`);
+                return;
+            }
+            this._showError(`Only ${availableSlots} file(s) can be added. Maximum is ${this.MAX_FILES} files.`);
+            // Add only as many as we can fit
+            this.stagedFiles.push(...newFiles.slice(0, availableSlots));
+        } else {
+            // Add new files to staged files
+            this.stagedFiles.push(...newFiles);
+        }
+
         console.log('Files staged:', this.stagedFiles.map(f => f.name));
 
         // Show file preview
@@ -201,28 +238,41 @@ const renderbox = {
     },
 
     /**
+     * Get file extension from filename
+     */
+    _getFileExtension(filename) {
+        const ext = filename.split('.').pop().toUpperCase();
+        return ext.length > 5 ? ext.substring(0, 5) : ext;
+    },
+
+    /**
      * Update the file preview display
      */
     _updateFilePreview() {
-        const previewSection = this.element.querySelector('.__renderbox-file-preview');
-        const fileList = this.element.querySelector('.__renderbox-file-list');
+        const stagingSection = this.element.querySelector('.__renderbox-file-staging');
+        const fileGrid = this.element.querySelector('.__renderbox-file-grid');
+        const attachBtn = this.element.querySelector('.__renderbox-attach');
 
         if (this.stagedFiles.length === 0) {
-            previewSection.style.display = 'none';
+            stagingSection.style.display = 'none';
+            if (attachBtn) {
+                attachBtn.disabled = false;
+                attachBtn.style.opacity = '1';
+            }
             return;
         }
 
-        previewSection.style.display = 'block';
+        stagingSection.style.display = 'block';
 
-        // Build file list with remove buttons
-        fileList.innerHTML = this.stagedFiles.map((file, index) => {
-            const sizeKB = (file.size / 1024).toFixed(1);
+        // Build file grid with box style
+        fileGrid.innerHTML = this.stagedFiles.map((file, index) => {
+            const fileExt = this._getFileExtension(file.name);
             return `
-                <div class="__renderbox-file-item">
-                    <span class="__renderbox-file-name">${file.name}</span>
-                    <span class="__renderbox-file-size">${sizeKB} KB</span>
-                    <button class="__renderbox-file-remove" data-index="${index}" title="Remove file">
-                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width: 16px; height: 16px;">
+                <div class="__renderbox-file-item-box" title="${file.name}">
+                    <span class="__renderbox-file-item-box-name">${file.name}</span>
+                    <span class="__renderbox-file-item-box-badge">${fileExt}</span>
+                    <button class="__renderbox-file-item-remove" data-index="${index}" title="Remove file">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width: 14px; height: 14px;">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                         </svg>
                     </button>
@@ -230,9 +280,23 @@ const renderbox = {
             `;
         }).join('');
 
+        // Disable attach button if max files reached
+        if (attachBtn) {
+            if (this.stagedFiles.length >= this.MAX_FILES) {
+                attachBtn.disabled = true;
+                attachBtn.style.opacity = '0.5';
+                attachBtn.title = `Maximum ${this.MAX_FILES} files reached`;
+            } else {
+                attachBtn.disabled = false;
+                attachBtn.style.opacity = '1';
+                attachBtn.title = 'Attach files';
+            }
+        }
+
         // Bind remove buttons
-        fileList.querySelectorAll('.__renderbox-file-remove').forEach(btn => {
+        fileGrid.querySelectorAll('.__renderbox-file-item-remove').forEach(btn => {
             btn.addEventListener('click', (e) => {
+                e.stopPropagation();
                 const index = parseInt(e.currentTarget.dataset.index);
                 this.stagedFiles.splice(index, 1);
                 this._updateFilePreview();
@@ -241,62 +305,51 @@ const renderbox = {
     },
 
     /**
-     * Handle "Start Render" button click - upload files and trigger pipeline
+     * Handle "Start Render" button click - upload files to S3
      */
     async _handleStartRender() {
-        if (this.stagedFiles.length === 0) {
+        if (!this.stagedFiles || this.stagedFiles.length === 0) {
             this._showError('Please attach at least one file');
             return;
         }
 
-        const descriptionInput = this.element.querySelector('.__renderbox-description');
-        const description = descriptionInput.value.trim();
-
         try {
-            // Create render + get presigned URLs
+            // Capture description from input
+            const descriptionInput = this.element.querySelector('.__renderbox-description');
+            const description = descriptionInput?.textContent.trim() || '';
+
+            // Show loading state
+            this._showLoadingState('Uploading files...');
+
+            // Get presigned URLs (now includes description parameter)
             const fileNames = this.stagedFiles.map(f => f.name);
-            console.log('Creating render with files:', fileNames, 'description:', description);
-            const { id: renderId, uploadUrls } = await rendersapi.createRender(fileNames, description);
+            const { uploadUrls, renderId, descriptionUrl } =
+                await uploadService.getPresignedUrls(fileNames, description);
 
-            console.log('Render created:', renderId);
-
-            // Upload files to S3
+            // Upload files
             for (const file of this.stagedFiles) {
-                console.log('Uploading file:', file.name);
-                await rendersapi.uploadToS3(uploadUrls[file.name], file);
+                await uploadService.uploadToS3(uploadUrls[file.name], file);
             }
 
-            console.log('Files uploaded successfully');
+            // Upload description.txt if provided
+            if (description && descriptionUrl) {
+                await uploadService.uploadDescription(descriptionUrl, description);
+            }
 
-            // Clear staged files and preview
+            // Clear UI
             this.stagedFiles = [];
             this._updateFilePreview();
-            descriptionInput.value = '';
+            if (descriptionInput) {
+                descriptionInput.textContent = '';
+            }
 
-            // Trigger pipeline
-            await rendersapi.triggerProcessing(renderId);
+            // Start polling for render status
+            this._startPolling(renderId);
 
-            console.log('Pipeline triggered, starting to poll...');
-
-            // Show processing message
-            this._updateMessage('Render processing...');
-
-            // Poll for completion
-            rendersapi.poll((renders) => {
-                const render = renders.find(r => r.id === renderId);
-                if (render && render.status === 'completed') {
-                    console.log('Render completed!');
-                    this._handleRenderSelected(renderId);
-                } else if (render && render.status === 'failed') {
-                    console.error('Render failed:', render.error_message);
-                    this._showError('Render failed: ' + render.error_message);
-                } else if (render) {
-                    console.log('Render status:', render.status);
-                }
-            });
         } catch (error) {
-            console.error('Error starting render:', error);
-            this._showError('Failed to start render: ' + error.message);
+            console.error('Upload failed:', error);
+            this._hideLoadingState();
+            this._showError(`Failed to upload: ${error.message}`);
         }
     },
 
@@ -378,7 +431,7 @@ const renderbox = {
         try {
             const renderId = this.element.dataset.renderId;
             console.log('Deleting render:', renderId);
-            await rendersapi.deleteRender(renderId);
+            await rendersService.deleteRender(renderId);
 
             // Clear the view and go back to new render
             this._handleNewRender();
@@ -401,7 +454,7 @@ const renderbox = {
 
         try {
             const renderId = this.element.dataset.renderId;
-            const { downloadUrl } = await rendersapi.getDownloadUrl(renderId);
+            const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
 
             // Create temporary link and trigger download
             const link = document.createElement('a');
@@ -415,6 +468,147 @@ const renderbox = {
         } catch (error) {
             console.error('Error downloading render:', error);
             this._showError('Failed to download render: ' + error.message);
+        }
+    },
+
+    /**
+     * Show loading state with spinner (for uploads and polling)
+     */
+    _showLoadingState(message) {
+        const uploadLoadingEl = this.element.querySelector('.__renderbox-upload-loading');
+        if (uploadLoadingEl) {
+            uploadLoadingEl.style.display = 'flex';
+            const textEl = uploadLoadingEl.querySelector('.__renderbox-loading-text');
+            if (textEl) textEl.textContent = message;
+        }
+        // Disable buttons during upload
+        const startBtn = this.element.querySelector('.__renderbox-start');
+        const attachBtn = this.element.querySelector('.__renderbox-attach');
+        if (startBtn) startBtn.disabled = true;
+        if (attachBtn) attachBtn.disabled = true;
+    },
+
+    /**
+     * Hide loading state
+     */
+    _hideLoadingState() {
+        const uploadLoadingEl = this.element.querySelector('.__renderbox-upload-loading');
+        if (uploadLoadingEl) uploadLoadingEl.style.display = 'none';
+        // Re-enable buttons
+        const startBtn = this.element.querySelector('.__renderbox-start');
+        const attachBtn = this.element.querySelector('.__renderbox-attach');
+        if (startBtn) startBtn.disabled = false;
+        if (attachBtn) attachBtn.disabled = false;
+    },
+
+    /**
+     * Update loading message
+     */
+    _updateLoadingMessage(message) {
+        const uploadLoadingEl = this.element.querySelector('.__renderbox-upload-loading');
+        if (uploadLoadingEl) {
+            const textEl = uploadLoadingEl.querySelector('.__renderbox-loading-text');
+            if (textEl) textEl.textContent = message;
+        }
+    },
+
+    /**
+     * Start polling for render status
+     */
+    _startPolling(renderId) {
+        this.currentRenderId = renderId;
+        this.pollingStartTime = Date.now();
+        this._updateLoadingMessage('Processing your render...');
+        this._pollRenderStatus();
+    },
+
+    /**
+     * Poll render status with exponential backoff
+     */
+    async _pollRenderStatus() {
+        if (!this.currentRenderId) return;
+
+        try {
+            const render = await rendersService.getRender(this.currentRenderId);
+            const elapsed = Date.now() - this.pollingStartTime;
+            const minutes = Math.floor(elapsed / 60000);
+
+            if (render.status === 'completed') {
+                this._handleRenderCompleted(render);
+                return;
+            } else if (render.status === 'failed') {
+                this._stopPolling();
+                this._hideLoadingState();
+                this._showError(`Render failed: ${render.error_message || 'Unknown error'}`);
+                return;
+            }
+
+            // Update loading message with elapsed time
+            this._updateLoadingMessage(`Processing your render... (${minutes}m elapsed)`);
+
+            // Exponential backoff polling: 2s → 5s → 10s
+            let delay;
+            if (elapsed < 30000) {
+                delay = 2000;  // 2s for first 30s
+            } else if (elapsed < 120000) {
+                delay = 5000;  // 5s for next 2 minutes
+            } else if (elapsed < 600000) {
+                delay = 10000; // 10s for up to 10 minutes
+            } else {
+                // Timeout after 10 minutes
+                this._stopPolling();
+                this._hideLoadingState();
+                this._showError('Render is taking longer than expected. Check the sidebar for updates.');
+                return;
+            }
+
+            this.pollingInterval = setTimeout(() => this._pollRenderStatus(), delay);
+        } catch (error) {
+            console.error('Polling error:', error);
+            this._stopPolling();
+            this._hideLoadingState();
+            this._showError(`Error checking render status: ${error.message}`);
+        }
+    },
+
+    /**
+     * Stop polling
+     */
+    _stopPolling() {
+        if (this.pollingInterval) {
+            clearTimeout(this.pollingInterval);
+            this.pollingInterval = null;
+        }
+        this.currentRenderId = null;
+        this.pollingStartTime = null;
+    },
+
+    /**
+     * Handle render completion
+     */
+    async _handleRenderCompleted(render) {
+        this._stopPolling();
+        this._hideLoadingState();
+
+        try {
+            // Get download URL for IFC file
+            const { downloadUrl } = await rendersService.getDownloadUrl(render.renderId);
+
+            // Load IFC in viewer
+            await this.loadIFCFromS3(downloadUrl);
+
+            // Update UI state to viewing-render
+            this.element.dataset.state = 'viewing-render';
+            this.element.dataset.renderId = render.renderId;
+            this._displayMetadata(render);
+
+            // Notify sidebar to refresh renders list
+            document.dispatchEvent(new CustomEvent('rendersUpdated'));
+
+            console.log('Render completed:', render.renderId);
+        } catch (error) {
+            console.error('Error loading completed render:', error);
+            this._showError('Failed to load rendered IFC: ' + error.message);
         }
     }
 };

@@ -5,10 +5,18 @@ const TableName = 'builting-users';
 
 export function getUserIdFromCookies(event) {
   let h = event.headers?.cookie || event.headers?.Cookie || '';
+  console.log('Cookie header:', h);
+  console.log('All event headers:', Object.keys(event.headers || {}));
   for (let c of h.split(';')) {
     c = c.trim();
-    if (c.startsWith('__app-userid=')) return c.split('=')[1];
+    if (c.startsWith('builting-user=')) {
+      const userJson = decodeURIComponent(c.split('=')[1]);
+      const user = JSON.parse(userJson);
+      console.log('User ID extracted:', user.id);
+      return user.id;
+    }
   }
+  console.log('No builting-user cookie found');
   return null;
 }
 

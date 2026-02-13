@@ -1,5 +1,7 @@
 import auth from './auth.mjs';
 import users from './users.mjs';
+import uploads from './uploads.mjs';
+import renders from './renders.mjs';
 
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
@@ -7,8 +9,8 @@ const ALLOWED_ORIGINS = [
 ];
 
 const corsHeaders = (origin) => ({
-  "Access-Control-Allow-Headers": "Content-Type,Authorization",
-  "Access-Control-Allow-Origin": origin,
+  "Access-Control-Allow-Headers": "Content-Type,Authorization,Cookie",
+  "Access-Control-Allow-Origin": origin || "*",
   "Access-Control-Allow-Methods": "OPTIONS,POST,GET,PUT,DELETE",
   "Access-Control-Allow-Credentials": "true",
   "Content-Type": "application/json",
@@ -53,10 +55,14 @@ const route = async (event) => {
   // Prefer resource-based routing (REST API)
   if (resource === '/api/auth') return await auth.handle(event);
   if (resource === '/api/users/{id}' || resource === '/api/users') return await users.handle(event);
+  if (resource.includes('/uploads/presigned')) return await uploads.handle(event);
+  if (resource.includes('/renders')) return await renders.handle(event);
 
   // Fallback: path-based routing
   if (path.includes('/api/auth')) return await auth.handle(event);
   if (path.includes('/api/users')) return await users.handle(event);
+  if (path.includes('/api/uploads')) return await uploads.handle(event);
+  if (path.includes('/api/renders')) return await renders.handle(event);
 
   return { error: 'Unknown route', statusCode: 404 };
 };
