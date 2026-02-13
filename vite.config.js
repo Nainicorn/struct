@@ -54,6 +54,7 @@ const setupWasm = {
 
 export default defineConfig({
   plugins: [hbsLoader, setupWasm],
+  root: './',
   publicDir: 'public',
   server: {
     port: 5001,
@@ -72,6 +73,11 @@ export default defineConfig({
       output: {
         manualChunks: undefined
       }
+    }
+  },
+  resolve: {
+    alias: {
+      '@ui': path.resolve(__dirname, 'ui')
     }
   },
   optimizeDeps: {

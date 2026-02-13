@@ -32,18 +32,28 @@ A full-stack application for converting text descriptions + files into 3D IFC fi
 - rendersService.js and uploadService.js with description support
 - Renderbox loading UI with spinner and status messages
 - All 4 Lambda functions with correct DynamoDB key schema (user_id, render_id)
+- **[2026-02-13] Complete Frontend CRUD Implementation**:
+  - ✅ Details sidebar component (right panel) showing render metadata, files, download & delete buttons
+  - ✅ Sidebar thumbnail grid (left panel) with 2-column layout showing all user renders
+  - ✅ Status badges (pending=gray, processing=blue, completed=green, failed=red)
+  - ✅ Event-based communication system (renderSelected, rendersUpdated, newRenderRequested)
+  - ✅ Backend delete with complete S3 cleanup (source files + IFC + DynamoDB record)
+  - ✅ Layout restructuring (3-column: sidebar | renderbox | details) with smooth animations
+  - ✅ builting-main.zip created (4.5MB) with S3 cleanup code ready to deploy
 
 **🚧 IN PROGRESS**:
-- Lambda function testing and Step Function execution
-- Fixed Bedrock model to Claude 3 Sonnet v1 (on-demand throughput support)
+- Bedrock AI title/description generation in builting-bedrock-ifc Lambda
+- Lambda function testing and Step Function orchestration
+- Deploy builting-main.zip to AWS Lambda with S3 cleanup code
 
 **📋 REMAINING WORK**:
-- Re-deploy bedrock-ifc Lambda with updated zip
-- Deploy remaining Lambda functions if not done
+- Deploy builting-main.zip to AWS Lambda (with S3 cleanup for deletes)
+- Implement Bedrock AI title/description generation in builting-bedrock-ifc/index.mjs
 - Configure S3 event notifications to SNS
-- Test end-to-end pipeline
+- Deploy Step Function orchestration
+- Test complete end-to-end pipeline (create → process → display → delete)
 - Error handling & retry logic improvements
-- Reach goals (human-in-the-loop, edit renders)
+- Reach goals (human-in-the-loop, edit renders, real-time updates, IFC previews)
 
 ---
 
@@ -56,7 +66,91 @@ A full-stack application for converting text descriptions + files into 3D IFC fi
 
 **Solution**: Switched to `anthropic.claude-3-sonnet-20240229-v1:0` (Claude 3 Sonnet v1) which supports on-demand invocation
 
-**Updated File**: `src/builting-bedrock-ifc/index.mjs` (line 56)
+**Updated File**: `backend/builting-bedrock-ifc/index.mjs` (line 56)
+
+### Frontend CRUD Implementation (2026-02-13)
+
+**Problem**: Frontend lacked UI to view old renders, see render details, and delete renders with backend cleanup
+
+**Solution**: Implemented complete CRUD system with details sidebar and thumbnail grid
+
+**New Components Created**:
+- **`ui/components/details/details.js`**: Right sidebar component showing render metadata (AI title, description, files, download/delete buttons)
+- **`ui/components/details/details.hbs`**: Details panel template
+- **`ui/components/details/details.css`**: Right sidebar styling with smooth slide-in animation
+
+**Updated Components**:
+- **`ui/components/sidebar/sidebar.js`**: Added `loadRenders()` to fetch & display renders in grid
+- **`ui/components/sidebar/sidebar.css`**: Added 2-column thumbnail grid with status badges and hover effects
+- **`ui/components/layout/layout.js`**: Import and initialize details component
+- **`ui/components/layout/layout.hbs`**: Added `<div class="__details"></div>` to layout
+- **`ui/components/layout/layout.css`**: Updated for 3-column layout (sidebar | renderbox | details)
+- **`ui/components/renderbox/renderbox.js`**: Removed delete/download handlers (moved to details), updated event dispatching
+- **`ui/components/renderbox/renderbox.hbs`**: Removed delete/download buttons from metadata panel
+
+**Backend Updates**:
+- **`backend/builting-main/renders.mjs`**: Enhanced `deleteRender()` with S3 cleanup function
+  - Deletes source files from `builting-data` bucket
+  - Deletes IFC from `builting-ifc` bucket
+  - Deletes DynamoDB record
+  - Handles pagination for large file sets
+- **`backend/builting-main/index.mjs`**: Already had CORS headers configured
+
+**Event Integration**:
+- `renderSelected`: Sidebar dispatches when render clicked, details/renderbox listen
+- `rendersUpdated`: Details/renderbox dispatch after delete/complete, sidebar listens and refreshes
+- `newRenderRequested`: Controls dispatch, renderbox/details listen to reset UI
+
+**Current Status**:
+- Frontend CRUD fully implemented and tested locally
+- builting-main.zip (4.5MB) created and ready for deployment
+- CORS configuration verified in API Gateway (OPTIONS handlers present for all endpoints)
+- Issue: Preflight OPTIONS requests failing - may require API GW CORS settings
+
+### Circular Event Dispatch Error (2026-02-13)
+
+**Problem**: When clicking a render in sidebar, console shows `GET /api/renders/undefined` 404 error
+
+**Root Cause**: Renderbox component was both listening to AND dispatching the `renderSelected` event:
+1. Sidebar dispatches `renderSelected` with `{ detail: { id: renderId } }`
+2. Renderbox listener (line 371-373) processes it: `await this._handleRenderSelected(e.detail.id);`
+3. After loading render, renderbox dispatches `renderSelected` with `{ detail: { render } }` (line 201-203)
+4. **This triggers the same listener again** but now `e.detail.id = undefined`
+5. Result: `rendersService.getRender(undefined)` calls API with `?userId=user-1` producing 404
+
+**Solution**: Added guard clause in renderbox listener to only process events with `e.detail.id`:
+
+```javascript
+// ui/components/renderbox/renderbox.js line 371-374
+document.addEventListener('renderSelected', async (e) => {
+    // Guard against renderbox's own renderSelected dispatch
+    if (e.detail.id) {
+        await this._handleRenderSelected(e.detail.id);
+    }
+});
+```
+
+**How It Works**:
+- Sidebar dispatches `{ detail: { id } }` → listener processes ✓
+- Renderbox dispatches `{ detail: { render } }` → listener skips (guard blocks) ✓
+- Details component still receives the dispatch with `{ detail: { render } }` and displays it ✓
+
+**Updated File**: `ui/components/renderbox/renderbox.js` (line 371-374)
+
+### CORS Preflight Error (2026-02-13)
+
+**Problem**: Frontend fetch requests fail with CORS error: `Response to preflight request doesn't pass access control check`
+
+**Solution**: Configured API Gateway CORS:
+- AWS API Gateway Console → builting-api
+- For each resource (/api/renders, /api/renders/{id}, /api/renders/{id}/download):
+  - Select resource → Actions → Enable CORS and replace CORS headers
+  - Headers: `Content-Type,Authorization,Cookie`
+  - Methods: `OPTIONS,GET,POST,DELETE`
+  - Origin: `*`
+- Deploy API to `dev` stage
+
+**Status**: ✅ FIXED - CORS now working, render selection working after above circular dispatch fix
 
 ---
 
@@ -158,7 +252,7 @@ Each Lambda function has its own directory with `index.mjs` and `package.json`. 
 ### **Step 1: Install Dependencies**
 For each Lambda directory (`builting-read-metadata`, `builting-bedrock-ifc`, `builting-store-ifc`, `builting-orchestrator-trigger`):
 ```bash
-cd src/[FUNCTION_NAME]
+cd backend/[FUNCTION_NAME]
 npm install --omit=dev
 ```
 

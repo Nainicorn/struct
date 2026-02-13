@@ -1,0 +1,64 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Franklin Gothic', sans-serif;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.__header {
+    flex-shrink: 0;
+    height: auto;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.__layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+.__sidebar {
+    width: 250px;
+    background: linear-gradient(135deg, #f0e6f8 0%, #e8d9f0 100%);
+    border-right: 1px solid rgba(208, 184, 224, 0.5);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: width 0.35s cubic-bezier(0.4, 0.0, 0.2, 1);
+    box-shadow: -1px 0 2px rgba(0, 0, 0, 0.04);
+}
+
+body[data-collapsed="true"] .__sidebar {
+    width: 50px;
+}
+
+.__renderbox {
+    flex: 1;
+    background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    color: #e5e5e5;
+}
+
+.__details {
+    width: 0;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    border-left: 1px solid transparent;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: width 0.35s cubic-bezier(0.4, 0.0, 0.2, 1), border-color 0.35s cubic-bezier(0.4, 0.0, 0.2, 1);
+}
+
+.__details-visible {
+    width: 320px;
+    border-left-color: rgba(208, 184, 224, 0.2);
+}

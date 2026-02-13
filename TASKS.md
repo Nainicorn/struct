@@ -1,3 +1,5 @@
+the most helpful thing right now is looking at the tunnel_structure_only_example01 file it rendered a perfect 3d model, but my pipeline was only able to generate whats in output.ifc which isnt much and its based on some half-assed data, so is there any way you can give me a detailed pdf file or txt file that has enough details to replicate the detail that tunnel_structure_only_example01 has? because eventually my lambda functions will have to take in multiple files and create a nice render so could you create files that i can submit into frontend that will generate a proper ifc file?
+
 {
   "userId": "user-1",
   "renderId": "ace6e6a1-9f3c-4f99-be19-13128e12ffeb",

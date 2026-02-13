@@ -1,0 +1,230 @@
+.__details {
+    display: flex;
+    flex-direction: column;
+    background: rgba(20, 12, 40, 0.95);
+    border-left: 1px solid rgba(208, 184, 224, 0.2);
+    overflow-y: auto;
+}
+
+.__details-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px;
+    border-bottom: 1px solid rgba(208, 184, 224, 0.2);
+    flex-shrink: 0;
+}
+
+.__details-title {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #e0d9f0;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.__details-collapse {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #7d6fa3;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.__details-collapse:hover {
+    background-color: rgba(180, 167, 214, 0.1);
+    color: #a89bc7;
+}
+
+.__details-collapse svg {
+    width: 18px;
+    height: 18px;
+}
+
+.__details-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.__details-description {
+    margin: 0;
+    font-size: 0.9rem;
+    color: #c9bfe0;
+    line-height: 1.5;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.__details-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.__details-section-title {
+    margin: 0;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #a89bc7;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.__details-files {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.__details-file-item-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 12px;
+    background: rgba(180, 167, 214, 0.08);
+    border: 1px solid rgba(180, 167, 214, 0.2);
+    border-radius: 8px;
+    cursor: default;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.__details-file-item-box:hover {
+    background: rgba(180, 167, 214, 0.15);
+    border-color: rgba(180, 167, 214, 0.4);
+}
+
+.__details-file-item-box-name {
+    font-size: 0.75rem;
+    color: #c9bfe0;
+    text-align: center;
+    word-break: break-word;
+    line-height: 1.2;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.__details-file-item-box-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    font-size: 0.65rem;
+    background: rgba(125, 111, 163, 0.8);
+    color: #fff;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-weight: 600;
+}
+
+.__details-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: auto;
+    flex-shrink: 0;
+}
+
+.__details-download,
+.__details-delete {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.__details-download {
+    background: rgba(125, 111, 163, 0.3);
+    color: #e0d9f0;
+    border: 1px solid rgba(180, 167, 214, 0.3);
+}
+
+.__details-download:hover {
+    background: rgba(125, 111, 163, 0.5);
+    border-color: rgba(180, 167, 214, 0.6);
+    color: #fff;
+}
+
+.__details-download:active {
+    transform: scale(0.98);
+}
+
+.__details-download svg {
+    width: 16px;
+    height: 16px;
+}
+
+.__details-delete {
+    background: rgba(220, 100, 100, 0.2);
+    color: #ff9999;
+    border: 1px solid rgba(220, 100, 100, 0.4);
+}
+
+.__details-delete:hover {
+    background: rgba(220, 100, 100, 0.4);
+    border-color: rgba(220, 100, 100, 0.8);
+    color: #ffcccc;
+}
+
+.__details-delete:active {
+    transform: scale(0.98);
+}
+
+.__details-delete svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Scrollbar styling */
+.__details-body::-webkit-scrollbar,
+.__details-files::-webkit-scrollbar,
+.__details-description::-webkit-scrollbar {
+    width: 6px;
+}
+
+.__details-body::-webkit-scrollbar-track,
+.__details-files::-webkit-scrollbar-track,
+.__details-description::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.__details-body::-webkit-scrollbar-thumb,
+.__details-files::-webkit-scrollbar-thumb,
+.__details-description::-webkit-scrollbar-thumb {
+    background: rgba(180, 167, 214, 0.3);
+    border-radius: 3px;
+}
+
+.__details-body::-webkit-scrollbar-thumb:hover,
+.__details-files::-webkit-scrollbar-thumb:hover,
+.__details-description::-webkit-scrollbar-thumb:hover {
+    background: rgba(180, 167, 214, 0.5);
+}
+
