@@ -23,23 +23,15 @@ A full-stack application for converting text descriptions + files into 3D IFC fi
 
 ## ⚡ QUICK STATUS (Update this section regularly)
 
-**✅ COMPLETED**:
-- File upload to S3 (builting-data bucket) with description.txt
-- Frontend file staging UI with horizontal scroll
-- User authentication & DynamoDB tables (builting-users, builting-renders)
-- Renders CRUD endpoints (GET /api/renders, GET /api/renders/{renderId}, DELETE /api/renders/{renderId})
-- Frontend polling with exponential backoff (2s→5s→10s, 10min timeout)
-- rendersService.js and uploadService.js with description support
-- Renderbox loading UI with spinner and status messages
-- All 4 Lambda functions with correct DynamoDB key schema (user_id, render_id)
-- **[2026-02-13] Complete Frontend CRUD Implementation**:
-  - ✅ Details sidebar component (right panel) showing render metadata, files, download & delete buttons
-  - ✅ Sidebar thumbnail grid (left panel) with 2-column layout showing all user renders
-  - ✅ Status badges (pending=gray, processing=blue, completed=green, failed=red)
-  - ✅ Event-based communication system (renderSelected, rendersUpdated, newRenderRequested)
-  - ✅ Backend delete with complete S3 cleanup (source files + IFC + DynamoDB record)
-  - ✅ Layout restructuring (3-column: sidebar | renderbox | details) with smooth animations
-  - ✅ builting-main.zip created (4.5MB) with S3 cleanup code ready to deploy
+**Color Theme Update (2026-02-13)**:
+- Changed sidebar background from light gradient (#f0e6f8/#e8d9f0) to dark #211747 with complementary gradient (#1a0f3a)
+- Updated all accent colors to match dark theme:
+  - Primary accent: rgba(100, 80, 150) - darker purple for borders/highlights
+  - Secondary accent: rgba(150, 130, 200) - lighter purple for hover/active states
+- Changed header-left background to match sidebar (#211747 gradient)
+- All text in sidebar and header-left changed to white (#ffffff)
+- Applied color updates to: left sidebar, header-left, details sidebar, all components
+- Files updated: layout.css, sidebar.css, details.css, header.css
 
 **🚧 IN PROGRESS**:
 - Bedrock AI title/description generation in builting-bedrock-ifc Lambda

@@ -1,11 +1,23 @@
 {{#if main}}
 <div class="__renderbox-container">
+    <!-- Render Title (shown above viewer when viewing render) -->
+    <div class="__renderbox-title-bar">
+        <h2 class="__renderbox-title"></h2>
+    </div>
+
     <!-- IFC Viewer (hidden until render selected) -->
     <div class="__renderbox-viewer">
+        <div class="__renderbox-grid-overlay"></div>
         <div class="__renderbox-loading" style="display: none;">
             <div class="__renderbox-loading-spinner"></div>
             <span class="__renderbox-loading-text">Loading IFC model...</span>
         </div>
+        <button class="__renderbox-viewer-load-tunnel" title="Load tunnel (testing)">🧪</button>
+        <button class="__renderbox-viewer-download" title="Download IFC file">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+            </svg>
+        </button>
     </div>
 
     <!-- Main Content Area: Message + Chat -->
@@ -13,22 +25,6 @@
         <!-- Welcome Message -->
         <div class="__renderbox-message">
             <p class="__renderbox-message-welcome">Welcome, <span class="__renderbox-user-name"></span></p>
-        </div>
-
-        <!-- Render Metadata (shown when viewing render) -->
-        <div class="__renderbox-metadata">
-            <div class="__renderbox-metadata-header">
-                <div>
-                    <h3 class="__renderbox-metadata-title"></h3>
-                    <p class="__renderbox-metadata-description"></p>
-                </div>
-                <div class="__renderbox-metadata-actions">
-                </div>
-            </div>
-            <div class="__renderbox-metadata-files">
-                <h4>Source Files</h4>
-                <div class="__renderbox-metadata-file-list"></div>
-            </div>
         </div>
     </div>
 

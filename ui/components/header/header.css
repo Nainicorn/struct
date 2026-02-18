@@ -1,15 +1,13 @@
 .__header {
-    background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
-    padding: 16px 0;
     display: flex;
+    height: auto;
 }
 
 .__header-container {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
     flex: 1;
+    height: 100%;
+    align-items: stretch;
 }
 
 .__header-left {
@@ -18,14 +16,16 @@
     justify-content: space-between;
     gap: 12px;
     width: 250px;
-    padding: 0 20px;
-    transition: all 0.35s cubic-bezier(0.4, 0.0, 0.2, 1);
+    padding: 16px 20px;
+    transition: all 0.2s ease-out;
     flex-shrink: 0;
+    background: #1a0f3a;
+    border-right: 1px solid rgba(70, 50, 120, 0.5);
 }
 
 body[data-collapsed="true"] .__header-left {
     width: 50px;
-    padding: 0;
+    padding: 16px 8px;
     justify-content: center;
 }
 
@@ -44,16 +44,15 @@ body[data-collapsed="true"] .__header-toggle {
     align-items: center;
     justify-content: center;
     transition: all 0.2s ease;
-    color: #b4a7d6;
+    color: #ffffff;
     flex-shrink: 0;
     margin-left: auto;
-    margin-right: -20px;
     min-width: 44px;
     min-height: 44px;
 }
 
 .__header-toggle:hover {
-    background-color: rgba(180, 167, 214, 0.1);
+    background-color: rgba(150, 130, 200, 0.2);
 }
 
 .__header-toggle:active {
@@ -73,7 +72,7 @@ body[data-collapsed="true"] .__header-toggle {
     font-size: 0.875rem;
     font-weight: 600;
     letter-spacing: 0.05em;
-    color: #b4a7d6;
+    color: #ffffff;
     white-space: nowrap;
     transition: opacity 0.35s cubic-bezier(0.4, 0.0, 0.2, 1);
 }
@@ -88,6 +87,14 @@ body[data-collapsed="true"] .__header-logo-text {
     justify-content: center;
     align-items: center;
     padding: 0 20px;
+    background: rgba(0, 0, 0, 0.1);
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #e8d9f0;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .__header-welcome {
@@ -107,28 +114,30 @@ body[data-collapsed="true"] .__header-logo-text {
     align-items: center;
     gap: 8px;
     padding: 0 20px;
+    background: rgba(0, 0, 0, 0.1);
+    flex-shrink: 0;
 }
 
 .__header-logout {
     display: flex;
     align-items: center;
     gap: 8px;
-    background: linear-gradient(135deg, #e8d9f0 0%, #f0e6f8 100%);
+    background: #ffffff;
     border: none;
     cursor: pointer;
     padding: 10px 16px;
     border-radius: 8px;
-    color: #7d6fa3;
+    color: #211747;
     font-weight: 500;
     font-size: 0.875rem;
     transition: all 0.2s ease;
-    box-shadow: 0 2px 8px rgba(180, 167, 214, 0.2);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     white-space: nowrap;
 }
 
 .__header-logout:hover {
-    background: linear-gradient(135deg, #f0e6f8 0%, #f8eff6 100%);
-    box-shadow: 0 4px 12px rgba(180, 167, 214, 0.3);
+    background: #f5f5f5;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     transform: translateY(-2px);
 }
 

@@ -54,6 +54,21 @@ const renderbox = {
     // Bind event listeners
     _bindListeners() {
         this._bindEvents();
+        this._preventPageZoom();
+    },
+
+    /**
+     * Prevent page zoom when scrolling over the IFC viewer
+     */
+    _preventPageZoom() {
+        const viewer = this.element.querySelector('.__renderbox-viewer');
+        if (viewer) {
+            viewer.addEventListener('wheel', (e) => {
+                if (e.ctrlKey || e.metaKey) {
+                    e.preventDefault();
+                }
+            }, { passive: false });
+        }
     },
 
     /**
@@ -67,24 +82,21 @@ const renderbox = {
     },
 
     /**
+     * Update the input placeholder text
+     */
+    _updateInputPlaceholder(text) {
+        const inputEl = this.element.querySelector('.__renderbox-description');
+        if (inputEl) {
+            inputEl.setAttribute('placeholder', text);
+        }
+    },
+
+    /**
      * Display render metadata (title, description, source files)
      */
     _displayMetadata(render) {
-        const titleEl = this.element.querySelector('.__renderbox-metadata-title');
-        const descEl = this.element.querySelector('.__renderbox-metadata-description');
-        const fileListEl = this.element.querySelector('.__renderbox-metadata-file-list');
-
-        if (titleEl) {
-            titleEl.textContent = render.ai_generated_title || render.title || 'Untitled Render';
-        }
-        if (descEl) {
-            descEl.textContent = render.ai_generated_description || render.description || 'No description provided';
-        }
-        if (fileListEl && render.source_files && Array.isArray(render.source_files)) {
-            fileListEl.innerHTML = render.source_files.map(fileName =>
-                `<div class="__renderbox-metadata-file-item">${fileName}</div>`
-            ).join('');
-        }
+        // Title and description are now displayed in the details card
+        // No longer needed in renderbox
     },
 
     /**
@@ -154,11 +166,17 @@ const renderbox = {
     },
 
     /**
-     * Load sample IFC file (removed - no more default hardcoded IFC)
+     * Load sample IFC file for testing
      */
     async _loadSampleIFC() {
-        // Default IFC loading removed. IFC files are now loaded from S3 on user request.
-        console.log('Initial state: waiting for render selection');
+        try {
+            console.log('Loading tunnel IFC for testing...');
+            await ifcViewer.loadIFC('/tunnel.ifc');
+            console.log('Tunnel IFC loaded successfully');
+        } catch (error) {
+            console.warn('Failed to load sample IFC:', error);
+            console.log('Initial state: waiting for render selection');
+        }
     },
 
     /**
@@ -170,6 +188,13 @@ const renderbox = {
         this.element.dataset.state = 'new-render';
         delete this.element.dataset.renderId;
         this._updateMessage('What do you want to render today?');
+        this._updateInputPlaceholder('What do you want to render today?');
+        // Clear input content so placeholder reappears
+        const descriptionInput = this.element.querySelector('.__renderbox-description');
+        if (descriptionInput) {
+            descriptionInput.textContent = '';
+            descriptionInput.classList.add('is-empty');
+        }
         ifcViewer.clear();
     },
 
@@ -195,6 +220,13 @@ const renderbox = {
                 this.element.dataset.state = 'viewing-render';
                 this.element.dataset.renderId = renderId;
                 this._updateMessage('Edit render?');
+                this._updateInputPlaceholder('What edits would you like to make?');
+                // Clear input content so placeholder reappears
+                const descriptionInput = this.element.querySelector('.__renderbox-description');
+                if (descriptionInput) {
+                    descriptionInput.textContent = '';
+                    descriptionInput.classList.add('is-empty');
+                }
                 this._displayMetadata(render);
 
                 // Notify details sidebar with full render object
@@ -346,6 +378,7 @@ const renderbox = {
             this._updateFilePreview();
             if (descriptionInput) {
                 descriptionInput.textContent = '';
+                descriptionInput.classList.add('is-empty');
             }
 
             // Start polling for render status
@@ -407,9 +440,41 @@ const renderbox = {
                     await this._handleStartRender();
                 }
             });
+
+            // Monitor input content to show/hide placeholder
+            const updateEmptyState = () => {
+                const isEmpty = descriptionInput.textContent.trim() === '';
+                if (isEmpty) {
+                    descriptionInput.classList.add('is-empty');
+                } else {
+                    descriptionInput.classList.remove('is-empty');
+                }
+            };
+
+            descriptionInput.addEventListener('input', updateEmptyState);
+            descriptionInput.addEventListener('blur', updateEmptyState);
+            descriptionInput.addEventListener('focus', updateEmptyState);
+
+            // Set initial state
+            updateEmptyState();
         }
 
-        // Delete and download buttons are now handled in the details sidebar
+        // Download button inside viewer
+        const downloadBtn = this.element.querySelector('.__renderbox-viewer-download');
+        if (downloadBtn) {
+            downloadBtn.addEventListener('click', async () => {
+                await this._handleDownload();
+            });
+        }
+
+        // Load tunnel button (testing)
+        const loadTunnelBtn = this.element.querySelector('.__renderbox-viewer-load-tunnel');
+        if (loadTunnelBtn) {
+            loadTunnelBtn.addEventListener('click', async () => {
+                console.log('Loading tunnel for testing...');
+                await ifcViewer.loadIFC('/tunnel.ifc');
+            });
+        }
     },
 
 
@@ -526,6 +591,31 @@ const renderbox = {
     },
 
     /**
+     * Handle download IFC file
+     */
+    async _handleDownload() {
+        if (!this.element.dataset.renderId) return;
+
+        try {
+            const renderId = this.element.dataset.renderId;
+            const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
+
+            // Create temporary link and trigger download
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = `render-${renderId}.ifc`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            console.log('Download started');
+        } catch (error) {
+            console.error('Error downloading render:', error);
+            this._showError('Failed to download render: ' + error.message);
+        }
+    },
+
+    /**
      * Handle render completion
      */
     async _handleRenderCompleted(render) {
@@ -542,6 +632,7 @@ const renderbox = {
             // Update UI state to viewing-render
             this.element.dataset.state = 'viewing-render';
             this.element.dataset.renderId = render.render_id;
+            this._updateInputPlaceholder('What edits would you like to make?');
             this._displayMetadata(render);
 
             // Notify details sidebar with full render object

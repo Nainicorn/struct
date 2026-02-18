@@ -57,6 +57,25 @@ const header = {
         });
     },
 
+    // Set title in header center
+    setTitle(title) {
+        const $center = this.element.querySelector('.__header-center');
+        if ($center) {
+            if (title) {
+                $center.textContent = title;
+                $center.style.display = 'block';
+            } else {
+                $center.textContent = '';
+                $center.style.display = 'none';
+            }
+        }
+    },
+
+    // Clear title from header center
+    clearTitle() {
+        this.setTitle('');
+    },
+
     _handleToggle() {
         const $body = document.body;
         const isCollapsed = $body.getAttribute('data-collapsed') === 'true';

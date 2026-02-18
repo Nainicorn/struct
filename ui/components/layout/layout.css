@@ -15,7 +15,6 @@ body {
 .__header {
     flex-shrink: 0;
     height: auto;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .__layout {
@@ -26,13 +25,13 @@ body {
 
 .__sidebar {
     width: 250px;
-    background: linear-gradient(135deg, #f0e6f8 0%, #e8d9f0 100%);
-    border-right: 1px solid rgba(208, 184, 224, 0.5);
+    background: #1a0f3a;
+    border-right: 1px solid rgba(70, 50, 120, 0.5);
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    transition: width 0.35s cubic-bezier(0.4, 0.0, 0.2, 1);
-    box-shadow: -1px 0 2px rgba(0, 0, 0, 0.04);
+    transition: width 0.2s ease-out;
+    box-shadow: -1px 0 2px rgba(0, 0, 0, 0.3);
 }
 
 body[data-collapsed="true"] .__sidebar {
@@ -41,7 +40,7 @@ body[data-collapsed="true"] .__sidebar {
 
 .__renderbox {
     flex: 1;
-    background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+    background: rgba(0, 0, 0, 0.1);
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -50,15 +49,19 @@ body[data-collapsed="true"] .__sidebar {
 
 .__details {
     width: 0;
+    height: 100%;
     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
     border-left: 1px solid transparent;
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    padding: 20px;
     transition: width 0.35s cubic-bezier(0.4, 0.0, 0.2, 1), border-color 0.35s cubic-bezier(0.4, 0.0, 0.2, 1);
 }
 
 .__details-visible {
     width: 320px;
-    border-left-color: rgba(208, 184, 224, 0.2);
+    border-left-color: rgba(100, 80, 150, 0.3);
 }

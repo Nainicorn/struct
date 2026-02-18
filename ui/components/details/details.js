@@ -31,20 +31,6 @@ const details = {
             this.hide();
         });
 
-        // Close button
-        const closeBtn = this.element.querySelector('.__details-collapse');
-        if (closeBtn) {
-            closeBtn.addEventListener('click', () => this.hide());
-        }
-
-        // Download button
-        const downloadBtn = this.element.querySelector('.__details-download');
-        if (downloadBtn) {
-            downloadBtn.addEventListener('click', async () => {
-                await this._handleDownload();
-            });
-        }
-
         // Delete button
         const deleteBtn = this.element.querySelector('.__details-delete');
         if (deleteBtn) {
@@ -63,16 +49,10 @@ const details = {
         this.currentRender = render;
 
         // Display title
-        const titleEl = this.element.querySelector('.__details-title');
-        if (titleEl) {
-            titleEl.textContent = render.ai_generated_title || render.title || 'Untitled Render';
-        }
+        this._displayTitle(render);
 
         // Display description
-        const descEl = this.element.querySelector('.__details-description');
-        if (descEl) {
-            descEl.textContent = render.ai_generated_description || render.description || 'No description provided';
-        }
+        this._displayDescription(render);
 
         // Display files
         if (render.source_files && Array.isArray(render.source_files)) {
@@ -89,6 +69,26 @@ const details = {
     hide() {
         this.element.classList.remove('__details-visible');
         this.currentRender = null;
+    },
+
+    /**
+     * Display render title
+     */
+    _displayTitle(render) {
+        const titleEl = this.element.querySelector('.__details-title');
+        if (titleEl) {
+            titleEl.textContent = render.ai_generated_title || render.title || 'Untitled Render';
+        }
+    },
+
+    /**
+     * Display render description
+     */
+    _displayDescription(render) {
+        const descEl = this.element.querySelector('.__details-description');
+        if (descEl) {
+            descEl.textContent = render.ai_generated_description || render.description || 'No description available';
+        }
     },
 
     /**
@@ -115,31 +115,6 @@ const details = {
     _getFileExtension(filename) {
         const ext = filename.split('.').pop().toUpperCase();
         return ext.length > 5 ? ext.substring(0, 5) : ext;
-    },
-
-    /**
-     * Handle download IFC file
-     */
-    async _handleDownload() {
-        if (!this.currentRender) return;
-
-        try {
-            const renderId = this.currentRender.render_id;
-            const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
-
-            // Create temporary link and trigger download
-            const link = document.createElement('a');
-            link.href = downloadUrl;
-            link.download = `render-${renderId}.ifc`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-            console.log('Download started');
-        } catch (error) {
-            console.error('Error downloading render:', error);
-            alert(`Failed to download render: ${error.message}`);
-        }
     },
 
     /**
