@@ -13,6 +13,7 @@ const renderbox = {
     pollingInterval: null,
     currentRenderId: null,
     pollingStartTime: null,
+    currentBlobUrl: null, // Track blob URL to prevent premature garbage collection
 
     // Initialize the renderbox component
     async init() {
@@ -136,18 +137,37 @@ const renderbox = {
     },
 
     /**
-     * Load IFC file from S3 (called when user selects a completed render)
-     * @param {string} s3Url - Pre-signed S3 URL to IFC file
+     * Load IFC file from base64 data (called when user selects a completed render)
+     * @param {string} base64Data - Base64 encoded IFC file data
      */
-    async loadIFCFromS3(s3Url) {
+    async loadIFCFromBase64(base64Data) {
         try {
             const loadingIndicator = this.element.querySelector('.__renderbox-loading');
             if (loadingIndicator) {
                 loadingIndicator.style.display = 'flex';
             }
 
-            console.log('Loading IFC from S3:', s3Url);
-            await ifcViewer.loadIFC(s3Url);
+            console.log('Loading IFC from base64 data...');
+
+            // Clean up previous blob URL if exists
+            if (this.currentBlobUrl) {
+                URL.revokeObjectURL(this.currentBlobUrl);
+            }
+
+            // Convert base64 to blob
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            const blob = new Blob([bytes], { type: 'application/octet-stream' });
+
+            // Create blob URL and keep reference to prevent garbage collection
+            this.currentBlobUrl = URL.createObjectURL(blob);
+            console.log('Created blob URL for IFC file:', this.currentBlobUrl);
+
+            // Load via blob URL
+            await ifcViewer.loadIFC(this.currentBlobUrl);
 
             if (loadingIndicator) {
                 loadingIndicator.style.display = 'none';
@@ -156,12 +176,14 @@ const renderbox = {
             console.log('IFC file loaded successfully');
         } catch (error) {
             console.error('Failed to load IFC file:', error);
-            this._showError('Failed to load IFC file: ' + error.message);
 
             const loadingIndicator = this.element.querySelector('.__renderbox-loading');
             if (loadingIndicator) {
                 loadingIndicator.style.display = 'none';
             }
+
+            // Re-throw error to let caller handle it
+            throw error;
         }
     },
 
@@ -185,6 +207,7 @@ const renderbox = {
     _handleNewRender() {
         console.log('New render requested');
         this._stopPolling();
+        this._hideLoadingState();
         this.element.dataset.state = 'new-render';
         delete this.element.dataset.renderId;
         this._updateMessage('What do you want to render today?');
@@ -194,6 +217,11 @@ const renderbox = {
         if (descriptionInput) {
             descriptionInput.textContent = '';
             descriptionInput.classList.add('is-empty');
+        }
+        // Show welcome message again
+        const messageEl = this.element.querySelector('.__renderbox-message');
+        if (messageEl) {
+            messageEl.style.display = 'block';
         }
         ifcViewer.clear();
     },
@@ -213,9 +241,9 @@ const renderbox = {
             }
 
             if (render.status === 'completed') {
-                // Load IFC from S3
-                const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
-                await this.loadIFCFromS3(downloadUrl);
+                // Load IFC from backend
+                const { fileData } = await rendersService.getDownloadUrl(renderId);
+                await this.loadIFCFromBase64(fileData);
 
                 this.element.dataset.state = 'viewing-render';
                 this.element.dataset.renderId = renderId;
@@ -355,6 +383,16 @@ const renderbox = {
             const descriptionInput = this.element.querySelector('.__renderbox-description');
             const description = descriptionInput?.textContent.trim() || '';
 
+            // Hide welcome message and file staging before showing loading
+            const messageEl = this.element.querySelector('.__renderbox-message');
+            if (messageEl) {
+                messageEl.style.display = 'none';
+            }
+            const stagingSection = this.element.querySelector('.__renderbox-file-staging');
+            if (stagingSection) {
+                stagingSection.style.display = 'none';
+            }
+
             // Show loading state
             this._showLoadingState('Uploading files...');
 
@@ -375,7 +413,6 @@ const renderbox = {
 
             // Clear UI
             this.stagedFiles = [];
-            this._updateFilePreview();
             if (descriptionInput) {
                 descriptionInput.textContent = '';
                 descriptionInput.classList.add('is-empty');
@@ -387,6 +424,16 @@ const renderbox = {
         } catch (error) {
             console.error('Upload failed:', error);
             this._hideLoadingState();
+            // Show message again on error
+            const messageEl = this.element.querySelector('.__renderbox-message');
+            if (messageEl) {
+                messageEl.style.display = 'block';
+            }
+            // Show file staging again on error
+            const stagingSection = this.element.querySelector('.__renderbox-file-staging');
+            if (stagingSection && this.stagedFiles.length > 0) {
+                stagingSection.style.display = 'block';
+            }
             this._showError(`Failed to upload: ${error.message}`);
         }
     },
@@ -553,7 +600,7 @@ const renderbox = {
             // Update loading message with elapsed time
             this._updateLoadingMessage(`Processing your render... (${minutes}m elapsed)`);
 
-            // Exponential backoff polling: 2s → 5s → 10s
+            // Exponential backoff polling: 2s → 5s → 10s → 15s
             let delay;
             if (elapsed < 30000) {
                 delay = 2000;  // 2s for first 30s
@@ -561,8 +608,10 @@ const renderbox = {
                 delay = 5000;  // 5s for next 2 minutes
             } else if (elapsed < 600000) {
                 delay = 10000; // 10s for up to 10 minutes
+            } else if (elapsed < 1800000) {
+                delay = 15000; // 15s for up to 30 minutes
             } else {
-                // Timeout after 10 minutes
+                // Timeout after 30 minutes
                 this._stopPolling();
                 this._hideLoadingState();
                 this._showError('Render is taking longer than expected. Check the sidebar for updates.');
@@ -623,13 +672,7 @@ const renderbox = {
         this._hideLoadingState();
 
         try {
-            // Get download URL for IFC file
-            const { downloadUrl } = await rendersService.getDownloadUrl(render.render_id);
-
-            // Load IFC in viewer
-            await this.loadIFCFromS3(downloadUrl);
-
-            // Update UI state to viewing-render
+            // Update UI state FIRST so viewer is visible
             this.element.dataset.state = 'viewing-render';
             this.element.dataset.renderId = render.render_id;
             this._updateInputPlaceholder('What edits would you like to make?');
@@ -643,10 +686,20 @@ const renderbox = {
             // Notify sidebar to refresh renders list
             document.dispatchEvent(new CustomEvent('rendersUpdated'));
 
-            console.log('Render completed:', render.render_id);
+            // Get IFC file data from backend
+            const { fileData } = await rendersService.getDownloadUrl(render.render_id);
+
+            // Load IFC in viewer (async, but UI is already showing)
+            try {
+                await this.loadIFCFromBase64(fileData);
+                console.log('Render completed and IFC loaded:', render.render_id);
+            } catch (ifcError) {
+                console.error('IFC loading error:', ifcError);
+                this._showError('Failed to load 3D model: ' + ifcError.message);
+            }
         } catch (error) {
-            console.error('Error loading completed render:', error);
-            this._showError('Failed to load rendered IFC: ' + error.message);
+            console.error('Error completing render:', error);
+            this._showError('Failed to complete render: ' + error.message);
         }
     }
 };

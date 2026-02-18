@@ -23,33 +23,51 @@ A full-stack application for converting text descriptions + files into 3D IFC fi
 
 ## ⚡ QUICK STATUS (Update this section regularly)
 
-**Color Theme Update (2026-02-13)**:
-- Changed sidebar background from light gradient (#f0e6f8/#e8d9f0) to dark #211747 with complementary gradient (#1a0f3a)
-- Updated all accent colors to match dark theme:
-  - Primary accent: rgba(100, 80, 150) - darker purple for borders/highlights
-  - Secondary accent: rgba(150, 130, 200) - lighter purple for hover/active states
-- Changed header-left background to match sidebar (#211747 gradient)
-- All text in sidebar and header-left changed to white (#ffffff)
-- Applied color updates to: left sidebar, header-left, details sidebar, all components
-- Files updated: layout.css, sidebar.css, details.css, header.css
+**Full Pipeline Deployment (2026-02-17)** ✅ COMPLETE:
+- ✅ builting-main Lambda deployed (auth, renders, upload, S3 cleanup on delete)
+- ✅ builting-bedrock-ifc Lambda deployed (generates IFC from Bedrock)
+- ✅ builting-store-ifc Lambda deployed (stores IFC to S3, updates DynamoDB)
+- ✅ builting-read-metadata Lambda deployed
+- ✅ builting-orchestrator-trigger Lambda deployed
+- ✅ Step Function (builting-render-state-machine) deployed
+- ✅ SNS topic (builting-render-triggers) configured
+- ✅ S3 event notifications configured → SNS → Lambda
+- ✅ Frontend CRUD system implemented (sidebar, renderbox, details)
+- ✅ CORS configured in API Gateway
+- ✅ DynamoDB schema finalized (user_id, render_id with ifc_s3_path)
 
-**🚧 IN PROGRESS**:
-- Bedrock AI title/description generation in builting-bedrock-ifc Lambda
-- Lambda function testing and Step Function orchestration
-- Deploy builting-main.zip to AWS Lambda with S3 cleanup code
+**🐛 BUG FIX (2026-02-17)**: StoreIFC Buffer Encoding
+- **Problem**: IFC content not loading in viewer - blob URL fetch failing
+- **Root Cause**: StoreIFC storing ifcContent as string directly to S3 without proper Buffer encoding
+- **Solution**: Convert string to UTF-8 Buffer before S3 upload
+  - File: `backend/builting-store-ifc/index.mjs` (line 20-24)
+  - Changed: `Body: ifcContent` → `Body: Buffer.from(ifcContent, 'utf-8')`
+- **Status**: Fixed in code, requires redeployment to AWS
 
 **📋 REMAINING WORK**:
-- Deploy builting-main.zip to AWS Lambda (with S3 cleanup for deletes)
-- Implement Bedrock AI title/description generation in builting-bedrock-ifc/index.mjs
-- Configure S3 event notifications to SNS
-- Deploy Step Function orchestration
-- Test complete end-to-end pipeline (create → process → display → delete)
+- Redeploy builting-store-ifc.zip to AWS Lambda
+- Test complete end-to-end pipeline (create → process → display) after fix
 - Error handling & retry logic improvements
 - Reach goals (human-in-the-loop, edit renders, real-time updates, IFC previews)
 
 ---
 
 ## 🐛 Recent Fixes
+
+### IFC File Buffer Encoding (2026-02-17)
+**Problem**: IFC file not loading in viewer after render completion - browser console shows `blob:http://localhost:5001/... net::ERR_FILE_NOT_FOUND` and xeokit `getXKT error: null`
+
+**Root Cause**: `builting-store-ifc` Lambda storing IFC content as plain string to S3 without proper UTF-8 buffer encoding, causing retrieval issues
+
+**Solution**: Convert string to Buffer before S3 upload:
+```javascript
+// Before: Body: ifcContent (raw string)
+// After: Body: Buffer.from(ifcContent, 'utf-8')
+```
+
+**Updated File**: `backend/builting-store-ifc/index.mjs` (line 20-24)
+
+**Status**: ✅ Code fixed, requires redeployment to AWS Lambda
 
 ### Bedrock Model Error (2026-02-12)
 **Problem**: `ValidationException: Invocation of model ID anthropic.claude-3-5-sonnet-20241022-v2:0 with on-demand throughput isn't supported`

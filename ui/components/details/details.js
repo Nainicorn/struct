@@ -132,8 +132,8 @@ const details = {
 
             await rendersService.deleteRender(renderId);
 
-            // Hide details panel
-            this.hide();
+            // Redirect to welcome screen (same as new render)
+            document.dispatchEvent(new CustomEvent('newRenderRequested'));
 
             // Refresh renders list in sidebar
             document.dispatchEvent(new CustomEvent('rendersUpdated'));

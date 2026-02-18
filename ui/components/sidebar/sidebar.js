@@ -83,8 +83,11 @@ const sidebar = {
         const rendersContainer = this.element.querySelector('.__sidebar-renders');
         if (!rendersContainer) return;
 
+        // Filter out failed renders - only show successful ones
+        const successfulRenders = renders.filter(r => r.status !== 'failed');
+
         // Sort renders by created_at (newest first)
-        const sorted = renders.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+        const sorted = successfulRenders.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
         rendersContainer.innerHTML = sorted.map(render => {
             const title = render.ai_generated_title || render.title || 'Untitled Render';

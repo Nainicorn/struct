@@ -110,10 +110,18 @@ const renders = {
       return { error: `Render is ${render.status}, not ready for download`, statusCode: 400 };
     }
 
+    // Fetch file from S3 and return as base64
     const key = `${render.ifc_s3_path.replace('s3://builting-ifc/', '')}`;
-    const downloadUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: 'builting-ifc', Key: key }), { expiresIn: 3600 });
+    const response = await s3.send(new GetObjectCommand({ Bucket: 'builting-ifc', Key: key }));
 
-    return { downloadUrl, render };
+    const buffer = await response.Body.transformToByteArray();
+    const base64 = Buffer.from(buffer).toString('base64');
+
+    return {
+      fileData: base64,
+      fileName: `render-${renderId}.ifc`,
+      render
+    };
   },
 
   deleteRender: async (userId, renderId) => {

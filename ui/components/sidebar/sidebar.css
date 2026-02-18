@@ -16,11 +16,11 @@ body[data-collapsed="true"] .__sidebar-controls {
 .__sidebar-renders {
     flex: 1;
     overflow-y: auto;
-    padding: 16px;
+    padding: 0;
     transition: all 0.2s ease-out;
     display: grid;
     grid-template-columns: 1fr;
-    gap: 16px;
+    gap: 0;
     align-content: start;
 }
 
@@ -56,6 +56,7 @@ body[data-collapsed="true"] .__sidebar-renders {
     overflow: hidden;
     background: rgba(100, 80, 150, 0.15);
     border: 1px solid rgba(100, 80, 150, 0.3);
+    margin: 8px 16px 16px 16px;
 }
 
 .__render-item:hover {

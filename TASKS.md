@@ -2,9 +2,11 @@ the most helpful thing right now is looking at the tunnel_structure_only_example
 
 {
   "userId": "user-1",
-  "renderId": "ace6e6a1-9f3c-4f99-be19-13128e12ffeb",
+  "renderId": "f1050aa1-bca6-418d-8a98-3cbde2f1dd71",
   "bucket": "builting-data"
 }
+
+for the renderbox-uploading element i dont want the grey background color it should just be the loading state and the "processing render" text and it should also appear a little higher like middle of the renderbox not bottom.
 
 
 **TASK 9 - set up remaining AWS infrastructure**

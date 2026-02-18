@@ -17,11 +17,13 @@ export const handler = async (event) => {
     console.log(`Storing IFC to s3://builting-ifc/${s3Key}`);
 
     // Upload IFC file to builting-ifc bucket
+    // Convert string content to Buffer for proper binary storage
+    const ifcBuffer = Buffer.from(ifcContent, 'utf-8');
     await s3.send(
       new PutObjectCommand({
         Bucket: 'builting-ifc',
         Key: s3Key,
-        Body: ifcContent,
+        Body: ifcBuffer,
         ContentType: 'application/octet-stream'
       })
     );
