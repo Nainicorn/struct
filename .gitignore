@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Deployment artifacts
+*.zip
+*.layer
+builting-json-to-ifc-layer/
+builting-json-to-ifc-layer-enhanced/
+slim-python/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
