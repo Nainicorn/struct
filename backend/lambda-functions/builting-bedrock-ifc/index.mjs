@@ -256,7 +256,14 @@ NO markdown, NO explanations, NO extra text - just the valid JSON conforming to 
     // Parse JSON response
     let buildingSpec;
     try {
-      buildingSpec = JSON.parse(responseText);
+      // Clean markdown code fences if present (```json ... ```)
+      let cleanText = responseText.trim();
+      const fenceMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      if (fenceMatch) {
+        cleanText = fenceMatch[1];
+        console.log('Stripped markdown code fences from JSON response');
+      }
+      buildingSpec = JSON.parse(cleanText);
     } catch (err) {
       console.error('Failed to parse Bedrock JSON response:', err);
       console.error('Response text:', responseText.substring(0, 500));

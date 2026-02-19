@@ -230,6 +230,8 @@ const renderbox = {
 
             if (!render) {
                 this._showError('Render not found');
+                // Refresh sidebar to remove stale entry
+                document.dispatchEvent(new CustomEvent('rendersUpdated'));
                 return;
             }
 
@@ -261,7 +263,30 @@ const renderbox = {
             }
         } catch (error) {
             console.error('Error loading render:', error);
-            this._showError('Failed to load render: ' + error.message);
+            const errorMsg = error.message || 'Unknown error';
+
+            // Check if this is a parsing/corruption error from web-ifc
+            if (errorMsg.includes('unexpected token') || errorMsg.includes('GetSetArgument') || errorMsg.includes('Invalid IFC')) {
+                console.warn('Corrupted IFC detected. Attempting to delete...');
+                const shouldDelete = confirm('This render file is corrupted and cannot be loaded.\n\nWould you like to delete it?');
+
+                if (shouldDelete) {
+                    try {
+                        await rendersService.deleteRender(renderId);
+                        console.log('Corrupted render deleted');
+                        // Refresh sidebar to remove deleted entry
+                        document.dispatchEvent(new CustomEvent('rendersUpdated'));
+                        // Reset to welcome screen
+                        document.dispatchEvent(new CustomEvent('newRenderRequested'));
+                        alert('Corrupted render has been deleted.');
+                    } catch (deleteError) {
+                        console.error('Failed to delete corrupted render:', deleteError);
+                        this._showError('Failed to delete render: ' + deleteError.message);
+                    }
+                }
+            } else {
+                this._showError('Failed to load render: ' + errorMsg);
+            }
         }
     },
 
@@ -504,15 +529,6 @@ const renderbox = {
         if (downloadBtn) {
             downloadBtn.addEventListener('click', async () => {
                 await this._handleDownload();
-            });
-        }
-
-        // Load tunnel button (testing)
-        const loadTunnelBtn = this.element.querySelector('.__renderbox-viewer-load-tunnel');
-        if (loadTunnelBtn) {
-            loadTunnelBtn.addEventListener('click', async () => {
-                console.log('Loading tunnel for testing...');
-                await ifcViewer.loadIFC('/tunnel.ifc');
             });
         }
     },

@@ -71,8 +71,8 @@ const ifcViewer = {
                 // URL/path - use src parameter
                 loaderConfig.src = srcOrArrayBuffer;
             } else if (srcOrArrayBuffer instanceof ArrayBuffer) {
-                // Binary data - use IFC parameter (xeokit expects IFC for binary data)
-                loaderConfig.IFC = srcOrArrayBuffer;
+                // Binary data - use ifc parameter (xeokit expects lowercase ifc for binary data)
+                loaderConfig.ifc = srcOrArrayBuffer;
             } else {
                 throw new Error('Invalid input: must be URL string or ArrayBuffer');
             }

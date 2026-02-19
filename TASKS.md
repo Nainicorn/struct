@@ -1,11 +1,9 @@
+
 {
   "userId": "user-1",
-  "renderId": "6c290eb0-62a5-4a1c-bb8a-f3a7fa4328e1",
+  "renderId": "91a3d623-32df-4c23-b9cc-4df58bad442c",
   "bucket": "builting-data"
 }
-
-for the renderbox-uploading element i dont want the grey background color it should just be the loading state and the "processing render" text and it should also appear a little higher like middle of the renderbox not bottom.
-
 
 **TASK 9 - set up remaining AWS infrastructure**
 ASSIGNED TO: Naina (for now, will be the rest of the team after I'm done)

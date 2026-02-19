@@ -38,27 +38,27 @@ The backend folder contains the most recent code or information that is is ident
         - when the user clicks on an old render, they should be able to see details like an ai-generated title, description, all of the raw data files from "builting-data" S3 bucket, and a function to download the IFC file
         - the ifc file will be retrieved from the S3 bucket "builting-ifc"
 
-- UI Acrhitecture
+- UI Architecture
    - components
-      - renderbox: main interface where user can upload renders and later view renders and details via ifc viewer
-      - details: render details card
-      - controls: create new render button functionality
-      - header: header of the app split into parts based on functionality and design
-      - ifc-viewer
-      - layout: overall app layout that holds all components
-      - login: login page when user logs in or is logged out
-      - sidebar: where users old renders are stored and new renders are displayed after each render upload
-   - main.js -> entry point of app and decides if layout or login should be displayed based on if user logged in
+      - login: Login/signup form for user authentication
+      - layout: Main app container that initializes all child components (header, sidebar, renderbox, details)
+      - header: Top navigation bar with user name display, logout button, and sidebar toggle
+      - sidebar: Displays user's previous renders as cards and contains "new render" button via controls component
+      - controls: "New render" button that triggers the upload interface
+      - renderbox: Main workspace for file uploads, render processing display, and active render viewing
+      - details: Side panel showing selected render metadata, AI-generated title/description, source files, and download/delete actions
+      - ifc-viewer: 3D viewer component using xeokit SDK to display and interact with IFC models
+   - main.js: Entry point that routes to login or layout based on authentication status
    - framework
-      - messages.js
+      - messages.js: Message/event handling system
    - services
-      - auth
-      - aws
-      - cookies
-      - renders
-      - uploads
-      - users
-      - users store
+      - authService: Login/signup and session management (login, signup, isAuthenticated, logout)
+      - aws: HTTP wrapper for authenticated API calls to API Gateway with cookie credentials
+      - cookieService: Low-level cookie operations (set, get, delete) for session persistence
+      - rendersService: Fetch user's renders, get render details, download IFC, delete renders
+      - uploadService: Request presigned S3 URLs and upload files/descriptions directly to S3
+      - usersService: Fetch current user data and user info from backend
+      - userStore: Client-side state manager for current user (session in memory + localStorage backup)
 
 - Backend Architecture
     - dynamoDB builting-renders table holds each users renders
@@ -68,13 +68,15 @@ The backend folder contains the most recent code or information that is is ident
       - id (String), created_at, email, name, password
       - for testing -> id: user-1, email: nkoujala@gmail.com, name: Sreenaina, password: Bujji1125$
 
-    - lambda functions
-      - builting-main
-      - builting-orchestrator-trigger
-      - builting-bedrock-ifc
-      - builting-read-metadata
-      - builting-store-ifc
-      - builting-json-to-ifc
+    - lambda functions (in execution order)
+      * all lambda functions use builting-execution role
+      * builting-orchestrator-trigger has ENV variable state-machine ARN
+      - builting-main (node.js20 and arm64): API gateway router for auth, user data, renders, and presigned upload URLs (entry point)
+      - builting-orchestrator-trigger (node.js20 and arm64): SNS trigger on S3 file upload; deduplicates and starts Step Function state machine
+      - builting-read-metadata (node.js20 and arm64): retrieves render from DynamoDB and lists uploaded files from S3
+      - builting-bedrock-ifc (node.js20 and arm64): downloads files from S3, invokes Claude via Bedrock to extract building specs as JSON
+      - builting-json-to-ifc (python3.11 and arm64): converts building spec JSON to valid IFC4 format using IfcOpenShell (Python)
+      - builting-store-ifc (container image): 
 
     - Step Function
       - builting-render-state-machine
@@ -85,6 +87,9 @@ The backend folder contains the most recent code or information that is is ident
     - IAM role
       - builting-lambda-execution-role
          - AmazonBedrockFullAccess, AmazonDynamoDBFullAccess, AmazonS3FullAccess, CloudWatchLogsFullAccess
+   
+   - ECR
+      - builting-json-to-ifc
 
    - API gateway
       - builting-api
@@ -136,6 +141,7 @@ TO-DO:
 - lambda functions and state machine needs to be tweaked as logic is not perfect, generated ifc file doesn't include all necessary elements
 - generated ifc file needs to be properly rendered in the frontend ifc viewer -- xeokit not recignizing geometry
 - fix any major bugs and get the full flow working and the ifc file should be properly generated and viewable
+- screenshot of render in the render list view for each
 
 ### Reach Goals
 1. Human-in-the-loop approval in Step Function
