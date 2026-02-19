@@ -1,0 +1,9 @@
+- builting-main Lambda deployed
+- builting-bedrock-ifc Lambda deployed
+- builting-store-ifc Lambda deployed
+- builting-read-metadata Lambda deployed
+- builting-orchestrator-trigger Lambda deployed
+- Step Function (builting-render-state-machine) deployed
+- Frontend CRUD system implemented (sidebar, renderbox, details)
+- CORS configured in API Gateway
+- DynamoDB schema finalized

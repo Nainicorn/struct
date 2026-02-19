@@ -1,0 +1,58 @@
+{
+  "Comment": "Render orchestration: extract spec from files → generate IFC → store",
+  "StartAt": "ReadRenderMetadata",
+  "States": {
+    "ReadRenderMetadata": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-read-metadata",
+      "ResultPath": "$.metadata",
+      "Next": "ExtractBuildingSpec"
+    },
+    "ExtractBuildingSpec": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-bedrock-ifc",
+      "Parameters": {
+        "renderId.$": "$.renderId",
+        "userId.$": "$.userId",
+        "bucket.$": "$.bucket",
+        "files.$": "$.metadata.files",
+        "description.$": "$.metadata.render.description"
+      },
+      "ResultPath": "$.specResult",
+      "Next": "GenerateIFC",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ]
+    },
+    "GenerateIFC": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-json-to-ifc",
+      "Parameters": {
+        "buildingSpec.$": "$.specResult.buildingSpec",
+        "renderId.$": "$.renderId",
+        "userId.$": "$.userId"
+      },
+      "ResultPath": "$.ifcResult",
+      "Next": "StoreIFC"
+    },
+    "StoreIFC": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store-ifc",
+      "Parameters": {
+        "ifcContent.$": "$.ifcResult.ifcContent",
+        "renderId.$": "$.renderId",
+        "userId.$": "$.userId",
+        "ai_generated_title.$": "$.specResult.ai_generated_title",
+        "ai_generated_description.$": "$.specResult.ai_generated_description"
+      },
+      "End": true
+    }
+  }
+}
