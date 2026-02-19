@@ -95,7 +95,7 @@ const renderbox = {
     /**
      * Display render metadata (title, description, source files)
      */
-    _displayMetadata(render) {
+    _displayMetadata() {
         // Title and description are now displayed in the details card
         // No longer needed in renderbox
     },
@@ -149,25 +149,18 @@ const renderbox = {
 
             console.log('Loading IFC from base64 data...');
 
-            // Clean up previous blob URL if exists
-            if (this.currentBlobUrl) {
-                URL.revokeObjectURL(this.currentBlobUrl);
-            }
-
-            // Convert base64 to blob
+            // Convert base64 to ArrayBuffer (binary data)
             const binaryString = atob(base64Data);
             const bytes = new Uint8Array(binaryString.length);
             for (let i = 0; i < binaryString.length; i++) {
                 bytes[i] = binaryString.charCodeAt(i);
             }
-            const blob = new Blob([bytes], { type: 'application/octet-stream' });
+            const arrayBuffer = bytes.buffer;
 
-            // Create blob URL and keep reference to prevent garbage collection
-            this.currentBlobUrl = URL.createObjectURL(blob);
-            console.log('Created blob URL for IFC file:', this.currentBlobUrl);
+            console.log('Converted base64 to ArrayBuffer:', arrayBuffer.byteLength, 'bytes');
 
-            // Load via blob URL
-            await ifcViewer.loadIFC(this.currentBlobUrl);
+            // Load via ArrayBuffer (xeokit will handle it directly without HTTP fetch)
+            await ifcViewer.loadIFC(arrayBuffer);
 
             if (loadingIndicator) {
                 loadingIndicator.style.display = 'none';

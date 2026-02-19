@@ -48,10 +48,10 @@ const ifcViewer = {
 
     /**
      * Load an IFC file into the viewer
-     * @param {string} src - URL or path to IFC file
+     * @param {string|ArrayBuffer} srcOrArrayBuffer - URL/path to IFC file OR binary ArrayBuffer data
      * @returns {Promise<void>}
      */
-    async loadIFC(src) {
+    async loadIFC(srcOrArrayBuffer) {
         try {
             if (!this.viewer) {
                 throw new Error('Viewer not initialized. Call init() first.');
@@ -63,13 +63,22 @@ const ifcViewer = {
                 this.currentModel = null;
             }
 
-            console.log('Loading IFC file:', src);
+            console.log('Loading IFC file:', typeof srcOrArrayBuffer === 'string' ? srcOrArrayBuffer : `ArrayBuffer (${srcOrArrayBuffer.byteLength} bytes)`);
+
+            // Prepare loader config based on input type
+            const loaderConfig = { edges: true };
+            if (typeof srcOrArrayBuffer === 'string') {
+                // URL/path - use src parameter
+                loaderConfig.src = srcOrArrayBuffer;
+            } else if (srcOrArrayBuffer instanceof ArrayBuffer) {
+                // Binary data - use IFC parameter (xeokit expects IFC for binary data)
+                loaderConfig.IFC = srcOrArrayBuffer;
+            } else {
+                throw new Error('Invalid input: must be URL string or ArrayBuffer');
+            }
 
             // Load new model
-            this.currentModel = await this.ifcLoader.load({
-                src: src,
-                edges: true
-            });
+            this.currentModel = await this.ifcLoader.load(loaderConfig);
 
             console.log('IFC file loaded successfully');
 
