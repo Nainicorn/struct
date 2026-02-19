@@ -647,15 +647,27 @@ const renderbox = {
 
         try {
             const renderId = this.element.dataset.renderId;
-            const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
+            const { fileData } = await rendersService.getDownloadUrl(renderId);
 
-            // Create temporary link and trigger download
+            // Convert base64 to blob
+            const binaryString = atob(fileData);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            const blob = new Blob([bytes], { type: 'application/octet-stream' });
+
+            // Create blob URL and trigger download
+            const blobUrl = URL.createObjectURL(blob);
             const link = document.createElement('a');
-            link.href = downloadUrl;
+            link.href = blobUrl;
             link.download = `render-${renderId}.ifc`;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
+
+            // Clean up blob URL
+            URL.revokeObjectURL(blobUrl);
 
             console.log('Download started');
         } catch (error) {

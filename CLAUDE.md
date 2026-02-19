@@ -23,18 +23,22 @@ A full-stack application for converting text descriptions + files into 3D IFC fi
 
 ## ⚡ QUICK STATUS (Update this section regularly)
 
-**Full Pipeline Deployment (2026-02-17)** ✅ COMPLETE:
-- ✅ builting-main Lambda deployed (auth, renders, upload, S3 cleanup on delete)
-- ✅ builting-bedrock-ifc Lambda deployed (generates IFC from Bedrock)
-- ✅ builting-store-ifc Lambda deployed (stores IFC to S3, updates DynamoDB)
-- ✅ builting-read-metadata Lambda deployed
-- ✅ builting-orchestrator-trigger Lambda deployed
-- ✅ Step Function (builting-render-state-machine) deployed
-- ✅ SNS topic (builting-render-triggers) configured
-- ✅ S3 event notifications configured → SNS → Lambda
-- ✅ Frontend CRUD system implemented (sidebar, renderbox, details)
-- ✅ CORS configured in API Gateway
-- ✅ DynamoDB schema finalized (user_id, render_id with ifc_s3_path)
+✅ COMPLETE:
+- builting-main Lambda deployed (auth, renders, upload, S3 cleanup on delete)
+- builting-bedrock-ifc Lambda deployed (generates IFC from Bedrock)
+- builting-store-ifc Lambda deployed (stores IFC to S3, updates DynamoDB)
+- builting-read-metadata Lambda deployed
+- builting-orchestrator-trigger Lambda deployed
+- Step Function (builting-render-state-machine) deployed
+- Frontend CRUD system implemented (sidebar, renderbox, details)
+- CORS configured in API Gateway
+- DynamoDB schema finalized (user_id, render_id with ifc_s3_path)
+
+TO-DO:
+- SNS topic (builting-render-triggers) is configured but not attached
+- S3 event notifications need to be configured → SNS → Lambda
+- theres a separate phase between bedrock and ifc that converts raw data to json then converts to ifc and theres a lambda image builting-json-to-ifc-python however it needs some tweaking to be better
+- the generated ifc file needs to be properly rendered in the frontend ifc viewer -- xeokit not recignizing geometry 
 
 **🐛 BUG FIXES (2026-02-18)**:
 

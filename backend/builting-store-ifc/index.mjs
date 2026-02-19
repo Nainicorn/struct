@@ -30,16 +30,20 @@ export const handler = async (event) => {
 
     console.log('IFC file uploaded successfully');
 
-    // Store IFC path in DynamoDB for quick access
+    // Store IFC path in DynamoDB for quick access and mark as completed
     await dynamo.send(
       new UpdateCommand({
         TableName: 'builting-renders',
         Key: { user_id: userId, render_id: renderId },
-        UpdateExpression: 'SET ifc_s3_path = :path, ai_generated_title = :title, ai_generated_description = :desc',
+        UpdateExpression: 'SET ifc_s3_path = :path, ai_generated_title = :title, ai_generated_description = :desc, #status = :status',
+        ExpressionAttributeNames: {
+          '#status': 'status'
+        },
         ExpressionAttributeValues: {
           ':path': ifc_s3_path,
           ':title': ai_generated_title,
-          ':desc': ai_generated_description
+          ':desc': ai_generated_description,
+          ':status': 'completed'
         }
       })
     );

@@ -2,7 +2,7 @@ the most helpful thing right now is looking at the tunnel_structure_only_example
 
 {
   "userId": "user-1",
-  "renderId": "f1050aa1-bca6-418d-8a98-3cbde2f1dd71",
+  "renderId": "6c290eb0-62a5-4a1c-bb8a-f3a7fa4328e1",
   "bucket": "builting-data"
 }
 

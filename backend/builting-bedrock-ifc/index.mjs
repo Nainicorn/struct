@@ -94,93 +94,79 @@ export const handler = async (event) => {
     const messageContent = [
       {
         type: 'text',
-        text: `You are an expert IFC4 (ISO 16739-1:2018) file generator. You MUST produce VALID, SYNTACTICALLY CORRECT STEP format code.
+        text: `You are an expert in interpreting architectural and engineering documents to extract building specifications.
+Extract structured data from the provided files and return it as a JSON object. This JSON will be converted to an IFC 3D model by another system.
 
 ═══════════════════════════════════════════════════════════════
-CRITICAL SYNTAX RULES (VIOLATIONS BREAK THE FILE):
+REQUIRED JSON STRUCTURE:
 ═══════════════════════════════════════════════════════════════
-1. Every entity has unique ID: #1, #2, #3... (sequential, no gaps)
-2. Every entity ends with SEMICOLON: #1=IFCPROJECT(...);
-3. Parameters separated by COMMAS ONLY (no spaces around commas)
-4. NULL values are represented as single: $ (NOT $$ or *, just $)
-5. References to other entities: #NUMBER (must exist)
-6. Text strings: 'single quotes' (never double quotes)
-7. Decimals: 0.5 or 0.5E-3 (never 0,5 or commas)
-8. Lists in parentheses: (item1,item2,item3) - no trailing comma
-9. Boolean values: .T. or .F. (with dots on both sides)
-10. No comments or extra whitespace in DATA section
+Return ONLY valid JSON (no markdown, no explanations). The structure MUST be:
 
-═══════════════════════════════════════════════════════════════
-ENTITY PARAMETER COUNTS (MUST BE EXACT):
-═══════════════════════════════════════════════════════════════
-IFCPROJECT: (tag,owner,name,description,placement1,placement2,placement3,representationContexts,unitAssignment)
-  #1=IFCPROJECT('0x1',#0,'ProjectName',$,#2,$,$,(#3),#4);
-
-IFCAXIS2PLACEMENT3D: (location,axis,refDirection)
-  #2=IFCAXIS2PLACEMENT3D(#5,#6,#7);
-
-IFCCARTESIANPOINT: (coordinates)
-  #5=IFCCARTESIANPOINT((0.,0.,0.));
-
-IFCDIRECTION: (directionRatios)
-  #6=IFCDIRECTION((0.,0.,1.));
-
-IFCUNITASSIGNMENT: (units)
-  #4=IFCUNITASSIGNMENT((#8));
-
-IFCWALL/SLAB: (globalId,owner,name,description,objectPlacement,representation,tag)
-  #10=IFCWALL('0x10',#0,'Wall',$,#2,$,$);
-
-IFCSHAPEREPRESENTATION: (context,repType,label,items)
-  #11=IFCSHAPEREPRESENTATION(#3,'Body','SweptSolid',(#12));
-
-IFCPOLYLINE: (points)
-  #12=IFCPOLYLINE((#20,#21,#22,#23,#20));
-
-IFCEXTRUDEDAREASOLID: (sweptArea,position,extrudedDirection,depth)
-  #13=IFCEXTRUDEDAREASOLID(#14,#2,#15,5.0);
-
-═══════════════════════════════════════════════════════════════
-FILE STRUCTURE (EXACT ORDER):
-═══════════════════════════════════════════════════════════════
-ISO-10303-21;
-HEADER;
-FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
-FILE_NAME('model.ifc','2024-01-01T00:00:00',('Author'),(''),'',' ','');
-FILE_SCHEMA(('IFC4'));
-ENDSEC;
-DATA;
-#1=IFCAPPLICATION(#0,'1.0','IFC Generator','IFC Generator');
-[... all other entities ...]
-ENDSEC;
-END-ISO-10303-21;
+{
+  "buildingName": "string - descriptive name for the building/structure",
+  "buildingType": "string - BUILDING, WAREHOUSE, TUNNEL, FACILITY, WAREHOUSE, PARKING, etc.",
+  "dimensions": {
+    "length_m": number - main length dimension in metres,
+    "width_m": number - width dimension in metres,
+    "height_m": number - height/depth dimension in metres
+  },
+  "elevations": {
+    "floor_level_m": number - ground level elevation (default 0.0),
+    "portal_west_m": number - west portal/entrance elevation if applicable,
+    "portal_east_m": number - east portal/entrance elevation if applicable
+  },
+  "rooms": [
+    {
+      "name": "string - room name/identifier",
+      "length_m": number,
+      "width_m": number,
+      "height_m": number,
+      "x_position_m": number - X offset from origin,
+      "y_position_m": number - Y offset from origin
+    }
+  ],
+  "ventilation": {
+    "system_type": "string - e.g. 'natural', 'mechanical', 'hybrid'",
+    "intake_location": "string - e.g. 'West', 'North'",
+    "exhaust_location": "string - e.g. 'East', 'South'"
+  },
+  "equipment": [
+    {
+      "name": "string - equipment identifier",
+      "type": "string - GENERATOR, PUMP, FAN, COMPRESSOR, TRANSFORMER, BATTERY, CONVERTER, etc.",
+      "x_position_m": number,
+      "y_position_m": number
+    }
+  ]
+}
 
 ═══════════════════════════════════════════════════════════════
-WHAT MAKES AN IFC FILE VALID FOR VIEWING:
+EXTRACTION GUIDELINES:
 ═══════════════════════════════════════════════════════════════
-✓ MUST have geometric entities: IFCPOLYLINE, IFCEXTRUDEDAREASOLID, IFCSHAPEREPRESENTATION
-✓ MUST have a building element: IFCWALL, IFCSLAB, IFCBEAM, etc. with geometry
-✓ MUST have spatial structure: IFCPROJECT -> IFCSITE/IFCBUILDING -> elements
-✓ MUST have proper hierarchical relationships
-✗ DO NOT use incomplete entities (always include all required parameters)
-✗ DO NOT leave unresolved references (#999 if #999 doesn't exist = error)
-✗ DO NOT mix IFC3 and IFC4 syntax
+1. buildingName: Look for project title, structure name, or descriptive text in documents
+2. buildingType: Infer from content (tunnel = TUNNEL, warehouse = WAREHOUSE, facility = FACILITY, building = BUILDING, etc.)
+3. dimensions: Convert any imperial/feet measurements to METRES (1 foot = 0.3048 m, 1 inch = 0.0254 m)
+4. elevations: Extract portal/grade elevations if available; if not specified, portal_east = floor_level
+5. rooms: Extract if floor plans or room layouts are mentioned in documents
+6. ventilation: Look for HVAC, ventilation, fan, air system, duct, intake, exhaust mentions
+7. equipment: Extract any mentioned equipment (generators, pumps, transformers, compressors, fans, batteries, converters)
+8. Use realistic estimates: If dimensions aren't explicit, infer from context and document descriptions
+9. ALL DIMENSIONS AND ELEVATIONS MUST BE IN METRES
+10. Return empty arrays [] or empty objects {} for sections with no information in documents
+11. Ensure JSON is valid (no trailing commas, proper quotes, no comments)
 
 ═══════════════════════════════════════════════════════════════
 
-Building Description to Model:
+Building Description:
 ${descriptionContent || '(No description provided)'}
 
-${unsupportedFiles.length > 0 ? `\nSupplementary files provided (may contain relevant info): ${unsupportedFiles.join(', ')}` : ''}
+${unsupportedFiles.length > 0 ? `\nAdditional files provided (type: ${unsupportedFiles.join(', ')}): Extract any dimensions, equipment, or layout information if visible` : ''}
 
 ═══════════════════════════════════════════════════════════════
 YOUR TASK:
 ═══════════════════════════════════════════════════════════════
-Generate ONLY valid IFC4 file content. NO markdown, NO explanations, NO notes, NO extra text.
-The file MUST be parseable by IFC viewers (xeokit, Revit, etc).
-Include realistic 3D geometry that represents the described space.
-Every entity ID must be sequential starting from #1.
-RETURN ONLY THE RAW IFC FILE TEXT.`
+Extract building specification from the above information and return ONLY the JSON object.
+NO markdown, NO explanations, NO extra text - just the valid JSON conforming to the schema above.`
       }
     ];
 
@@ -257,33 +243,71 @@ RETURN ONLY THE RAW IFC FILE TEXT.`
 
     console.log('Bedrock response received');
 
-    // Extract IFC content from response
-    let ifcContent = '';
+    // Extract buildingSpec JSON from response
+    let responseText = '';
     if (responseBody.content && responseBody.content.length > 0) {
-      ifcContent = responseBody.content[0].text || '';
+      responseText = responseBody.content[0].text || '';
     }
 
-    if (!ifcContent.includes('ISO-10303-21')) {
-      console.warn('Generated content may not be valid IFC, checking for content...');
-      if (!ifcContent) {
-        throw new Error('Bedrock returned empty response');
-      }
+    if (!responseText) {
+      throw new Error('Bedrock returned empty response');
     }
 
-    // Generate title and description from files and description
+    // Parse JSON response
+    let buildingSpec;
+    try {
+      buildingSpec = JSON.parse(responseText);
+    } catch (err) {
+      console.error('Failed to parse Bedrock JSON response:', err);
+      console.error('Response text:', responseText.substring(0, 500));
+      throw new Error(`Invalid JSON from Bedrock: ${err.message}`);
+    }
+
+    // Validate required fields
+    if (!buildingSpec.buildingName) {
+      buildingSpec.buildingName = 'Structure';
+    }
+    if (!buildingSpec.buildingType) {
+      buildingSpec.buildingType = 'BUILDING';
+    }
+    if (!buildingSpec.dimensions) {
+      buildingSpec.dimensions = { length_m: 100, width_m: 50, height_m: 6 };
+    }
+    if (!buildingSpec.elevations) {
+      buildingSpec.elevations = {};
+    }
+    if (buildingSpec.elevations.floor_level_m === undefined) {
+      buildingSpec.elevations.floor_level_m = 0.0;
+    }
+    if (buildingSpec.elevations.portal_east_m === undefined) {
+      buildingSpec.elevations.portal_east_m = buildingSpec.dimensions.length_m;
+    }
+    if (!buildingSpec.rooms) {
+      buildingSpec.rooms = [];
+    }
+    if (!buildingSpec.ventilation) {
+      buildingSpec.ventilation = {};
+    }
+    if (!buildingSpec.equipment) {
+      buildingSpec.equipment = [];
+    }
+
+    console.log('Building spec extracted:', JSON.stringify(buildingSpec).substring(0, 200));
+
+    // Generate title and description from files and document
     const fileNames = files
       .filter(f => f.name !== 'description.txt')
       .map(f => f.name)
       .join(', ');
 
-    const ai_generated_title = `3D Model: ${renderId.slice(0, 8)}`;
-    const ai_generated_description = `Generated IFC model from ${files.length} source files${fileNames ? `: ${fileNames}` : ''}. ${descriptionContent ? `User description: ${descriptionContent.substring(0, 100)}...` : ''}`;
+    const ai_generated_title = buildingSpec.buildingName || `Model - ${renderId.slice(0, 8)}`;
+    const ai_generated_description = `${buildingSpec.buildingType} model (${buildingSpec.dimensions.length_m}m × ${buildingSpec.dimensions.width_m}m × ${buildingSpec.dimensions.height_m}m) from ${files.length} source files. ${fileNames ? `Files: ${fileNames}. ` : ''}${descriptionContent ? `Description: ${descriptionContent.substring(0, 80)}...` : ''}`;
 
-    console.log('IFC generation complete');
+    console.log('Bedrock extraction complete');
 
     return {
       ...event,
-      ifcContent,
+      buildingSpec,
       ai_generated_title,
       ai_generated_description
     };
