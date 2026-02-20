@@ -15,6 +15,7 @@ const renderbox = {
     currentRenderId: null,
     pollingStartTime: null,
     currentBlobUrl: null, // Track blob URL to prevent premature garbage collection
+    isRendering: false, // Flag to track if render is currently in progress
 
     // Initialize the renderbox component
     async init() {
@@ -597,6 +598,7 @@ const renderbox = {
     _startPolling(renderId) {
         this.currentRenderId = renderId;
         this.pollingStartTime = Date.now();
+        this.isRendering = true; // Set flag to indicate rendering in progress
         this._updateLoadingMessage('Processing your render...');
         this._pollRenderStatus();
     },
@@ -662,6 +664,7 @@ const renderbox = {
         }
         this.currentRenderId = null;
         this.pollingStartTime = null;
+        this.isRendering = false; // Clear rendering flag
     },
 
     /**

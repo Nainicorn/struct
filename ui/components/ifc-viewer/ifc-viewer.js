@@ -82,24 +82,14 @@ const ifcViewer = {
 
             console.log('IFC file loaded successfully');
 
-            // Fit model to view with camera animation
-            // Use a longer duration and add padding so model is well-framed
+            // Fit model to view
             try {
-                this.viewer.cameraFlight.flyTo(
-                    this.currentModel,
-                    {
-                        duration: 1.0,
-                        fitFOV: 45,
-                        padding: 0.5
-                    },
-                    () => {
-                        console.log('Camera flight completed');
-                    }
-                );
-            } catch (cameraError) {
-                console.warn('Camera flight error (non-fatal):', cameraError);
-                // Fallback: just fit to bounds without animation
+                // Use jumpTo to avoid camera flight animation issues
                 this.viewer.cameraFlight.jumpTo(this.currentModel);
+                console.log('Camera positioned to fit model');
+            } catch (cameraError) {
+                console.warn('Camera positioning error (non-fatal):', cameraError);
+                // Silently continue - viewer will still work, just needs manual camera adjustment
             }
 
         } catch (error) {

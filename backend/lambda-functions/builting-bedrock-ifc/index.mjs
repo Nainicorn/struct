@@ -154,10 +154,34 @@ Return ONLY valid JSON (no markdown, no explanations). All REQUIRED fields must 
   ],
   "materials": {
     "walls": "string - material type (concrete, brick, steel, timber, glass, other) - default: concrete",
+    "wall_finish": "string - interior finish (plasterboard, paint, tiles, panels, other) - default: plasterboard",
+    "wall_insulation": "string - insulation type if any (mineral_wool, foam, other) - default: null",
     "floor": "string - material type (concrete, timber, raised_access, screed, other) - default: concrete",
     "roof": "string - material type (concrete, metal, membrane, tiles, other) - default: metal"
   },
-  "structural_system": "string - FRAME, LOADBEARING, SHELL, TRUSS, or OTHER - default: LOADBEARING"
+  "structural_system": "string - FRAME, LOADBEARING, SHELL, TRUSS, or OTHER - default: LOADBEARING",
+  "structure": {
+    "column_grid": [
+      {
+        "x_spacing_m": number - spacing between columns in X direction,
+        "y_spacing_m": number - spacing between columns in Y direction,
+        "column_size_m": number - column width/diameter (0.3-0.5m typical)
+      }
+    ],
+    "floor_to_floor_height_m": number - typical floor-to-floor height,
+    "num_floors": number - number of stories/levels (default 1)
+  },
+  "interior_walls": [
+    {
+      "name": "string - wall identifier",
+      "x_start_m": number - X coordinate of wall start,
+      "y_start_m": number - Y coordinate of wall start,
+      "x_end_m": number - X coordinate of wall end,
+      "y_end_m": number - Y coordinate of wall end,
+      "height_m": number - wall height,
+      "thickness_m": number - wall thickness (0.1-0.2m typical)
+    }
+  ]
 }
 
 ═══════════════════════════════════════════════════════════════
@@ -179,8 +203,12 @@ DETAILED FIELD GUIDANCE:
 6. openings: Extract doors/windows with wall side and positions; estimate typical door height (2.1m), window sill (0.9m)
 7. ventilation: Look for HVAC, ventilation, fan, air system, duct, intake, exhaust mentions. Count number of fans if available.
 8. equipment: Extract generators, pumps, transformers, compressors, fans, batteries, converters, boilers, chillers, AHUs with spatial positions
-9. materials: Identify structural/finish materials from construction documents
+9. materials: Identify structural/finish materials AND finishes/coatings from construction documents. Include wall insulation if mentioned.
 10. structural_system: Infer from building type (office/warehouse typically frame, tunnels typically shell/lining)
+11. structure.column_grid: If building type is FRAME, extract or infer column spacing. Typical office: 6-9m spacing. Warehouse: 8-12m spacing.
+12. structure.floor_to_floor_height_m: Typical building: 3.5-4.0m, warehouse: 6-8m, parking: 2.5-3.0m
+13. structure.num_floors: Count stories if multi-story building mentioned
+14. interior_walls: Extract partition wall locations from floor plans. Include walls separating different room types. Provide start/end coordinates and thickness.
 
 SPECIAL CASES:
 - TUNNEL: length_m = tunnel length, width_m ≈ height_m ≈ tunnel diameter, wall_thickness_m = lining thickness

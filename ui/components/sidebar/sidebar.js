@@ -3,6 +3,7 @@ import './sidebar.css';
 import controls from '../controls/controls';
 import rendersService from '../../services/rendersService.js';
 import modalService from '../../services/modalService.js';
+import renderbox from '../renderbox/renderbox.js';
 
 const sidebar = {
     element: null,
@@ -145,7 +146,16 @@ const sidebar = {
     /**
      * Handle render item click
      */
-    _handleRenderClick(renderId) {
+    async _handleRenderClick(renderId) {
+        // Check if a render is currently being generated
+        if (renderbox.isRendering) {
+            await modalService.alert(
+                'Render In Progress',
+                'A new render is currently being generated. Please wait for it to complete before viewing other renders.'
+            );
+            return;
+        }
+
         // Dispatch event for renderbox and details to handle
         const event = new CustomEvent('renderSelected', {
             detail: { id: renderId }

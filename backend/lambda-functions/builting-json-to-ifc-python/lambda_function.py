@@ -253,15 +253,33 @@ def create_rectangular_solid(f, length, width, height, base_placement, subcontex
 # BUILDING ENVELOPE CREATION (TYPE-SPECIFIC)
 # ============================================================================
 
-def create_building_walls(f, subcontext, owner, parent_lp, length_m, width_m, height_m, wall_thickness_m):
-    """Create 4 exterior walls (N, S, E, W) as separate IfcWall entities."""
+def create_building_walls(f, subcontext, owner, parent_lp, length_m, width_m, height_m, wall_thickness_m, axis_subcontext=None):
+    """Create 4 exterior walls (N, S, E, W) as IfcWallStandardCase entities with axis representation."""
     walls = []
     mat_color = MATERIAL_COLORS.get('concrete', (0.75, 0.75, 0.75))
 
     # Helper to create one wall
     def make_wall(name, x_pos, y_pos, w_length, w_width, w_height):
-        solid, _, pds = create_rectangular_solid(f, w_length, w_width, w_height, None, subcontext, owner)
+        # Create body solid
+        solid, body_rep, _ = create_rectangular_solid(f, w_length, w_width, w_height, None, subcontext, owner)
         apply_style(f, solid, mat_color, transparency=0.0, entity_name=name)
+
+        # Create axis (2D centerline at mid-width)
+        if axis_subcontext:
+            axis_pt1 = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, w_width / 2.0))
+            axis_pt2 = f.create_entity('IfcCartesianPoint', Coordinates=(w_length, w_width / 2.0))
+            axis_curve = f.create_entity('IfcPolyline', Points=(axis_pt1, axis_pt2))
+            axis_rep = f.create_entity(
+                'IfcShapeRepresentation',
+                ContextOfItems=axis_subcontext,
+                RepresentationIdentifier='Axis',
+                RepresentationType='Curve2D',
+                Items=(axis_curve,)
+            )
+            # Combine axis + body representations
+            pds = f.create_entity('IfcProductDefinitionShape', Representations=(axis_rep, body_rep))
+        else:
+            _, _, pds = create_rectangular_solid(f, w_length, w_width, w_height, None, subcontext, owner)
 
         wall_origin = f.create_entity('IfcCartesianPoint', Coordinates=(x_pos, y_pos, 0.0))
         axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
@@ -270,7 +288,7 @@ def create_building_walls(f, subcontext, owner, parent_lp, length_m, width_m, he
         wall_lp = f.create_entity('IfcLocalPlacement', PlacementRelTo=parent_lp, RelativePlacement=wall_place)
 
         wall = f.create_entity(
-            'IfcWall',
+            'IfcWallStandardCase',
             GlobalId=new_guid(),
             OwnerHistory=owner,
             Name=name,
@@ -343,6 +361,134 @@ def create_floor_slab(f, subcontext, owner, parent_lp, length_m, width_m):
     })
 
     return floor
+
+
+def create_interior_wall(f, subcontext, owner, parent_lp, wall_data, mat_color=None):
+    """Create an interior partition wall from start to end coordinates."""
+    name = wall_data.get('name', 'Interior Wall')
+    x_start = float(wall_data.get('x_start_m', 0.0))
+    y_start = float(wall_data.get('y_start_m', 0.0))
+    x_end = float(wall_data.get('x_end_m', 10.0))
+    y_end = float(wall_data.get('y_end_m', 0.0))
+    height = float(wall_data.get('height_m', 3.0))
+    thickness = float(wall_data.get('thickness_m', 0.15))
+
+    # Calculate wall length and angle
+    length = ((x_end - x_start)**2 + (y_end - y_start)**2)**0.5
+    if length < 0.01:
+        return None
+
+    # Midpoint
+    mid_x = (x_start + x_end) / 2.0
+    mid_y = (y_start + y_end) / 2.0
+
+    # Wall color
+    if mat_color is None:
+        mat_color = MATERIAL_COLORS.get('concrete', (0.75, 0.75, 0.75))
+
+    solid, _, pds = create_rectangular_solid(f, length, thickness, height, None, subcontext, owner)
+    apply_style(f, solid, mat_color, transparency=0.0, entity_name=name)
+
+    # Calculate rotation angle
+    import math
+    dx = x_end - x_start
+    dy = y_end - y_start
+    angle = math.atan2(dy, dx)
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+
+    wall_origin = f.create_entity('IfcCartesianPoint', Coordinates=(mid_x, mid_y, 0.0))
+    axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+    refd = f.create_entity('IfcDirection', DirectionRatios=(cos_a, sin_a, 0.0))
+    wall_place = f.create_entity('IfcAxis2Placement3D', Location=wall_origin, Axis=axis, RefDirection=refd)
+    wall_lp = f.create_entity('IfcLocalPlacement', PlacementRelTo=parent_lp, RelativePlacement=wall_place)
+
+    wall = f.create_entity(
+        'IfcWallStandardCase',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        Name=name,
+        ObjectPlacement=wall_lp,
+        Representation=pds,
+        PredefinedType='SOLIDWALL'
+    )
+
+    add_property_set(f, owner, wall, 'Pset_WallCommon', {
+        'IsExternal': (False, 'IfcBoolean'),
+        'LoadBearing': (False, 'IfcBoolean'),
+        'FireRating': ('1HR', 'IfcLabel'),
+    })
+
+    add_quantity_set(f, owner, wall, 'Qto_WallBaseQuantities', {
+        'Length': (length, 'IfcQuantityLength'),
+        'Width': (thickness, 'IfcQuantityLength'),
+        'Height': (height, 'IfcQuantityLength'),
+    })
+
+    return wall
+
+
+def create_column(f, subcontext, owner, parent_lp, x_m, y_m, height_m, size_m=0.4):
+    """Create a structural column at given position."""
+    name = f'Column_{x_m:.1f}_{y_m:.1f}'
+    mat_color = MATERIAL_COLORS.get('steel', (0.55, 0.60, 0.65))
+
+    solid, _, pds = create_rectangular_solid(f, size_m, size_m, height_m, None, subcontext, owner)
+    apply_style(f, solid, mat_color, transparency=0.0, entity_name=name)
+
+    col_origin = f.create_entity('IfcCartesianPoint', Coordinates=(x_m - size_m/2, y_m - size_m/2, 0.0))
+    axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+    refd = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0))
+    col_place = f.create_entity('IfcAxis2Placement3D', Location=col_origin, Axis=axis, RefDirection=refd)
+    col_lp = f.create_entity('IfcLocalPlacement', PlacementRelTo=parent_lp, RelativePlacement=col_place)
+
+    column = f.create_entity(
+        'IfcColumn',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        Name=name,
+        ObjectPlacement=col_lp,
+        Representation=pds,
+        PredefinedType='COLUMN'
+    )
+
+    add_property_set(f, owner, column, 'Pset_ColumnCommon', {
+        'LoadBearing': (True, 'IfcBoolean'),
+        'StructuralType': ('COLUMN', 'IfcLabel'),
+    })
+
+    add_quantity_set(f, owner, column, 'Qto_ColumnBaseQuantities', {
+        'Width': (size_m, 'IfcQuantityLength'),
+        'Depth': (size_m, 'IfcQuantityLength'),
+        'Height': (height_m, 'IfcQuantityLength'),
+    })
+
+    return column
+
+
+def create_structural_grid(f, subcontext, owner, parent_lp, grid_config, length_m, width_m, height_m):
+    """Create structural columns based on grid configuration."""
+    columns = []
+    if not grid_config or len(grid_config) == 0:
+        return columns
+
+    grid = grid_config[0]
+    x_spacing = float(grid.get('x_spacing_m', 9.0))
+    y_spacing = float(grid.get('y_spacing_m', 9.0))
+    col_size = float(grid.get('column_size_m', 0.4))
+
+    # Generate columns in grid pattern
+    x_pos = x_spacing / 2
+    while x_pos < length_m:
+        y_pos = y_spacing / 2
+        while y_pos < width_m:
+            col = create_column(f, subcontext, owner, parent_lp, x_pos, y_pos, height_m, col_size)
+            if col:
+                columns.append(col)
+            y_pos += y_spacing
+        x_pos += x_spacing
+
+    return columns
 
 
 def create_roof_slab(f, subcontext, owner, parent_lp, length_m, width_m, height_m):
@@ -482,12 +628,45 @@ def create_equipment_element(f, subcontext, owner, parent_lp, equip_data, idx):
         'ModelLabel': (equip_type, 'IfcLabel'),
     })
 
+    # Add distribution ports for MEP equipment (HVAC, fluid, electrical connections)
+    if equip_type in ['FAN', 'PUMP', 'COMPRESSOR', 'BOILER', 'CHILLER', 'AHU']:
+        try:
+            # Inlet/intake port
+            inlet_port = create_distribution_port(f, owner, elem, port_type='INLET', location_xyz=(x_pos, y_pos, height/2))
+            # Outlet/exhaust port
+            outlet_port = create_distribution_port(f, owner, elem, port_type='OUTLET', location_xyz=(x_pos + length, y_pos, height/2))
+        except Exception as e:
+            print(f"Warning: Could not create distribution ports for {name}: {e}")
+
     return elem
 
 
 # ============================================================================
 # VENTILATION
 # ============================================================================
+
+def create_distribution_port(f, owner, parent_element, port_type='INLET', location_xyz=(0.0, 0.0, 0.0)):
+    """Create a distribution port for MEP connections (HVAC, electrical, plumbing)."""
+    port_name = f'{port_type}_Port'
+
+    port = f.create_entity(
+        'IfcDistributionPort',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        Name=port_name,
+        FlowDirection=port_type
+    )
+
+    f.create_entity(
+        'IfcRelConnectsPortToElement',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        RelatingPort=port,
+        RelatedElement=parent_element
+    )
+
+    return port
+
 
 def create_ventilation_elements(f, subcontext, owner, parent_lp, ventilation_data, length_m, width_m):
     """Create IfcFlowTerminal elements for ventilation intake/exhaust."""
@@ -560,10 +739,14 @@ def create_ventilation_elements(f, subcontext, owner, parent_lp, ventilation_dat
 # OPENINGS (DOORS & WINDOWS)
 # ============================================================================
 
-def create_default_door(f, subcontext, owner, parent_lp, length_m, width_m):
-    """Create a default door on the south wall."""
-    solid, _, pds = create_rectangular_solid(f, 1.0, 0.1, 2.1, None, subcontext, owner)
-    apply_style(f, solid, MATERIAL_COLORS['door'], transparency=0.0, entity_name='Main Door')
+def create_default_door(f, subcontext, owner, parent_lp, length_m, width_m, host_wall=None):
+    """Create a default door on the south wall with opening element."""
+    door_width = 1.0
+    door_height = 2.1
+
+    # Opening geometry
+    opening_solid, _, opening_pds = create_rectangular_solid(f, door_width, 0.1, door_height, None, subcontext, owner)
+    apply_style(f, opening_solid, (0.9, 0.9, 0.9), transparency=0.0, entity_name='Door Opening')
 
     door_origin = f.create_entity('IfcCartesianPoint', Coordinates=(length_m / 2 - 0.5, 0.0, 0.0))
     axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
@@ -571,14 +754,49 @@ def create_default_door(f, subcontext, owner, parent_lp, length_m, width_m):
     door_place = f.create_entity('IfcAxis2Placement3D', Location=door_origin, Axis=axis, RefDirection=refd)
     door_lp = f.create_entity('IfcLocalPlacement', PlacementRelTo=parent_lp, RelativePlacement=door_place)
 
+    # Create opening element
+    opening = f.create_entity(
+        'IfcOpeningElement',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        Name='Door Opening',
+        ObjectPlacement=door_lp,
+        Representation=opening_pds
+    )
+
+    # Relate opening to host wall
+    if host_wall:
+        f.create_entity(
+            'IfcRelVoidsElement',
+            GlobalId=new_guid(),
+            OwnerHistory=owner,
+            RelatingBuildingElement=host_wall,
+            RelatedOpeningElement=opening
+        )
+
+    # Door door geometry
+    door_solid, _, door_pds = create_rectangular_solid(f, door_width, 0.05, door_height, None, subcontext, owner)
+    apply_style(f, door_solid, MATERIAL_COLORS['door'], transparency=0.0, entity_name='Main Door')
+
     door = f.create_entity(
         'IfcDoor',
         GlobalId=new_guid(),
         OwnerHistory=owner,
         Name='Main Door',
         ObjectPlacement=door_lp,
-        Representation=pds,
-        PredefinedType='SWINGDOOR'
+        Representation=door_pds,
+        PredefinedType='SWINGDOOR',
+        OverallHeight=door_height,
+        OverallWidth=door_width
+    )
+
+    # Relate door to opening
+    f.create_entity(
+        'IfcRelFillsElement',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        RelatingOpeningElement=opening,
+        RelatedBuildingElement=door
     )
 
     add_property_set(f, owner, door, 'Pset_DoorCommon', {
@@ -586,12 +804,433 @@ def create_default_door(f, subcontext, owner, parent_lp, length_m, width_m):
         'FireExit': (False, 'IfcBoolean'),
     })
 
-    return door
+    # Add door lining properties
+    lining = f.create_entity(
+        'IfcDoorLiningProperties',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        Name='Door Lining',
+        LiningDepth=0.05,
+        LiningThickness=0.05
+    )
+    f.create_entity(
+        'IfcRelDefinesByProperties',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        RelatedObjects=(door,),
+        RelatingPropertyDefinition=lining
+    )
+
+    # Add door panel properties
+    panel = f.create_entity(
+        'IfcDoorPanelProperties',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        Name='Door Panel',
+        PanelDepth=0.04,
+        PanelOperation='SWINGING'
+    )
+    f.create_entity(
+        'IfcRelDefinesByProperties',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        RelatedObjects=(door,),
+        RelatingPropertyDefinition=panel
+    )
+
+    return door, opening
+
+
+# ============================================================================
+# COVERINGS (CEILINGS)
+# ============================================================================
+
+def create_ceiling(f, subcontext, owner, parent_lp, length_m, width_m, height_m):
+    """Create a ceiling as IfcCovering with FaceBasedSurfaceModel geometry."""
+    mat_color = MATERIAL_COLORS.get('concrete_floor', (0.88, 0.88, 0.88))
+
+    # 4 corner points of ceiling (at height)
+    pt_sw = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, height_m))
+    pt_se = f.create_entity('IfcCartesianPoint', Coordinates=(length_m, 0.0, height_m))
+    pt_ne = f.create_entity('IfcCartesianPoint', Coordinates=(length_m, width_m, height_m))
+    pt_nw = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, width_m, height_m))
+
+    # Create polygon loop
+    poly = f.create_entity('IfcPolyLoop', Polygon=(pt_sw, pt_se, pt_ne, pt_nw))
+    bound = f.create_entity('IfcFaceOuterBound', Bound=poly, Orientation=True)
+    face = f.create_entity('IfcFace', Bounds=(bound,))
+
+    # Face-based surface model
+    face_set = f.create_entity('IfcConnectedFaceSet', CfsFaces=(face,))
+    surface_model = f.create_entity('IfcFaceBasedSurfaceModel', FbsmFaces=(face_set,))
+
+    body_rep = f.create_entity(
+        'IfcShapeRepresentation',
+        ContextOfItems=subcontext,
+        RepresentationIdentifier='Body',
+        RepresentationType='SurfaceModel',
+        Items=(surface_model,)
+    )
+
+    pds = f.create_entity('IfcProductDefinitionShape', Representations=(body_rep,))
+    apply_style(f, surface_model, mat_color, transparency=0.0, entity_name='Ceiling')
+
+    # Placement (at origin, geometry already has height)
+    ceiling_origin = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0))
+    axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+    refd = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0))
+    ceiling_place = f.create_entity('IfcAxis2Placement3D', Location=ceiling_origin, Axis=axis, RefDirection=refd)
+    ceiling_lp = f.create_entity('IfcLocalPlacement', PlacementRelTo=parent_lp, RelativePlacement=ceiling_place)
+
+    ceiling = f.create_entity(
+        'IfcCovering',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        Name='Ceiling',
+        ObjectPlacement=ceiling_lp,
+        Representation=pds,
+        PredefinedType='CEILING'
+    )
+
+    add_property_set(f, owner, ceiling, 'Pset_CoveringCommon', {
+        'FireRating': ('30 min', 'IfcLabel'),
+    })
+
+    return ceiling
 
 
 # ============================================================================
 # MAIN IFC4 GENERATOR
 # ============================================================================
+
+def create_material_layer_set(f, owner, material_name, layers_dict):
+    """Create a material layer set for walls.
+    layers_dict: {layer_name: (thickness_m, material_type), ...}
+    Returns IfcMaterialLayerSet entity.
+    """
+    layers = []
+    for layer_name, (thickness, mat_type) in layers_dict.items():
+        mat = f.create_entity('IfcMaterial', Name=mat_type)
+        layer = f.create_entity(
+            'IfcMaterialLayer',
+            Material=mat,
+            LayerThickness=float(thickness),
+            Name=layer_name
+        )
+        layers.append(layer)
+
+    return f.create_entity(
+        'IfcMaterialLayerSet',
+        MaterialLayers=tuple(layers),
+        LayerSetName=material_name
+    )
+
+
+def apply_material_layers_to_wall(f, owner, wall_element, material_layers_set):
+    """Associate a material layer set with a wall element."""
+    usage = f.create_entity(
+        'IfcMaterialLayerSetUsage',
+        ForLayerSet=material_layers_set,
+        LayerSetDirection='AXIS2',
+        DirectionSense='NEGATIVE',
+        OffsetFromReferenceLine=0.0
+    )
+
+    f.create_entity(
+        'IfcRelAssociatesMaterial',
+        GlobalId=new_guid(),
+        OwnerHistory=owner,
+        RelatedObjects=(wall_element,),
+        RelatingMaterial=usage
+    )
+
+
+def get_wall_layer_composition(wall_material='concrete', finish='plasterboard', insulation=None):
+    """Get wall layer composition based on material and finish.
+    Returns dict of {layer_name: (thickness_m, material_type), ...}
+    """
+    layers = {}
+
+    # Structural core
+    if wall_material.lower() == 'brick':
+        layers['Brick_Core'] = (0.22, 'Brick Masonry')
+    elif wall_material.lower() == 'steel':
+        layers['Steel_Frame'] = (0.15, 'Steel Framing')
+    else:  # concrete default
+        layers['Concrete_Core'] = (0.20, 'Concrete C25')
+
+    # Insulation (if specified)
+    if insulation:
+        if insulation.lower() == 'mineral_wool':
+            layers['Insulation'] = (0.05, 'Mineral Wool')
+        elif insulation.lower() == 'foam':
+            layers['Insulation'] = (0.06, 'EPS Foam')
+        else:
+            layers['Insulation'] = (0.05, 'Insulation')
+
+    # Finish
+    if finish and finish.lower() == 'tiles':
+        layers['Tile_Finish'] = (0.01, 'Ceramic Tiles')
+    elif finish and finish.lower() == 'panels':
+        layers['Panel_Finish'] = (0.025, 'Wood Panels')
+    else:  # plasterboard default
+        layers['Plasterboard_Finish'] = (0.015, 'Plasterboard')
+
+    return layers
+
+
+def create_openings(f, subcontext, owner, parent_lp, openings, length_m, width_m, height_m, walls=None):
+    """Create door and window elements from opening specifications with IfcOpeningElement support."""
+    opening_elements = []
+    wall_by_side = {}
+    if walls and len(walls) >= 4:
+        wall_by_side = {
+            'SOUTH': walls[0],
+            'NORTH': walls[1],
+            'EAST': walls[2],
+            'WEST': walls[3],
+        }
+
+    for idx, opening in enumerate(openings):
+        try:
+            opening_type = opening.get('type', 'DOOR').upper()
+            wall_side = opening.get('wall_side', 'SOUTH').upper()
+            x_offset = float(opening.get('x_offset_m', 0.0))
+            width = float(opening.get('width_m', 1.0 if opening_type == 'DOOR' else 1.5))
+            height = float(opening.get('height_m', 2.1 if opening_type == 'DOOR' else 1.2))
+            sill_height = float(opening.get('sill_height_m', 0.0 if opening_type == 'DOOR' else 0.9))
+
+            if opening_type == 'DOOR':
+                mat_color = MATERIAL_COLORS.get('door', (0.55, 0.40, 0.25))
+
+                # Opening solid (void)
+                opening_solid, _, opening_pds = create_rectangular_solid(f, width, 0.1, height, None, subcontext, owner)
+                apply_style(f, opening_solid, (0.9, 0.9, 0.9), transparency=0.0, entity_name=f'Door_Opening_{idx}')
+
+                # Door solid
+                door_solid, _, door_pds = create_rectangular_solid(f, width, 0.05, height, None, subcontext, owner)
+                apply_style(f, door_solid, mat_color, transparency=0.0, entity_name=f'Door_{idx}')
+
+                # Position based on wall side
+                if wall_side == 'SOUTH':
+                    origin = f.create_entity('IfcCartesianPoint', Coordinates=(x_offset, 0.0, sill_height))
+                elif wall_side == 'NORTH':
+                    origin = f.create_entity('IfcCartesianPoint', Coordinates=(x_offset, width_m, sill_height))
+                elif wall_side == 'EAST':
+                    origin = f.create_entity('IfcCartesianPoint', Coordinates=(length_m, x_offset, sill_height))
+                else:  # WEST
+                    origin = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, x_offset, sill_height))
+
+                axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+                refd = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0))
+                placement = f.create_entity('IfcAxis2Placement3D', Location=origin, Axis=axis, RefDirection=refd)
+                lp = f.create_entity('IfcLocalPlacement', PlacementRelTo=parent_lp, RelativePlacement=placement)
+
+                # Create opening element
+                opening = f.create_entity(
+                    'IfcOpeningElement',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    Name=f'Door_Opening_{idx}',
+                    ObjectPlacement=lp,
+                    Representation=opening_pds
+                )
+
+                # Relate opening to host wall
+                host_wall = wall_by_side.get(wall_side)
+                if host_wall:
+                    f.create_entity(
+                        'IfcRelVoidsElement',
+                        GlobalId=new_guid(),
+                        OwnerHistory=owner,
+                        RelatingBuildingElement=host_wall,
+                        RelatedOpeningElement=opening
+                    )
+
+                door = f.create_entity(
+                    'IfcDoor',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    Name=f'Door_{idx}',
+                    ObjectPlacement=lp,
+                    Representation=door_pds,
+                    PredefinedType='SWINGDOOR',
+                    OverallHeight=height,
+                    OverallWidth=width
+                )
+
+                # Relate door to opening
+                f.create_entity(
+                    'IfcRelFillsElement',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    RelatingOpeningElement=opening,
+                    RelatedBuildingElement=door
+                )
+
+                add_property_set(f, owner, door, 'Pset_DoorCommon', {
+                    'IsExternal': (wall_side in ['NORTH', 'SOUTH', 'EAST', 'WEST'], 'IfcBoolean'),
+                    'FireExit': (False, 'IfcBoolean'),
+                })
+
+                # Add door lining properties
+                lining = f.create_entity(
+                    'IfcDoorLiningProperties',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    Name=f'Door_Lining_{idx}',
+                    LiningDepth=0.05,
+                    LiningThickness=0.05
+                )
+                f.create_entity(
+                    'IfcRelDefinesByProperties',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    RelatedObjects=(door,),
+                    RelatingPropertyDefinition=lining
+                )
+
+                # Add door panel properties
+                panel = f.create_entity(
+                    'IfcDoorPanelProperties',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    Name=f'Door_Panel_{idx}',
+                    PanelDepth=0.04,
+                    PanelOperation='SWINGING'
+                )
+                f.create_entity(
+                    'IfcRelDefinesByProperties',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    RelatedObjects=(door,),
+                    RelatingPropertyDefinition=panel
+                )
+
+                opening_elements.append(door)
+                opening_elements.append(opening)
+
+            elif opening_type == 'WINDOW':
+                mat_color = MATERIAL_COLORS.get('window', (0.7, 0.85, 0.95))
+                solid, _, pds = create_rectangular_solid(f, width, 0.05, height, None, subcontext, owner)
+                apply_style(f, solid, mat_color, transparency=0.3, entity_name=f'Window_{idx}')
+
+                # Position based on wall side
+                if wall_side == 'SOUTH':
+                    origin = f.create_entity('IfcCartesianPoint', Coordinates=(x_offset, 0.0, sill_height))
+                elif wall_side == 'NORTH':
+                    origin = f.create_entity('IfcCartesianPoint', Coordinates=(x_offset, width_m, sill_height))
+                elif wall_side == 'EAST':
+                    origin = f.create_entity('IfcCartesianPoint', Coordinates=(length_m, x_offset, sill_height))
+                else:  # WEST
+                    origin = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, x_offset, sill_height))
+
+                axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+                refd = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0))
+                placement = f.create_entity('IfcAxis2Placement3D', Location=origin, Axis=axis, RefDirection=refd)
+                lp = f.create_entity('IfcLocalPlacement', PlacementRelTo=parent_lp, RelativePlacement=placement)
+
+                window = f.create_entity(
+                    'IfcWindow',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    Name=f'Window_{idx}',
+                    ObjectPlacement=lp,
+                    Representation=pds,
+                    PredefinedType='WINDOW',
+                    OverallHeight=height,
+                    OverallWidth=width
+                )
+
+                add_property_set(f, owner, window, 'Pset_WindowCommon', {
+                    'IsExternal': (True, 'IfcBoolean'),
+                    'FireRating': ('30 min', 'IfcLabel'),
+                })
+
+                # Add window lining properties
+                lining = f.create_entity(
+                    'IfcWindowLiningProperties',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    Name=f'Window_Lining_{idx}',
+                    FrameDepth=0.075,
+                    FrameThickness=0.075
+                )
+                f.create_entity(
+                    'IfcRelDefinesByProperties',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    RelatedObjects=(window,),
+                    RelatingPropertyDefinition=lining
+                )
+
+                # Add window panel properties
+                panel = f.create_entity(
+                    'IfcWindowPanelProperties',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    Name=f'Window_Panel_{idx}',
+                    FrameDepth=0.05
+                )
+                f.create_entity(
+                    'IfcRelDefinesByProperties',
+                    GlobalId=new_guid(),
+                    OwnerHistory=owner,
+                    RelatedObjects=(window,),
+                    RelatingPropertyDefinition=panel
+                )
+
+                opening_elements.append(window)
+
+        except Exception as e:
+            print(f"Error creating opening {idx}: {e}")
+
+    return opening_elements
+
+
+def create_interior_walls_from_rooms(rooms, length_m, width_m, height_m):
+    """Generate interior wall definitions based on room layout."""
+    interior_walls = []
+
+    if len(rooms) < 2:
+        return interior_walls
+
+    # Sort rooms by position to find adjacencies
+    rooms_sorted = sorted(rooms, key=lambda r: (r.get('x_position_m', 0.0), r.get('y_position_m', 0.0)))
+
+    for i, room in enumerate(rooms_sorted):
+        x_pos = float(room.get('x_position_m', 0.0))
+        y_pos = float(room.get('y_position_m', 0.0))
+        room_length = float(room.get('length_m', 10.0))
+        room_width = float(room.get('width_m', 8.0))
+        room_height = float(room.get('height_m', 3.0))
+
+        # Wall on east side of room (if not at building edge)
+        if x_pos + room_length < length_m - 0.5:
+            interior_walls.append({
+                'name': f'Wall_{room.get("name", f"Room{i}")}_East',
+                'x_start_m': x_pos + room_length,
+                'y_start_m': y_pos,
+                'x_end_m': x_pos + room_length,
+                'y_end_m': y_pos + room_width,
+                'height_m': room_height,
+                'thickness_m': 0.12
+            })
+
+        # Wall on south side of room (if not at building edge)
+        if y_pos > 0.5:
+            interior_walls.append({
+                'name': f'Wall_{room.get("name", f"Room{i}")}_South',
+                'x_start_m': x_pos,
+                'y_start_m': y_pos,
+                'x_end_m': x_pos + room_length,
+                'y_end_m': y_pos,
+                'height_m': room_height,
+                'thickness_m': 0.12
+            })
+
+    return interior_walls
+
 
 def generate_ifc4(spec):
     """Generate IFC4 file using IfcOpenShell with rich architectural detail."""
@@ -669,6 +1308,15 @@ def generate_ifc4(spec):
         TargetView='MODEL_VIEW'
     )
 
+    # Subcontext for Axis representation
+    axis_subcontext = f.create_entity(
+        'IfcGeometricRepresentationSubContext',
+        ContextIdentifier='Axis',
+        ContextType='Model',
+        ParentContext=context,
+        TargetView='MODEL_VIEW'
+    )
+
     # --- Project ---
     project = f.create_entity(
         'IfcProject',
@@ -738,9 +1386,22 @@ def generate_ifc4(spec):
     # --- Create Building Envelope ---
     contained_elements = []
 
-    # Create walls
-    walls = create_building_walls(f, subcontext, owner, lvl_lp, length_m, width_m, height_m, wall_thickness_m)
+    # Create walls with material layers
+    walls = create_building_walls(f, subcontext, owner, lvl_lp, length_m, width_m, height_m, wall_thickness_m, axis_subcontext)
     contained_elements.extend(walls)
+
+    # Apply material layers to walls
+    wall_material = materials.get('walls', 'concrete')
+    wall_finish = materials.get('wall_finish', 'plasterboard')
+    wall_insulation = materials.get('wall_insulation')
+
+    wall_layers = get_wall_layer_composition(wall_material, wall_finish, wall_insulation)
+    material_layer_set = create_material_layer_set(f, owner, f'Wall_Layers_{wall_material}', wall_layers)
+
+    for wall in walls:
+        apply_material_layers_to_wall(f, owner, wall, material_layer_set)
+
+    print(f"Applied material layers to {len(walls)} exterior walls")
 
     # Create floor
     floor = create_floor_slab(f, subcontext, owner, lvl_lp, length_m, width_m)
@@ -749,6 +1410,37 @@ def generate_ifc4(spec):
     # Create roof
     roof = create_roof_slab(f, subcontext, owner, lvl_lp, length_m, width_m, height_m)
     contained_elements.append(roof)
+
+    # Create ceiling
+    try:
+        ceiling = create_ceiling(f, subcontext, owner, lvl_lp, length_m, width_m, height_m)
+        contained_elements.append(ceiling)
+    except Exception as e:
+        print(f"Error creating ceiling: {e}")
+
+    # --- Create Structural Elements ---
+    # Create structural columns based on grid if defined
+    structure_data = spec.get('structure', {})
+    column_grid = structure_data.get('column_grid', [])
+    if column_grid and len(column_grid) > 0:
+        columns = create_structural_grid(f, subcontext, owner, lvl_lp, column_grid, length_m, width_m, height_m)
+        contained_elements.extend(columns)
+        print(f"Created {len(columns)} structural columns")
+
+    # --- Create Interior Walls ---
+    # Get interior walls from spec or generate from room layout
+    interior_walls_spec = spec.get('interior_walls', [])
+    if not interior_walls_spec or len(interior_walls_spec) == 0:
+        # Auto-generate interior walls from room layout
+        interior_walls_spec = create_interior_walls_from_rooms(rooms, length_m, width_m, height_m)
+
+    for idx, iwall in enumerate(interior_walls_spec):
+        try:
+            wall_elem = create_interior_wall(f, subcontext, owner, lvl_lp, iwall)
+            if wall_elem:
+                contained_elements.append(wall_elem)
+        except Exception as e:
+            print(f"Error creating interior wall {idx}: {e}")
 
     # --- Create Rooms ---
     for idx, room in enumerate(rooms):
@@ -775,10 +1467,19 @@ def generate_ifc4(spec):
 
     # --- Create Doors/Windows ---
     try:
-        # Add default door if no openings specified
-        if not openings or len(openings) == 0:
-            door = create_default_door(f, subcontext, owner, lvl_lp, length_m, width_m)
+        # Get south wall for default door (first wall in walls list)
+        south_wall = walls[0] if walls else None
+
+        if openings and len(openings) > 0:
+            # Create openings from spec
+            opening_elems = create_openings(f, subcontext, owner, lvl_lp, openings, length_m, width_m, height_m, walls)
+            contained_elements.extend(opening_elems)
+            print(f"Created {len(opening_elems)} openings from spec")
+        else:
+            # Add default door if no openings specified
+            door, opening = create_default_door(f, subcontext, owner, lvl_lp, length_m, width_m, south_wall)
             contained_elements.append(door)
+            contained_elements.append(opening)
     except Exception as e:
         print(f"Error creating openings: {e}")
 
