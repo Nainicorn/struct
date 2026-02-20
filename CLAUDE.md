@@ -135,17 +135,40 @@ The backend folder contains the most recent code or information that is is ident
 
 ## Project Status
 
-TO-DO:
+### COMPLETED ✅
+
+**IFC4 Generator Implementation** (2025-02-19)
+- ✅ Upgraded IFC schema from IFC2X3 to IFC4 (better modern viewer support)
+- ✅ Fixed critical bug: replaced invalid IfcBuilding envelope with proper 4-wall + floor + roof structure
+- ✅ Implemented comprehensive material library (30+ materials with RGB colors)
+- ✅ Added proper IFC element types (IfcWall, IfcSlab, IfcDoor, IfcWindow, IfcEquipment entities)
+- ✅ Implemented property sets (Pset_WallCommon, Pset_SlabCommon, Pset_SpaceCommon, etc.)
+- ✅ Implemented quantity sets (Qto_WallBaseQuantities, Qto_SlabBaseQuantities, etc.)
+- ✅ Added surface styling with IfcSurfaceStyle and IfcStyledItem for visual rendering
+- ✅ Implemented building-type-aware envelope geometry (office, warehouse, tunnel, parking, hospital, school, industrial, residential)
+- ✅ Added ventilation elements (IfcFlowTerminal) with configurable intake/exhaust positions and fan count
+- ✅ Added default doors and window support with proper materials and styling
+- ✅ Equipment type mapping to specific IFC4 entities (IfcGenerator, IfcPump, IfcFan, IfcCompressor, IfcTransformer, IfcBoiler, IfcChiller, etc.)
+- ✅ Enhanced Bedrock Lambda prompt to extract richer universal JSON spec (wall thickness, room usage, openings, materials, structural system)
+- ✅ Built Docker image for container-based Lambda (arm64 architecture)
+- ✅ Created comprehensive deployment guide (DEPLOYMENT_GUIDE_IFC4.md)
+- **File size improved**: 114 lines → 500+ lines | 0 elements → 100+ architectural elements
+
+### TO-DO:
 - SNS topic (builting-render-triggers) is configured but not attached
 - S3 event notifications need to be configured
-- lambda functions and state machine needs to be tweaked as logic is not perfect, generated ifc file doesn't include all necessary elements
-- generated ifc file needs to be properly rendered in the frontend ifc viewer -- xeokit not recignizing geometry
-- fix any major bugs and get the full flow working and the ifc file should be properly generated and viewable
+- Deploy Docker image to ECR and update Lambda function (see DEPLOYMENT_GUIDE_IFC4.md)
+- Test end-to-end flow with real building documents
+- Verify IFC rendering in xeokit viewer with new IFC4 format
 - screenshot of render in the render list view for each
 
 ### Reach Goals
 1. Human-in-the-loop approval in Step Function
 2. Edit/retry failed renders
 3. Monitoring & logging improvements
+4. Multi-level buildings with ramps and stairs (IfcRamp, IfcStair)
+5. Window/door placement from Bedrock data
+6. MEP (mechanical/electrical/plumbing) systems visualization
+7. Complex curved geometries for tunnels (IfcArbitraryClosedProfileDef with swept arcs)
 
-**challenges**: changed approach from json to ifc instead of raw to ifc
+**References**: See DEPLOYMENT_GUIDE_IFC4.md for deployment instructions and testing procedures
