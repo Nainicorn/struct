@@ -4,12 +4,13 @@ import ifcViewer from '../ifc-viewer/ifc-viewer.js';
 import uploadService from '../../services/uploadService.js';
 import usersService from '../../services/usersService.js';
 import rendersService from '../../services/rendersService.js';
+import modalService from '../../services/modalService.js';
 
 const renderbox = {
     element: null,
     viewerCanvas: null,
     stagedFiles: [], // Files waiting to be uploaded
-    MAX_FILES: 10, // Maximum number of files allowed
+    MAX_FILES: 15, // Maximum number of files allowed
     pollingInterval: null,
     currentRenderId: null,
     pollingStartTime: null,
@@ -105,7 +106,7 @@ const renderbox = {
      */
     _showError(message) {
         console.error('UI Error:', message);
-        alert(`Error: ${message}`);
+        modalService.alert('Error', message);
     },
 
     /**
@@ -268,7 +269,12 @@ const renderbox = {
             // Check if this is a parsing/corruption error from web-ifc
             if (errorMsg.includes('unexpected token') || errorMsg.includes('GetSetArgument') || errorMsg.includes('Invalid IFC')) {
                 console.warn('Corrupted IFC detected. Attempting to delete...');
-                const shouldDelete = confirm('This render file is corrupted and cannot be loaded.\n\nWould you like to delete it?');
+                const shouldDelete = await modalService.confirm(
+                    'Corrupted Render',
+                    'This render file is corrupted and cannot be loaded.\n\nWould you like to delete it?',
+                    'Delete',
+                    'Cancel'
+                );
 
                 if (shouldDelete) {
                     try {
@@ -278,7 +284,7 @@ const renderbox = {
                         document.dispatchEvent(new CustomEvent('rendersUpdated'));
                         // Reset to welcome screen
                         document.dispatchEvent(new CustomEvent('newRenderRequested'));
-                        alert('Corrupted render has been deleted.');
+                        await modalService.alert('Success', 'Corrupted render has been deleted.');
                     } catch (deleteError) {
                         console.error('Failed to delete corrupted render:', deleteError);
                         this._showError('Failed to delete render: ' + deleteError.message);
@@ -571,7 +577,17 @@ const renderbox = {
         const uploadLoadingEl = this.element.querySelector('.__renderbox-upload-loading');
         if (uploadLoadingEl) {
             const textEl = uploadLoadingEl.querySelector('.__renderbox-loading-text');
-            if (textEl) textEl.textContent = message;
+            if (textEl) {
+                // Show elapsed time if available
+                if (message.includes('(')) {
+                    const timeMatch = message.match(/\(([^)]+)\)/);
+                    if (timeMatch) {
+                        textEl.textContent = `Processing • ${timeMatch[1]}`;
+                    }
+                } else {
+                    textEl.textContent = 'Processing';
+                }
+            }
         }
     },
 

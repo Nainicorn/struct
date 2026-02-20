@@ -1,6 +1,7 @@
 import template from './details.hbs';
 import './details.css';
 import rendersService from '../../services/rendersService.js';
+import modalService from '../../services/modalService.js';
 
 const details = {
     element: null,
@@ -123,7 +124,12 @@ const details = {
     async _handleDelete() {
         if (!this.currentRender) return;
 
-        const confirmed = confirm('Are you sure you want to delete this render? This cannot be undone.');
+        const confirmed = await modalService.confirm(
+            'Delete Render',
+            'Are you sure you want to delete this render? This cannot be undone.',
+            'Delete',
+            'Cancel'
+        );
         if (!confirmed) return;
 
         try {
@@ -141,7 +147,7 @@ const details = {
             console.log('Render deleted successfully');
         } catch (error) {
             console.error('Error deleting render:', error);
-            alert(`Failed to delete render: ${error.message}`);
+            await modalService.alert('Error', `Failed to delete render: ${error.message}`);
         }
     }
 };

@@ -75,6 +75,7 @@
     gap: 6px;
     max-height: 120px;
     overflow-y: auto;
+    padding-right: 8px;
 }
 
 .__details-file-item-box {
@@ -135,33 +136,26 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 6px;
+    padding: 10px 16px;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 0.9rem;
     font-weight: 500;
     transition: all 0.2s ease;
-    background: rgba(220, 100, 100, 0.2);
+    background: rgba(231, 76, 60, 0.15);
     color: #ff9999;
-    border: 1px solid rgba(220, 100, 100, 0.4);
-    width: 32px;
-    height: 32px;
+    border: 1px solid rgba(231, 76, 60, 0.3);
 }
 
 .__details-delete:hover {
-    background: rgba(220, 100, 100, 0.4);
-    border-color: rgba(220, 100, 100, 0.8);
+    background: rgba(231, 76, 60, 0.25);
+    border-color: rgba(231, 76, 60, 0.6);
     color: #ffcccc;
 }
 
 .__details-delete:active {
     transform: scale(0.98);
-}
-
-.__details-delete svg {
-    width: 14px;
-    height: 14px;
 }
 
 /* Scrollbar styling */

@@ -1,6 +1,7 @@
 import login from './components/login/login.js';
 import layout from './components/layout/layout.js';
 import authService from './services/authService.js';
+import './styles/modal.css';
 
 const main = {
     init() {

@@ -301,14 +301,32 @@ NO markdown, NO explanations, NO extra text - just the valid JSON conforming to 
 
     console.log('Building spec extracted:', JSON.stringify(buildingSpec).substring(0, 200));
 
-    // Generate title and description from files and document
-    const fileNames = files
-      .filter(f => f.name !== 'description.txt')
-      .map(f => f.name)
-      .join(', ');
+    // Generate title and description from building spec
+    const ai_generated_title = buildingSpec.buildingName || `Structure Model`;
 
-    const ai_generated_title = buildingSpec.buildingName || `Model - ${renderId.slice(0, 8)}`;
-    const ai_generated_description = `${buildingSpec.buildingType} model (${buildingSpec.dimensions.length_m}m × ${buildingSpec.dimensions.width_m}m × ${buildingSpec.dimensions.height_m}m) from ${files.length} source files. ${fileNames ? `Files: ${fileNames}. ` : ''}${descriptionContent ? `Description: ${descriptionContent.substring(0, 80)}...` : ''}`;
+    // Build a detailed description based on the building spec
+    let descriptionParts = [];
+
+    // Describe the building type and purpose
+    descriptionParts.push(`${buildingSpec.buildingType} project featuring a ${buildingSpec.dimensions.length_m}m × ${buildingSpec.dimensions.width_m}m × ${buildingSpec.dimensions.height_m}m structure.`);
+
+    // Add room information if available
+    if (buildingSpec.rooms && buildingSpec.rooms.length > 0) {
+      descriptionParts.push(`Contains ${buildingSpec.rooms.length} room(s) including ${buildingSpec.rooms.slice(0, 3).map(r => r.name).join(', ')}${buildingSpec.rooms.length > 3 ? ' and more.' : '.'}`);
+    }
+
+    // Add ventilation system info
+    if (buildingSpec.ventilation && buildingSpec.ventilation.system_type) {
+      descriptionParts.push(`Features ${buildingSpec.ventilation.system_type} ventilation system with intake from ${buildingSpec.ventilation.intake_location || 'specified location'}.`);
+    }
+
+    // Add equipment information
+    if (buildingSpec.equipment && buildingSpec.equipment.length > 0) {
+      const equipmentTypes = [...new Set(buildingSpec.equipment.map(e => e.type))];
+      descriptionParts.push(`Equipped with ${buildingSpec.equipment.length} equipment item(s) including ${equipmentTypes.slice(0, 3).join(', ')}${equipmentTypes.length > 3 ? ' and others.' : '.'}`);
+    }
+
+    const ai_generated_description = descriptionParts.join(' ');
 
     console.log('Bedrock extraction complete');
 

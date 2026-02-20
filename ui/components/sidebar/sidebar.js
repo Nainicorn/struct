@@ -2,6 +2,7 @@ import template from './sidebar.hbs';
 import './sidebar.css';
 import controls from '../controls/controls';
 import rendersService from '../../services/rendersService.js';
+import modalService from '../../services/modalService.js';
 
 const sidebar = {
     element: null,
@@ -37,6 +38,15 @@ const sidebar = {
         const rendersContainer = this.element.querySelector('.__sidebar-renders');
         if (rendersContainer) {
             rendersContainer.addEventListener('click', (e) => {
+                // Handle delete button click
+                if (e.target.closest('.__render-delete-btn')) {
+                    e.stopPropagation();
+                    const renderItem = e.target.closest('.__render-item');
+                    const renderId = renderItem.dataset.renderId;
+                    this._handleDeleteRender(renderId);
+                    return;
+                }
+
                 const renderItem = e.target.closest('.__render-item');
                 if (renderItem) {
                     const renderId = renderItem.dataset.renderId;
@@ -90,7 +100,8 @@ const sidebar = {
         const sorted = successfulRenders.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
         rendersContainer.innerHTML = sorted.map(render => {
-            const title = render.ai_generated_title || render.title || 'Untitled Render';
+            const fullTitle = render.ai_generated_title || render.title || 'Untitled Render';
+            const truncatedTitle = this._truncateToTwoWords(fullTitle);
             const status = render.status || 'unknown';
             const statusClass = `__render-status-${status}`;
             const thumbnailUrl = this._getThumbnailUrl(render);
@@ -101,7 +112,14 @@ const sidebar = {
                         <div class="__render-item-image" style="background-image: url('${thumbnailUrl}')"></div>
                         <div class="__render-item-status ${statusClass}" title="${status}"></div>
                     </div>
-                    <div class="__render-item-title">${title}</div>
+                    <div class="__render-item-title">
+                        <span title="${fullTitle}">${truncatedTitle}</span>
+                        <button class="__render-delete-btn" title="Delete render">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
             `;
         }).join('');
@@ -117,6 +135,14 @@ const sidebar = {
     },
 
     /**
+     * Truncate title to maximum 2 words
+     */
+    _truncateToTwoWords(title) {
+        const words = title.trim().split(/\s+/);
+        return words.slice(0, 2).join(' ');
+    },
+
+    /**
      * Handle render item click
      */
     _handleRenderClick(renderId) {
@@ -125,6 +151,32 @@ const sidebar = {
             detail: { id: renderId }
         });
         document.dispatchEvent(event);
+    },
+
+    /**
+     * Handle delete render
+     */
+    async _handleDeleteRender(renderId) {
+        const confirmed = await modalService.confirm(
+            'Delete Render',
+            'Are you sure you want to delete this render? This cannot be undone.',
+            'Delete',
+            'Cancel'
+        );
+
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            await rendersService.deleteRender(renderId);
+            // Trigger refresh of renders list
+            const event = new CustomEvent('rendersUpdated');
+            document.dispatchEvent(event);
+        } catch (error) {
+            console.error('Error deleting render:', error);
+            await modalService.alert('Error', 'Failed to delete render. Please try again.');
+        }
     }
 };
 
