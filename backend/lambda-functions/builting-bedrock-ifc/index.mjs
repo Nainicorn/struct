@@ -94,30 +94,30 @@ export const handler = async (event) => {
     const messageContent = [
       {
         type: 'text',
-        text: `You are an expert in interpreting architectural and engineering documents to extract building specifications.
-Extract structured data from the provided files and return it as a JSON object. This JSON will be converted to an IFC 3D model by another system.
+        text: `You are an expert in interpreting architectural and engineering documents to extract comprehensive building specifications.
+Extract structured data from the provided files and return it as a JSON object. This JSON will be converted to a 3D IFC model by another system.
 
 ═══════════════════════════════════════════════════════════════
 REQUIRED JSON STRUCTURE:
 ═══════════════════════════════════════════════════════════════
-Return ONLY valid JSON (no markdown, no explanations). The structure MUST be:
+Return ONLY valid JSON (no markdown, no explanations). All REQUIRED fields must be present.
 
 {
   "buildingName": "string - descriptive name for the building/structure",
-  "buildingType": "string - BUILDING, WAREHOUSE, TUNNEL, FACILITY, WAREHOUSE, PARKING, etc.",
+  "buildingType": "string - one of: BUILDING, OFFICE, WAREHOUSE, TUNNEL, FACILITY, PARKING, HOSPITAL, SCHOOL, INDUSTRIAL, RESIDENTIAL",
   "dimensions": {
     "length_m": number - main length dimension in metres,
     "width_m": number - width dimension in metres,
-    "height_m": number - height/depth dimension in metres
+    "height_m": number - height/depth dimension in metres,
+    "wall_thickness_m": number - exterior wall thickness (default 0.3 if not specified)
   },
   "elevations": {
-    "floor_level_m": number - ground level elevation (default 0.0),
-    "portal_west_m": number - west portal/entrance elevation if applicable,
-    "portal_east_m": number - east portal/entrance elevation if applicable
+    "floor_level_m": number - ground level elevation (default 0.0)
   },
   "rooms": [
     {
       "name": "string - room name/identifier",
+      "usage": "string - one of: OFFICE, STORAGE, MECHANICAL, ELECTRICAL, CIRCULATION, WC, LOBBY, LAB, PARKING, OTHER",
       "length_m": number,
       "width_m": number,
       "height_m": number,
@@ -125,35 +125,68 @@ Return ONLY valid JSON (no markdown, no explanations). The structure MUST be:
       "y_position_m": number - Y offset from origin
     }
   ],
+  "openings": [
+    {
+      "type": "string - DOOR or WINDOW",
+      "wall_side": "string - NORTH, SOUTH, EAST, or WEST",
+      "x_offset_m": number - position along the wall,
+      "width_m": number - opening width,
+      "height_m": number - opening height,
+      "sill_height_m": number - height from floor to opening sill (0.0 for doors, 0.9 for windows typically)
+    }
+  ],
   "ventilation": {
-    "system_type": "string - e.g. 'natural', 'mechanical', 'hybrid'",
+    "system_type": "string - 'natural', 'mechanical', or 'hybrid'",
     "intake_location": "string - e.g. 'West', 'North'",
-    "exhaust_location": "string - e.g. 'East', 'South'"
+    "exhaust_location": "string - e.g. 'East', 'South'",
+    "num_fans": number - number of fans/terminals (default 1)
   },
   "equipment": [
     {
       "name": "string - equipment identifier",
-      "type": "string - GENERATOR, PUMP, FAN, COMPRESSOR, TRANSFORMER, BATTERY, CONVERTER, etc.",
-      "x_position_m": number,
-      "y_position_m": number
+      "type": "string - GENERATOR, PUMP, FAN, COMPRESSOR, TRANSFORMER, BATTERY, CONVERTER, BOILER, CHILLER, AHU, or OTHER",
+      "x_position_m": number - X position,
+      "y_position_m": number - Y position,
+      "length_m": number (optional) - equipment length, or null for default size,
+      "width_m": number (optional) - equipment width, or null for default size,
+      "height_m": number (optional) - equipment height, or null for default size
     }
-  ]
+  ],
+  "materials": {
+    "walls": "string - material type (concrete, brick, steel, timber, glass, other) - default: concrete",
+    "floor": "string - material type (concrete, timber, raised_access, screed, other) - default: concrete",
+    "roof": "string - material type (concrete, metal, membrane, tiles, other) - default: metal"
+  },
+  "structural_system": "string - FRAME, LOADBEARING, SHELL, TRUSS, or OTHER - default: LOADBEARING"
 }
 
 ═══════════════════════════════════════════════════════════════
 EXTRACTION GUIDELINES:
 ═══════════════════════════════════════════════════════════════
-1. buildingName: Look for project title, structure name, or descriptive text in documents
-2. buildingType: Infer from content (tunnel = TUNNEL, warehouse = WAREHOUSE, facility = FACILITY, building = BUILDING, etc.)
-3. dimensions: Convert any imperial/feet measurements to METRES (1 foot = 0.3048 m, 1 inch = 0.0254 m)
-4. elevations: Extract portal/grade elevations if available; if not specified, portal_east = floor_level
-5. rooms: Extract if floor plans or room layouts are mentioned in documents
-6. ventilation: Look for HVAC, ventilation, fan, air system, duct, intake, exhaust mentions
-7. equipment: Extract any mentioned equipment (generators, pumps, transformers, compressors, fans, batteries, converters)
-8. Use realistic estimates: If dimensions aren't explicit, infer from context and document descriptions
-9. ALL DIMENSIONS AND ELEVATIONS MUST BE IN METRES
-10. Return empty arrays [] or empty objects {} for sections with no information in documents
-11. Ensure JSON is valid (no trailing commas, proper quotes, no comments)
+CRITICAL:
+- ALL DIMENSIONS AND ELEVATIONS MUST BE IN METRES
+- Convert imperial (feet/inches) to metres: 1 foot = 0.3048m, 1 inch = 0.0254m
+- Return empty arrays [] for sections with no information in documents
+- For missing optional fields, use null or omit them
+- buildingType: Infer from content. TUNNEL = tunnel/subway/culvert, WAREHOUSE = warehouse/storage facility, PARKING = parking garage/lot, etc.
+
+DETAILED FIELD GUIDANCE:
+1. buildingName: Project title, structure name, or descriptive identifier from documents
+2. buildingType: Infer from building purpose (tunnel, warehouse, office building, industrial facility, hospital, school, residential complex, parking garage)
+3. dimensions.length_m/width_m/height_m: Main structural dimensions; for tunnels, length = tunnel length, height = tunnel diameter
+4. dimensions.wall_thickness_m: Typical exterior wall thickness in metres (0.2-0.5m for standard construction)
+5. rooms: Extract rooms/spaces from floor plans or descriptions with usage classification (OFFICE, MECHANICAL, etc.)
+6. openings: Extract doors/windows with wall side and positions; estimate typical door height (2.1m), window sill (0.9m)
+7. ventilation: Look for HVAC, ventilation, fan, air system, duct, intake, exhaust mentions. Count number of fans if available.
+8. equipment: Extract generators, pumps, transformers, compressors, fans, batteries, converters, boilers, chillers, AHUs with spatial positions
+9. materials: Identify structural/finish materials from construction documents
+10. structural_system: Infer from building type (office/warehouse typically frame, tunnels typically shell/lining)
+
+SPECIAL CASES:
+- TUNNEL: length_m = tunnel length, width_m ≈ height_m ≈ tunnel diameter, wall_thickness_m = lining thickness
+- WAREHOUSE: Often large open spans, minimal interior walls; indicate via room usage = STORAGE
+- PARKING: May have ramps; indicate via openings with wall_side positioning
+- INDUSTRIAL: Often has heavy equipment; add equipment entries with realistic positioning
 
 ═══════════════════════════════════════════════════════════════
 
@@ -165,8 +198,9 @@ ${unsupportedFiles.length > 0 ? `\nAdditional files provided (type: ${unsupporte
 ═══════════════════════════════════════════════════════════════
 YOUR TASK:
 ═══════════════════════════════════════════════════════════════
-Extract building specification from the above information and return ONLY the JSON object.
-NO markdown, NO explanations, NO extra text - just the valid JSON conforming to the schema above.`
+Extract comprehensive building specification from the above information and return ONLY the JSON object.
+NO markdown, NO explanations, NO extra text - just the valid JSON conforming to the schema above.
+Use realistic defaults for any missing but inferable information (e.g., standard wall thickness = 0.3m, standard door height = 2.1m).`
       }
     ];
 
@@ -270,7 +304,7 @@ NO markdown, NO explanations, NO extra text - just the valid JSON conforming to 
       throw new Error(`Invalid JSON from Bedrock: ${err.message}`);
     }
 
-    // Validate required fields
+    // Validate required fields and apply defaults
     if (!buildingSpec.buildingName) {
       buildingSpec.buildingName = 'Structure';
     }
@@ -278,7 +312,11 @@ NO markdown, NO explanations, NO extra text - just the valid JSON conforming to 
       buildingSpec.buildingType = 'BUILDING';
     }
     if (!buildingSpec.dimensions) {
-      buildingSpec.dimensions = { length_m: 100, width_m: 50, height_m: 6 };
+      buildingSpec.dimensions = { length_m: 100, width_m: 50, height_m: 6, wall_thickness_m: 0.3 };
+    } else {
+      if (buildingSpec.dimensions.wall_thickness_m === undefined) {
+        buildingSpec.dimensions.wall_thickness_m = 0.3;
+      }
     }
     if (!buildingSpec.elevations) {
       buildingSpec.elevations = {};
@@ -286,17 +324,32 @@ NO markdown, NO explanations, NO extra text - just the valid JSON conforming to 
     if (buildingSpec.elevations.floor_level_m === undefined) {
       buildingSpec.elevations.floor_level_m = 0.0;
     }
-    if (buildingSpec.elevations.portal_east_m === undefined) {
-      buildingSpec.elevations.portal_east_m = buildingSpec.dimensions.length_m;
-    }
     if (!buildingSpec.rooms) {
       buildingSpec.rooms = [];
     }
+    if (!buildingSpec.openings) {
+      buildingSpec.openings = [];
+    }
     if (!buildingSpec.ventilation) {
-      buildingSpec.ventilation = {};
+      buildingSpec.ventilation = { system_type: 'natural', intake_location: 'West', exhaust_location: 'East', num_fans: 1 };
+    } else {
+      if (!buildingSpec.ventilation.system_type) buildingSpec.ventilation.system_type = 'natural';
+      if (!buildingSpec.ventilation.intake_location) buildingSpec.ventilation.intake_location = 'West';
+      if (!buildingSpec.ventilation.exhaust_location) buildingSpec.ventilation.exhaust_location = 'East';
+      if (buildingSpec.ventilation.num_fans === undefined) buildingSpec.ventilation.num_fans = 1;
     }
     if (!buildingSpec.equipment) {
       buildingSpec.equipment = [];
+    }
+    if (!buildingSpec.materials) {
+      buildingSpec.materials = { walls: 'concrete', floor: 'concrete', roof: 'metal' };
+    } else {
+      if (!buildingSpec.materials.walls) buildingSpec.materials.walls = 'concrete';
+      if (!buildingSpec.materials.floor) buildingSpec.materials.floor = 'concrete';
+      if (!buildingSpec.materials.roof) buildingSpec.materials.roof = 'metal';
+    }
+    if (!buildingSpec.structural_system) {
+      buildingSpec.structural_system = 'LOADBEARING';
     }
 
     console.log('Building spec extracted:', JSON.stringify(buildingSpec).substring(0, 200));
