@@ -154,12 +154,25 @@ The backend folder contains the most recent code or information that is is ident
 - ✅ Created comprehensive deployment guide (DEPLOYMENT_GUIDE_IFC4.md)
 - **File size improved**: 114 lines → 500+ lines | 0 elements → 100+ architectural elements
 
+**VentSim Tunnel IFC Generation** (2025-02-19)
+- ✅ Added VentSim format detector and parser to builting-bedrock-ifc lambda
+- ✅ Implemented MAIN section parsing: 69 tunnel branches with 3D coordinates, cross-sections, liner types
+- ✅ Extract 7 named spaces (East Portal, West Portal, Diesel Gen, AC Room, Office, Exhaust Chamber, Exhaust Shaft)
+- ✅ Extract 3 fans with properties and positions
+- ✅ Added tunnel branch IFC generation to Python lambda:
+  - Rectangular profiles: IfcWallStandardCase + IfcRectangleProfileDef
+  - Round ducts: IfcMember + IfcCircleProfileDef
+  - Proper 3D placement using direction vectors and coordinate normalization
+  - Material color coding by liner type (concrete vs blasted)
+  - Property sets with tunnel data (dimensions, area, liner type)
+- ✅ Created builting-bedrock-ifc.zip for deployment
+- ✅ Python lambda ready for Docker build and ECR push
+- **Expected improvement**: 1,500 → 10,000-15,000 IFC lines | 100 → 150+ elements | accurate 3D tunnel network
+
 ### TO-DO:
-- SNS topic (builting-render-triggers) is configured but not attached
-- S3 event notifications need to be configured
-- Deploy Docker image to ECR and update Lambda function (see DEPLOYMENT_GUIDE_IFC4.md)
-- Test end-to-end flow with real building documents
-- Verify IFC rendering in xeokit viewer with new IFC4 format
+- Deploy builting-bedrock-ifc.zip to AWS Lambda (manual step)
+- Build and push Python lambda Docker image to ECR (manual step via deploy.sh)
+- Test end-to-end with beggars_tomb_ventsim.txt file
 - screenshot of render in the render list view for each
 
 ### Reach Goals

@@ -180,6 +180,10 @@ const sidebar = {
 
         try {
             await rendersService.deleteRender(renderId);
+
+            // Hide details panel and go back to welcome screen
+            document.dispatchEvent(new CustomEvent('newRenderRequested'));
+
             // Trigger refresh of renders list
             const event = new CustomEvent('rendersUpdated');
             document.dispatchEvent(event);

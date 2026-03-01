@@ -70,6 +70,13 @@ const details = {
     hide() {
         this.element.classList.remove('__details-visible');
         this.currentRender = null;
+        // Clear all content when hiding
+        const titleEl = this.element.querySelector('.__details-title');
+        const descEl = this.element.querySelector('.__details-description');
+        const filesContainer = this.element.querySelector('.__details-files');
+        if (titleEl) titleEl.textContent = '';
+        if (descEl) descEl.textContent = '';
+        if (filesContainer) filesContainer.innerHTML = '';
     },
 
     /**

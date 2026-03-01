@@ -5,13 +5,17 @@ with proper materials, property sets, element types, and spatial hierarchy.
 """
 
 import json
+import os
 from datetime import datetime, timezone
+import boto3
 
 try:
     import ifcopenshell
     import ifcopenshell.guid
 except Exception as e:
     raise RuntimeError(f"IfcOpenShell not available in runtime: {e}")
+
+s3_client = boto3.client('s3')
 
 
 # ============================================================================
@@ -842,6 +846,211 @@ def create_default_door(f, subcontext, owner, parent_lp, length_m, width_m, host
 
 
 # ============================================================================
+# TUNNEL BRANCH GENERATION (VENTSIM)
+# ============================================================================
+
+def compute_direction_vector(x1, y1, z1, x2, y2, z2):
+    """Compute direction vector from point 1 to point 2, normalized."""
+    dx = x2 - x1
+    dy = y2 - y1
+    dz = z2 - z1
+    length = (dx**2 + dy**2 + dz**2)**0.5
+
+    if length < 0.01:
+        return (1.0, 0.0, 0.0), 0.0  # Degenerate case
+
+    return (dx/length, dy/length, dz/length), length
+
+
+def compute_perpendicular_direction(dir_x, dir_y, dir_z):
+    """Compute a perpendicular direction vector using cross product."""
+    import math
+
+    # Choose a non-parallel reference vector
+    if abs(dir_z) < 0.9:
+        # Direction is mostly horizontal, use Z-axis as reference
+        ref_x, ref_y, ref_z = 0.0, 0.0, 1.0
+    else:
+        # Direction is mostly vertical, use X-axis as reference
+        ref_x, ref_y, ref_z = 1.0, 0.0, 0.0
+
+    # Cross product: direction × reference
+    perp_x = dir_y * ref_z - dir_z * ref_y
+    perp_y = dir_z * ref_x - dir_x * ref_z
+    perp_z = dir_x * ref_y - dir_y * ref_x
+
+    # Normalize
+    length = (perp_x**2 + perp_y**2 + perp_z**2)**0.5
+    if length < 0.01:
+        return (1.0, 0.0, 0.0)
+
+    return (perp_x/length, perp_y/length, perp_z/length)
+
+
+def create_tunnel_branch(f, subcontext, owner, parent_lp, branch, z_offset=0.0):
+    """Create an IFC element for a tunnel branch (rectangular or circular duct)."""
+    try:
+        name = branch.get('name', 'Branch')
+        x1 = float(branch.get('x1', 0.0))
+        y1 = float(branch.get('y1', 0.0))
+        z1 = float(branch.get('z1', 0.0))
+        x2 = float(branch.get('x2', 0.0))
+        y2 = float(branch.get('y2', 0.0))
+        z2 = float(branch.get('z2', 0.0))
+        width = float(branch.get('width', 1.0))
+        height = float(branch.get('height', 1.0))
+        shape_type = int(branch.get('shape_type', 0))  # 0=rect, 1=round
+        liner_type = int(branch.get('liner_type', 1))  # 0=blasted, 1=concrete_lined
+
+        # Compute direction vector and length
+        dir_vec, length = compute_direction_vector(x1, y1, z1, x2, y2, z2)
+
+        if length < 0.1:
+            return None  # Skip degenerate branches
+
+        # Compute perpendicular reference direction
+        ref_dir = compute_perpendicular_direction(dir_vec[0], dir_vec[1], dir_vec[2])
+
+        # Select material color based on liner type and shape
+        if shape_type == 1:  # Round duct
+            mat_color = (0.40, 0.50, 0.65)  # Blue-grey for ductwork
+        elif liner_type == 0:  # Blasted rock
+            mat_color = (0.45, 0.40, 0.38)  # Darker grey
+        else:  # Concrete lined
+            mat_color = (0.75, 0.75, 0.73)  # Light grey
+
+        # Create profile based on shape
+        profile_origin = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0))
+        profile_x = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0))
+        profile_place = f.create_entity('IfcAxis2Placement2D', Location=profile_origin, RefDirection=profile_x)
+
+        if shape_type == 1:  # Round
+            radius = width / 2.0
+            profile = f.create_entity(
+                'IfcCircleProfileDef',
+                ProfileType='AREA',
+                Radius=radius,
+                Position=profile_place
+            )
+        else:  # Rectangular
+            profile = f.create_entity(
+                'IfcRectangleProfileDef',
+                ProfileType='AREA',
+                XDim=width,
+                YDim=height,
+                Position=profile_place
+            )
+
+        # Create extrusion geometry (base at origin, extrude along local Z)
+        origin = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0))
+        extrude_axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+        ref_dir_entity = f.create_entity('IfcDirection', DirectionRatios=ref_dir)
+        solid_place = f.create_entity('IfcAxis2Placement3D', Location=origin, Axis=extrude_axis, RefDirection=ref_dir_entity)
+
+        extrude_dir = f.create_entity('IfcDirection', DirectionRatios=dir_vec)
+        solid = f.create_entity(
+            'IfcExtrudedAreaSolid',
+            SweptArea=profile,
+            Position=solid_place,
+            ExtrudedDirection=extrude_dir,
+            Depth=length
+        )
+
+        apply_style(f, solid, mat_color, transparency=0.0, entity_name=name)
+
+        body_rep = f.create_entity(
+            'IfcShapeRepresentation',
+            ContextOfItems=subcontext,
+            RepresentationIdentifier='Body',
+            RepresentationType='SweptSolid',
+            Items=(solid,)
+        )
+        pds = f.create_entity('IfcProductDefinitionShape', Representations=(body_rep,))
+
+        # Placement at branch start position (normalized coordinates)
+        branch_origin = f.create_entity('IfcCartesianPoint', Coordinates=(x1, y1, z1 - z_offset))
+        branch_axis = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+        branch_refd = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0))
+        branch_place = f.create_entity('IfcAxis2Placement3D', Location=branch_origin, Axis=branch_axis, RefDirection=branch_refd)
+        branch_lp = f.create_entity('IfcLocalPlacement', PlacementRelTo=parent_lp, RelativePlacement=branch_place)
+
+        # Create IFC element
+        if shape_type == 1:  # Round ductwork → use IfcMember
+            element = f.create_entity(
+                'IfcMember',
+                GlobalId=new_guid(),
+                OwnerHistory=owner,
+                Name=name,
+                ObjectPlacement=branch_lp,
+                Representation=pds
+            )
+        else:  # Rectangular → use IfcWallStandardCase
+            element = f.create_entity(
+                'IfcWallStandardCase',
+                GlobalId=new_guid(),
+                OwnerHistory=owner,
+                Name=name,
+                ObjectPlacement=branch_lp,
+                Representation=pds,
+                PredefinedType='SOLIDWALL'
+            )
+
+        # Add property set
+        add_property_set(f, owner, element, 'Pset_TunnelBranchData', {
+            'Width': (width, 'IfcReal'),
+            'Height': (height, 'IfcReal'),
+            'Area': (width * height if shape_type == 0 else 3.14159 * (width/2)**2, 'IfcReal'),
+            'ShapeType': ('Round' if shape_type == 1 else 'Rectangular', 'IfcLabel'),
+            'LinerType': ('Concrete' if liner_type == 1 else 'Blasted', 'IfcLabel'),
+        })
+
+        # Add quantity set
+        add_quantity_set(f, owner, element, 'Qto_TunnelBranchQuantities', {
+            'Length': (length, 'IfcQuantityLength'),
+            'CrossSectionArea': (width * height if shape_type == 0 else 3.14159 * (width/2)**2, 'IfcQuantityArea'),
+        })
+
+        return element
+
+    except Exception as e:
+        print(f"Error creating tunnel branch {branch.get('name', 'Unknown')}: {e}")
+        return None
+
+
+def create_tunnel_branches(f, subcontext, owner, parent_lp, tunnel_branches, tunnel_bounds):
+    """Create multiple IFC elements from tunnel branch data."""
+    branches = []
+
+    if not tunnel_branches or len(tunnel_branches) == 0:
+        return branches
+
+    # Get Z offset for normalization
+    z_offset = tunnel_bounds.get('min_z', 0.0) if tunnel_bounds else 0.0
+    min_x = tunnel_bounds.get('min_x', 0.0) if tunnel_bounds else 0.0
+    min_y = tunnel_bounds.get('min_y', 0.0) if tunnel_bounds else 0.0
+
+    for idx, branch in enumerate(tunnel_branches):
+        try:
+            # Normalize coordinates
+            branch_normalized = {**branch}
+            branch_normalized['x1'] = float(branch.get('x1', 0.0)) - min_x
+            branch_normalized['y1'] = float(branch.get('y1', 0.0)) - min_y
+            branch_normalized['x2'] = float(branch.get('x2', 0.0)) - min_x
+            branch_normalized['y2'] = float(branch.get('y2', 0.0)) - min_y
+            branch_normalized['z1'] = float(branch.get('z1', 0.0)) - z_offset
+            branch_normalized['z2'] = float(branch.get('z2', 0.0)) - z_offset
+
+            elem = create_tunnel_branch(f, subcontext, owner, parent_lp, branch_normalized, z_offset=0.0)
+            if elem:
+                branches.append(elem)
+        except Exception as e:
+            print(f"Error processing branch {idx}: {e}")
+
+    print(f"Created {len(branches)} tunnel branch elements")
+    return branches
+
+
+# ============================================================================
 # COVERINGS (CEILINGS)
 # ============================================================================
 
@@ -1386,9 +1595,20 @@ def generate_ifc4(spec):
     # --- Create Building Envelope ---
     contained_elements = []
 
-    # Create walls with material layers
-    walls = create_building_walls(f, subcontext, owner, lvl_lp, length_m, width_m, height_m, wall_thickness_m, axis_subcontext)
-    contained_elements.extend(walls)
+    # Check if this is a tunnel network (VentSim data)
+    tunnel_branches = spec.get('tunnel_branches', [])
+    tunnel_bounds = spec.get('tunnel_bounds', {})
+
+    walls = []  # Initialize walls for both tunnel and standard modes
+    if tunnel_branches and len(tunnel_branches) > 0:
+        # VentSim tunnel mode: generate tunnel network elements
+        print(f"Generating {len(tunnel_branches)} tunnel branch elements...")
+        tunnel_elems = create_tunnel_branches(f, subcontext, owner, lvl_lp, tunnel_branches, tunnel_bounds)
+        contained_elements.extend(tunnel_elems)
+    else:
+        # Standard building mode: create walls with material layers
+        walls = create_building_walls(f, subcontext, owner, lvl_lp, length_m, width_m, height_m, wall_thickness_m, axis_subcontext)
+        contained_elements.extend(walls)
 
     # Apply material layers to walls
     wall_material = materials.get('walls', 'concrete')
@@ -1401,22 +1621,24 @@ def generate_ifc4(spec):
     for wall in walls:
         apply_material_layers_to_wall(f, owner, wall, material_layer_set)
 
-    print(f"Applied material layers to {len(walls)} exterior walls")
+    if not tunnel_branches:
+        # Only apply material layers for non-tunnel buildings
+        print(f"Applied material layers to {len(walls)} exterior walls")
 
-    # Create floor
-    floor = create_floor_slab(f, subcontext, owner, lvl_lp, length_m, width_m)
-    contained_elements.append(floor)
+        # Create floor
+        floor = create_floor_slab(f, subcontext, owner, lvl_lp, length_m, width_m)
+        contained_elements.append(floor)
 
-    # Create roof
-    roof = create_roof_slab(f, subcontext, owner, lvl_lp, length_m, width_m, height_m)
-    contained_elements.append(roof)
+        # Create roof
+        roof = create_roof_slab(f, subcontext, owner, lvl_lp, length_m, width_m, height_m)
+        contained_elements.append(roof)
 
-    # Create ceiling
-    try:
-        ceiling = create_ceiling(f, subcontext, owner, lvl_lp, length_m, width_m, height_m)
-        contained_elements.append(ceiling)
-    except Exception as e:
-        print(f"Error creating ceiling: {e}")
+        # Create ceiling
+        try:
+            ceiling = create_ceiling(f, subcontext, owner, lvl_lp, length_m, width_m, height_m)
+            contained_elements.append(ceiling)
+        except Exception as e:
+            print(f"Error creating ceiling: {e}")
 
     # --- Create Structural Elements ---
     # Create structural columns based on grid if defined
@@ -1507,6 +1729,7 @@ def handler(event, context):
 
     building_spec = event.get('buildingSpec')
     render_id = event.get('renderId')
+    user_id = event.get('userId')
 
     if not building_spec:
         raise ValueError('No buildingSpec provided')
@@ -1517,9 +1740,30 @@ def handler(event, context):
         print('IFC4 generated successfully')
         print(f'IFC size: {len(ifc_content)} bytes')
 
+        # Save IFC to S3 to avoid Step Function size limits
+        bucket = 'builting-ifc'
+        s3_key = f'{user_id}/{render_id}/model.ifc'
+
+        try:
+            s3_client.put_object(
+                Bucket=bucket,
+                Key=s3_key,
+                Body=ifc_content.encode('utf-8'),
+                ContentType='text/plain'
+            )
+            print(f'IFC saved to S3: s3://{bucket}/{s3_key}')
+        except Exception as s3_error:
+            print(f'Warning: Failed to save to S3: {s3_error}')
+            # Continue anyway, don't fail the whole lambda
+
         return {
-            **event,
-            'ifcContent': ifc_content
+            'renderId': render_id,
+            'userId': user_id,
+            'ifcContent': ifc_content,
+            'ifcGenerated': True,
+            'ifcSizeBytes': len(ifc_content),
+            'ifcS3Path': f's3://{bucket}/{s3_key}',
+            'status': 'IFC generated and saved to S3'
         }
     except Exception as error:
         print(f'JsonToIFC error: {error}')

@@ -620,7 +620,19 @@ const renderbox = {
             } else if (render.status === 'failed') {
                 this._stopPolling();
                 this._hideLoadingState();
-                this._showError(`Render failed: ${render.error_message || 'Unknown error'}`);
+
+                // Show error immediately and prominently
+                const errorMsg = render.error_message || 'Unknown error occurred during rendering';
+                console.error('Render failed with status:', errorMsg);
+
+                // Use alert for immediate visibility, then show in modal
+                await modalService.alert(
+                    'Render Failed',
+                    `Your render failed to process.\n\nError: ${errorMsg}\n\nYou can try again with different files or settings.`
+                );
+
+                // Also refresh sidebar to show the failed status
+                document.dispatchEvent(new CustomEvent('rendersUpdated'));
                 return;
             }
 
