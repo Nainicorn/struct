@@ -1,13 +1,15 @@
 {
-  "Comment": "Render orchestration: extract spec from files → generate IFC → store",
+  "Comment": "CSS Pipeline (consolidated): ReadMetadata → Extract (with inline fallback) → SaveSnapshot → CSSPipeline (validate+repair+normalize) → GenerateIFC (with inline validation+self-healing) → StoreIFC",
   "StartAt": "ReadRenderMetadata",
   "States": {
     "ReadRenderMetadata": {
       "Type": "Task",
       "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-read-metadata",
       "ResultPath": "$.metadata",
-      "Next": "ExtractBuildingSpec"
+      "Next": "ExtractBuildingSpec",
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
     },
+
     "ExtractBuildingSpec": {
       "Type": "Task",
       "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-bedrock-ifc",
@@ -19,40 +21,70 @@
         "description.$": "$.metadata.render.description"
       },
       "ResultPath": "$.specResult",
-      "Next": "GenerateIFC",
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "States.TaskFailed"
-          ],
-          "IntervalSeconds": 2,
-          "MaxAttempts": 3,
-          "BackoffRate": 2
-        }
-      ]
+      "Next": "SaveCSSSnapshot",
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
     },
+
+    "SaveCSSSnapshot": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Parameters": {
+        "Bucket": "builting-data",
+        "Key.$": "States.Format('uploads/{}/{}/css/css_snapshot.json', $.userId, $.renderId)",
+        "Body.$": "States.JsonToString($.specResult.css)",
+        "ContentType": "application/json"
+      },
+      "ResultPath": "$.cssSnapshotResult",
+      "Next": "CSSPipeline",
+      "Catch": [{
+        "ErrorEquals": ["States.ALL"],
+        "ResultPath": "$.cssSnapshotError",
+        "Next": "CSSPipeline"
+      }]
+    },
+
+    "CSSPipeline": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-css-pipeline",
+      "Parameters": {
+        "css.$": "$.specResult.css",
+        "userId.$": "$.userId",
+        "renderId.$": "$.renderId",
+        "bucket.$": "$.bucket"
+      },
+      "ResultPath": "$.pipelineResult",
+      "Next": "GenerateIFC",
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 1, "BackoffRate": 2 }]
+    },
+
     "GenerateIFC": {
       "Type": "Task",
       "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-json-to-ifc",
       "Parameters": {
-        "buildingSpec.$": "$.specResult.buildingSpec",
+        "css.$": "$.pipelineResult.css",
         "renderId.$": "$.renderId",
         "userId.$": "$.userId"
       },
       "ResultPath": "$.ifcResult",
-      "Next": "StoreIFC"
+      "Next": "StoreIFC",
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
     },
+
     "StoreIFC": {
       "Type": "Task",
       "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store-ifc",
       "Parameters": {
-        "ifcContent.$": "$.ifcResult.ifcContent",
         "renderId.$": "$.renderId",
         "userId.$": "$.userId",
+        "ifcS3Path.$": "$.ifcResult.ifcS3Path",
         "ai_generated_title.$": "$.specResult.ai_generated_title",
-        "ai_generated_description.$": "$.specResult.ai_generated_description"
+        "ai_generated_description.$": "$.specResult.ai_generated_description",
+        "elementCounts.$": "$.ifcResult.elementCounts",
+        "outputMode.$": "$.ifcResult.outputMode",
+        "cssHash.$": "$.ifcResult.cssHash"
       },
-      "End": true
+      "End": true,
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
     }
   }
 }

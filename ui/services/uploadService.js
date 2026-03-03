@@ -30,6 +30,16 @@ const uploadService = {
       headers: { 'Content-Type': 'text/plain' }
     });
     if (!res.ok) throw new Error(`Description upload failed: ${res.status}`);
+  },
+
+  async finalizeRender(renderId) {
+    const user = userStore.getUser();
+    const userId = user?.id;
+    if (!userId) throw new Error('User not authenticated');
+
+    return await aws.call(`/api/renders/${renderId}/finalize?userId=${encodeURIComponent(userId)}`, {
+      method: 'POST'
+    });
   }
 };
 

@@ -1,9 +1,3 @@
-{
-  "userId": "user-1",
-  "renderId": "e74939f5-5fa4-43ab-991a-f149f5122e65",
-  "bucket": "builting-data"
-}
-
 **TASK 9 - set up remaining AWS infrastructure**
 ASSIGNED TO: Naina (for now, will be the rest of the team after I'm done)
 

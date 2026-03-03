@@ -10,7 +10,7 @@ AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:?AWS_ACCOUNT_ID not set}"
 
 # Build the Docker image for arm64 (required for Lambda)
 echo "🐳 Building Docker image: $IMAGE_NAME:latest (arm64)..."
-docker build --platform linux/arm64 -t "$IMAGE_NAME:latest" "$LAMBDA_DIR"
+docker build --platform linux/arm64 --provenance=false -t "$IMAGE_NAME:latest" "$LAMBDA_DIR"
 
 if [ $? -ne 0 ]; then
     echo "❌ Docker build failed"

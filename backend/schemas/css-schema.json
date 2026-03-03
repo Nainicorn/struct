@@ -1,0 +1,494 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://builting.io/schemas/css/v1.0",
+  "title": "Canonical Structure Schema (CSS) v1.0",
+  "description": "Domain-neutral intermediate format for converting raw building/infrastructure data to IFC",
+  "type": "object",
+  "required": ["cssVersion", "domain", "facility", "levelsOrSegments", "elements", "metadata"],
+  "properties": {
+    "cssVersion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version identifier"
+    },
+    "domain": {
+      "type": "string",
+      "enum": ["ARCH", "CIVIL", "TUNNEL", "INDUSTRIAL", "STRUCTURAL", "UNKNOWN"],
+      "description": "Structure domain classification"
+    },
+    "facility": {
+      "$ref": "#/definitions/Facility"
+    },
+    "levelsOrSegments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/LevelOrSegment"
+      },
+      "description": "Spatial containers: storeys (ARCH), chainage segments (TUNNEL/CIVIL), or zones (INDUSTRIAL)"
+    },
+    "elements": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/definitions/Element"
+      },
+      "description": "All structural/architectural/MEP elements in the model"
+    },
+    "metadata": {
+      "$ref": "#/definitions/Metadata"
+    }
+  },
+  "definitions": {
+    "Point3D": {
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "Direction3D": {
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "BoundingBox": {
+      "type": "object",
+      "required": ["min", "max"],
+      "properties": {
+        "min": { "$ref": "#/definitions/Point3D" },
+        "max": { "$ref": "#/definitions/Point3D" }
+      },
+      "additionalProperties": false
+    },
+    "Facility": {
+      "type": "object",
+      "required": ["name", "units", "origin", "axes"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable facility/project name"
+        },
+        "type": {
+          "type": "string",
+          "description": "Facility type (e.g., office, warehouse, tunnel, hospital)"
+        },
+        "description": {
+          "type": "string",
+          "description": "AI-generated or user-provided description"
+        },
+        "units": {
+          "type": "string",
+          "enum": ["M", "FT", "MIXED_UNKNOWN"],
+          "description": "Original source units. Invariant: all CSS values are normalized to meters."
+        },
+        "crs": {
+          "type": ["string", "null"],
+          "description": "Coordinate Reference System identifier (e.g., EPSG:4326). Null if local/unknown."
+        },
+        "localGrid": {
+          "type": ["object", "null"],
+          "description": "Local grid definition if applicable"
+        },
+        "origin": {
+          "$ref": "#/definitions/Point3D",
+          "description": "Project origin in meters (typically min bbox corner after normalization)"
+        },
+        "axes": {
+          "type": "string",
+          "enum": ["RIGHT_HANDED_Z_UP"],
+          "description": "Coordinate system convention. CSS always uses right-handed Z-up."
+        }
+      },
+      "additionalProperties": false
+    },
+    "LevelOrSegment": {
+      "type": "object",
+      "required": ["id", "type", "name"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for cross-referencing from elements"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["STOREY", "SEGMENT", "ZONE"]
+        },
+        "name": {
+          "type": "string"
+        },
+        "elevation_m": {
+          "type": "number",
+          "description": "Required for STOREY: floor elevation in meters"
+        },
+        "height_m": {
+          "type": "number",
+          "description": "Required for STOREY: floor-to-floor height in meters"
+        },
+        "startChainage_m": {
+          "type": "number",
+          "description": "Required for SEGMENT: start chainage along alignment"
+        },
+        "endChainage_m": {
+          "type": "number",
+          "description": "Required for SEGMENT: end chainage along alignment"
+        },
+        "startNode": {
+          "type": "string",
+          "description": "Optional for SEGMENT: start node identifier for graph connectivity"
+        },
+        "endNode": {
+          "type": "string",
+          "description": "Optional for SEGMENT: end node identifier for graph connectivity"
+        },
+        "boundingExtents": {
+          "$ref": "#/definitions/BoundingBox",
+          "description": "Required for ZONE: spatial bounds of the zone"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "STOREY" } } },
+          "then": { "required": ["elevation_m", "height_m"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "SEGMENT" } } },
+          "then": {
+            "anyOf": [
+              { "required": ["startChainage_m", "endChainage_m"] },
+              { "required": ["startNode", "endNode"] }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "ZONE" } } },
+          "then": { "required": ["boundingExtents"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "Placement": {
+      "type": "object",
+      "required": ["origin"],
+      "properties": {
+        "origin": {
+          "$ref": "#/definitions/Point3D",
+          "description": "Local placement origin in meters"
+        },
+        "axis": {
+          "$ref": "#/definitions/Direction3D",
+          "description": "Local Z-axis direction (default: 0,0,1)"
+        },
+        "refDirection": {
+          "$ref": "#/definitions/Direction3D",
+          "description": "Local X-axis direction (default: 1,0,0)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Profile": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["RECTANGLE", "CIRCLE", "ARBITRARY"]
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Required for RECTANGLE: X dimension in meters"
+        },
+        "height": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Required for RECTANGLE: Y dimension in meters"
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Required for CIRCLE: radius in meters"
+        },
+        "points": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Point3D" },
+          "description": "Required for ARBITRARY: closed polyline points"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "RECTANGLE" } } },
+          "then": { "required": ["width", "height"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "CIRCLE" } } },
+          "then": { "required": ["radius"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "ARBITRARY" } } },
+          "then": { "required": ["points"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "Geometry": {
+      "type": "object",
+      "required": ["method"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["EXTRUSION", "SWEEP", "MESH"],
+          "description": "Geometry representation method"
+        },
+        "profile": {
+          "$ref": "#/definitions/Profile",
+          "description": "Required for EXTRUSION and SWEEP: cross-section profile"
+        },
+        "direction": {
+          "$ref": "#/definitions/Direction3D",
+          "description": "Extrusion/sweep direction vector (default: 0,0,1 for vertical extrusion)"
+        },
+        "depth": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Required for EXTRUSION and SWEEP: extrusion depth in meters"
+        },
+        "vertices": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Point3D" },
+          "description": "Required for MESH: vertex positions"
+        },
+        "faces": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 3,
+            "description": "Face defined by vertex indices"
+          },
+          "description": "Required for MESH: face index arrays"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "EXTRUSION" } } },
+          "then": { "required": ["profile", "depth"] }
+        },
+        {
+          "if": { "properties": { "method": { "const": "SWEEP" } } },
+          "then": { "required": ["profile", "depth"] }
+        },
+        {
+          "if": { "properties": { "method": { "const": "MESH" } } },
+          "then": { "required": ["vertices", "faces"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "Relationship": {
+      "type": "object",
+      "required": ["type", "target"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["CONTAINS", "VOIDS", "FILLS", "CONNECTS_TO", "SUPPORTS", "AGGREGATES"]
+        },
+        "target": {
+          "type": "string",
+          "description": "Target element ID"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Material": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Material name (maps to MATERIAL_COLORS in IFC generator)"
+        },
+        "color": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0, "maximum": 1 },
+          "minItems": 3,
+          "maxItems": 3,
+          "description": "RGB color values [0-1]"
+        },
+        "transparency": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0,
+          "description": "Transparency value (0=opaque, 1=fully transparent)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Element": {
+      "type": "object",
+      "required": ["id", "type", "name", "placement", "geometry", "container", "confidence", "source"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic ID: elem-{sha256(geometry+placement).slice(0,12)}"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["WALL", "SLAB", "COLUMN", "BEAM", "DOOR", "WINDOW", "SPACE", "EQUIPMENT", "TUNNEL_SEGMENT", "DUCT", "OPENING", "PROXY"],
+          "description": "Element semantic type. Use PROXY when semantics are uncertain."
+        },
+        "semanticType": {
+          "type": "string",
+          "description": "Intended IFC entity type. Even PROXY elements store their intended type here for future upgrades (e.g., type=PROXY, semanticType=IfcWallStandardCase)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable element name"
+        },
+        "placement": {
+          "$ref": "#/definitions/Placement",
+          "description": "Element placement (IfcLocalPlacement analog). Separate from geometry to enable instancing."
+        },
+        "geometry": {
+          "$ref": "#/definitions/Geometry",
+          "description": "Shape definition (geometry only, no placement)"
+        },
+        "container": {
+          "type": "string",
+          "description": "Reference to levelsOrSegments.id that contains this element"
+        },
+        "relationships": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Relationship" },
+          "default": [],
+          "description": "Relationships to other elements (VOIDS, FILLS, CONNECTS_TO, etc.)"
+        },
+        "properties": {
+          "type": "object",
+          "description": "Arbitrary key-value properties (mapped to IFC property sets)",
+          "additionalProperties": true
+        },
+        "material": {
+          "$ref": "#/definitions/Material"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Confidence score: 0.0 (unknown) to 1.0 (certain). Used for semantic-first mapping: >= 0.7 = proper IFC entity, < 0.7 = IfcBuildingElementProxy."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["DWG", "PDF", "XLSX", "DOCX", "VSM", "LLM", "DEFAULT"],
+          "description": "Data source that produced this element"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SourceFile": {
+      "type": "object",
+      "required": ["name", "parseStatus"],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "parseStatus": {
+          "type": "string",
+          "enum": ["success", "failed", "unsupported"]
+        },
+        "role": {
+          "type": "string",
+          "enum": ["geometry", "schedule", "spec", "description", "unknown"]
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "description": "Failure reason if parseStatus is failed/unsupported"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RepairLogEntry": {
+      "type": "object",
+      "required": ["elementId", "action", "field"],
+      "properties": {
+        "elementId": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "description": "What was done (e.g., 'clamped_dimension', 'assigned_container', 'downgraded_to_proxy')"
+        },
+        "field": {
+          "type": "string",
+          "description": "Field that was modified"
+        },
+        "from": {
+          "description": "Original value"
+        },
+        "to": {
+          "description": "New value after repair"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Metadata": {
+      "type": "object",
+      "required": ["outputMode", "validationStatus"],
+      "properties": {
+        "sourceFiles": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/SourceFile" },
+          "default": []
+        },
+        "outputMode": {
+          "type": "string",
+          "enum": ["FULL_SEMANTIC", "HYBRID", "PROXY_ONLY"],
+          "description": "Determines IFC generation detail level. PROXY_ONLY guarantees pipeline success."
+        },
+        "validationStatus": {
+          "type": "string",
+          "enum": ["PENDING", "PASSED", "REPAIRED", "NEEDS_REVIEW"]
+        },
+        "unitNormalizationApplied": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether unit conversion to meters has been applied"
+        },
+        "cssHash": {
+          "type": ["string", "null"],
+          "description": "SHA-256 hash of the CSS JSON for caching"
+        },
+        "elementCounts": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 },
+          "description": "Count of elements by type (e.g., {WALL: 4, SLAB: 2})"
+        },
+        "bbox": {
+          "$ref": "#/definitions/BoundingBox",
+          "description": "Bounding box encompassing all elements"
+        },
+        "repairLog": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/RepairLogEntry" },
+          "default": [],
+          "description": "Log of all repairs applied by RepairCSS"
+        },
+        "placementZIsAbsolute": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true (default), element z-coordinates are absolute and the IFC generator subtracts storey elevation. If false, z-coordinates are already storey-relative."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

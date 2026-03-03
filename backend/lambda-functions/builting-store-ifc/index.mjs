@@ -1,54 +1,64 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 
-const s3 = new S3Client({ region: 'us-east-1' });
 const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
 const dynamo = DynamoDBDocumentClient.from(dynamoClient);
 
 export const handler = async (event) => {
-  console.log('StoreIFC input:', event);
-  const { userId, renderId, ifcContent, ai_generated_title, ai_generated_description } = event;
+  console.log('StoreIFC input:', JSON.stringify(event, null, 2));
+  const { userId, renderId, ifcS3Path, ai_generated_title, ai_generated_description, elementCounts, outputMode, cssHash } = event;
 
   try {
-    const ifc_s3_path = `s3://builting-ifc/${userId}/${renderId}/output.ifc`;
-    const s3Key = `${userId}/${renderId}/output.ifc`;
+    // IFC is already saved to S3 by the IFC generator Lambda.
+    // This Lambda updates DynamoDB with the path and metadata.
+    const ifc_s3_path = ifcS3Path || `s3://builting-ifc/${userId}/${renderId}/model.ifc`;
 
-    console.log(`Storing IFC to s3://builting-ifc/${s3Key}`);
+    console.log(`Recording IFC path: ${ifc_s3_path}`);
 
-    // Upload IFC file to builting-ifc bucket
-    // Convert string content to Buffer for proper binary storage
-    const ifcBuffer = Buffer.from(ifcContent, 'utf-8');
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: 'builting-ifc',
-        Key: s3Key,
-        Body: ifcBuffer,
-        ContentType: 'application/octet-stream'
-      })
-    );
+    // Build update expression dynamically
+    let updateExpr = 'SET ifc_s3_path = :path, #status = :status';
+    const exprValues = {
+      ':path': ifc_s3_path,
+      ':status': 'completed'
+    };
+    const exprNames = { '#status': 'status' };
 
-    console.log('IFC file uploaded successfully');
+    if (ai_generated_title) {
+      updateExpr += ', ai_generated_title = :title';
+      exprValues[':title'] = ai_generated_title;
+    }
 
-    // Store IFC path in DynamoDB for quick access and mark as completed
+    if (ai_generated_description) {
+      updateExpr += ', ai_generated_description = :desc';
+      exprValues[':desc'] = ai_generated_description;
+    }
+
+    if (elementCounts) {
+      updateExpr += ', elementCounts = :counts';
+      exprValues[':counts'] = elementCounts;
+    }
+
+    if (outputMode) {
+      updateExpr += ', outputMode = :mode';
+      exprValues[':mode'] = outputMode;
+    }
+
+    if (cssHash) {
+      updateExpr += ', cssHash = :hash';
+      exprValues[':hash'] = cssHash;
+    }
+
     await dynamo.send(
       new UpdateCommand({
         TableName: 'builting-renders',
         Key: { user_id: userId, render_id: renderId },
-        UpdateExpression: 'SET ifc_s3_path = :path, ai_generated_title = :title, ai_generated_description = :desc, #status = :status',
-        ExpressionAttributeNames: {
-          '#status': 'status'
-        },
-        ExpressionAttributeValues: {
-          ':path': ifc_s3_path,
-          ':title': ai_generated_title,
-          ':desc': ai_generated_description,
-          ':status': 'completed'
-        }
+        UpdateExpression: updateExpr,
+        ExpressionAttributeNames: exprNames,
+        ExpressionAttributeValues: exprValues
       })
     );
 
-    console.log('DynamoDB updated with IFC path');
+    console.log('DynamoDB updated with IFC path and metadata');
 
     return {
       ...event,

@@ -1,0 +1,6 @@
+{
+  "name": "builting-css-pipeline",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Consolidated CSS pipeline: ValidateCSS + RepairCSS + NormalizeGeometry in one Lambda"
+}

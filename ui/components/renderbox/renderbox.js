@@ -16,6 +16,7 @@ const renderbox = {
     pollingStartTime: null,
     currentBlobUrl: null, // Track blob URL to prevent premature garbage collection
     isRendering: false, // Flag to track if render is currently in progress
+    currentRenderTitle: null, // AI-generated title of the active render (for download filename)
 
     // Initialize the renderbox component
     async init() {
@@ -168,6 +169,11 @@ const renderbox = {
                 loadingIndicator.style.display = 'none';
             }
 
+            // Resize viewer after layout change and focus canvas for interaction
+            ifcViewer.resize();
+            const canvas = this.element.querySelector('#ifc-viewer-canvas');
+            if (canvas) canvas.focus();
+
             console.log('IFC file loaded successfully');
         } catch (error) {
             console.error('Failed to load IFC file:', error);
@@ -244,6 +250,7 @@ const renderbox = {
 
                 this.element.dataset.state = 'viewing-render';
                 this.element.dataset.renderId = renderId;
+                this.currentRenderTitle = render.ai_generated_title || render.title || null;
                 this._updateMessage('Edit render?');
                 this._updateInputPlaceholder('What edits would you like to make?');
                 // Clear input content so placeholder reappears
@@ -398,15 +405,16 @@ const renderbox = {
      * Handle "Start Render" button click - upload files to S3
      */
     async _handleStartRender() {
-        if (!this.stagedFiles || this.stagedFiles.length === 0) {
-            this._showError('Please attach at least one file');
+        // Capture description from input
+        const descriptionInput = this.element.querySelector('.__renderbox-description');
+        const description = descriptionInput?.textContent.trim() || '';
+
+        if ((!this.stagedFiles || this.stagedFiles.length === 0) && !description) {
+            this._showError('Please attach files or enter a description');
             return;
         }
 
         try {
-            // Capture description from input
-            const descriptionInput = this.element.querySelector('.__renderbox-description');
-            const description = descriptionInput?.textContent.trim() || '';
 
             // Hide welcome message and file staging before showing loading
             const messageEl = this.element.querySelector('.__renderbox-message');
@@ -435,6 +443,10 @@ const renderbox = {
             if (description && descriptionUrl) {
                 await uploadService.uploadDescription(descriptionUrl, description);
             }
+
+            // Finalize upload — triggers the pipeline
+            this._showLoadingState('Starting render pipeline...');
+            await uploadService.finalizeRender(renderId);
 
             // Clear UI
             this.stagedFiles = [];
@@ -508,7 +520,8 @@ const renderbox = {
         const descriptionInput = this.element.querySelector('.__renderbox-description');
         if (descriptionInput) {
             descriptionInput.addEventListener('keydown', async (e) => {
-                if (e.key === 'Enter' && e.ctrlKey) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
                     await this._handleStartRender();
                 }
             });
@@ -697,11 +710,17 @@ const renderbox = {
             }
             const blob = new Blob([bytes], { type: 'application/octet-stream' });
 
+            // Build a clean filename from the AI-generated title, fallback to render ID
+            const title = this.currentRenderTitle;
+            const filename = title
+                ? title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '.ifc'
+                : `render_${renderId}.ifc`;
+
             // Create blob URL and trigger download
             const blobUrl = URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = blobUrl;
-            link.download = `render-${renderId}.ifc`;
+            link.download = filename;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
@@ -727,6 +746,7 @@ const renderbox = {
             // Update UI state FIRST so viewer is visible
             this.element.dataset.state = 'viewing-render';
             this.element.dataset.renderId = render.render_id;
+            this.currentRenderTitle = render.ai_generated_title || render.title || null;
             this._updateInputPlaceholder('What edits would you like to make?');
             this._displayMetadata(render);
 

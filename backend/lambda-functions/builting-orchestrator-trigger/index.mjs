@@ -1,6 +1,6 @@
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, UpdateCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 
 const sfn = new SFNClient({ region: 'us-east-1' });
 const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
@@ -33,6 +33,20 @@ export const handler = async (event) => {
         const renderId = parts[2];
 
         console.log(`Trigger for userId=${userId}, renderId=${renderId}`);
+
+        // Check if upload has been finalized — if not, skip and let the finalize endpoint handle it
+        try {
+          const renderResult = await dynamo.send(new GetCommand({
+            TableName: 'builting-renders',
+            Key: { user_id: userId, render_id: renderId }
+          }));
+          if (renderResult.Item && !renderResult.Item.upload_finalized) {
+            console.log(`Render ${renderId} not yet finalized, skipping SNS trigger (finalize endpoint will start pipeline)`);
+            continue;
+          }
+        } catch (checkErr) {
+          console.warn('Could not check finalized flag, proceeding with legacy behavior:', checkErr.message);
+        }
 
         // DEDUPLICATION: Set orchestration_started flag atomically
         try {

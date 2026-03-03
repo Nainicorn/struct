@@ -99,6 +99,21 @@ const ifcViewer = {
     },
 
     /**
+     * Force the viewer canvas to recalculate its size.
+     * Must be called after any layout change that affects the canvas container
+     * (e.g. loading overlay appearing/disappearing, panel resizes).
+     */
+    resize() {
+        if (this.viewer) {
+            try {
+                this.viewer.scene.canvas.resizeCanvas();
+            } catch (e) {
+                // non-fatal — viewer will still work, just might need a scroll/move
+            }
+        }
+    },
+
+    /**
      * Clear the current model from the viewer
      */
     clear() {

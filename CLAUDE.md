@@ -71,12 +71,14 @@ The backend folder contains the most recent code or information that is is ident
     - lambda functions (in execution order)
       * all lambda functions use builting-execution role
       * builting-orchestrator-trigger has ENV variable state-machine ARN
-      - builting-main (node.js20 and arm64): API gateway router for auth, user data, renders, and presigned upload URLs (entry point)
-      - builting-orchestrator-trigger (node.js20 and arm64): SNS trigger on S3 file upload; deduplicates and starts Step Function state machine
+      * builting-main has ENV variable STATE_MACHINE_ARN
+      - builting-main (node.js20 and arm64): API gateway router for auth, user data, renders, presigned URLs, and finalize endpoint
+      - builting-orchestrator-trigger (node.js20 and arm64): SNS trigger on S3 file upload; checks finalized flag, deduplicates and starts Step Function
       - builting-read-metadata (node.js20 and arm64): retrieves render from DynamoDB and lists uploaded files from S3
-      - builting-bedrock-ifc (node.js20 and arm64): downloads files from S3, invokes Claude via Bedrock to extract building specs as JSON
-      - builting-json-to-ifc (python3.11 and arm64): converts building spec JSON to valid IFC4 format using IfcOpenShell (Python)
-      - builting-store-ifc (container image): 
+      - builting-bedrock-ifc (node.js20 and arm64): downloads files from S3, extracts building specs as CSS v1.0 via Bedrock + VentSim parser; includes inline minimal CSS fallback on failure
+      - builting-css-pipeline (node.js20 and arm64): consolidated Lambda that runs ValidateCSS → RepairCSS (if needed) → NormalizeGeometry in one call
+      - builting-json-to-ifc (python3.11 container): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, robust axis/direction sanitization, conditional Z subtraction (placementZIsAbsolute flag), improved bbox with profile bounds
+      - builting-store-ifc (node.js20 and arm64): updates DynamoDB with IFC path, elementCounts, outputMode, cssHash
 
     - Step Function
       - builting-render-state-machine
@@ -124,6 +126,7 @@ The backend folder contains the most recent code or information that is is ident
       - builting-main
       - builting-bedrock-ifc
       - builting-read-metadata
+      - builting-css-pipeline
       - builting-store-ifc
       - builting-json-to-ifc
 
@@ -136,52 +139,38 @@ The backend folder contains the most recent code or information that is is ident
 ## Project Status
 
 ### COMPLETED ✅
+See `completed.md` for full implementation history.
 
-**IFC4 Generator Implementation** (2025-02-19)
-- ✅ Upgraded IFC schema from IFC2X3 to IFC4 (better modern viewer support)
-- ✅ Fixed critical bug: replaced invalid IfcBuilding envelope with proper 4-wall + floor + roof structure
-- ✅ Implemented comprehensive material library (30+ materials with RGB colors)
-- ✅ Added proper IFC element types (IfcWall, IfcSlab, IfcDoor, IfcWindow, IfcEquipment entities)
-- ✅ Implemented property sets (Pset_WallCommon, Pset_SlabCommon, Pset_SpaceCommon, etc.)
-- ✅ Implemented quantity sets (Qto_WallBaseQuantities, Qto_SlabBaseQuantities, etc.)
-- ✅ Added surface styling with IfcSurfaceStyle and IfcStyledItem for visual rendering
-- ✅ Implemented building-type-aware envelope geometry (office, warehouse, tunnel, parking, hospital, school, industrial, residential)
-- ✅ Added ventilation elements (IfcFlowTerminal) with configurable intake/exhaust positions and fan count
-- ✅ Added default doors and window support with proper materials and styling
-- ✅ Equipment type mapping to specific IFC4 entities (IfcGenerator, IfcPump, IfcFan, IfcCompressor, IfcTransformer, IfcBoiler, IfcChiller, etc.)
-- ✅ Enhanced Bedrock Lambda prompt to extract richer universal JSON spec (wall thickness, room usage, openings, materials, structural system)
-- ✅ Built Docker image for container-based Lambda (arm64 architecture)
-- ✅ Created comprehensive deployment guide (DEPLOYMENT_GUIDE_IFC4.md)
-- **File size improved**: 114 lines → 500+ lines | 0 elements → 100+ architectural elements
+**Summary of completed work:**
+- IFC4 Generator (2025-02-19): full IFC4 schema, materials, property sets, building-type geometry
+- VentSim Tunnel Parser (2025-02-19): MAIN section parsing, 69 branches, fans, named spaces
+- CSS Pipeline Overhaul Phase 1+4 (2026-02-28): CSS v1.0 schema, upload finalization, confidence-based IFC generation, builting-css-pipeline Lambda, simplified Step Function
+- VentSim Geometry Bug Fixes (2026-02-28): fixed extrusion direction, refDirection, coordinate normalization, header parsing → tunnel now renders as correct flat network ✅
+- IFC Placement/Storey/Validator Overhaul (2026-03-02): fixed placement chain (Building→Site), storey elevation logic, conditional Z subtraction with `placementZIsAbsolute` flag, axis/refDirection sanitization, IfcWall (not StandardCase), validator excludes spatial containers, improved bbox with profile bounds, 8 CSS v1.0 regression tests ✅
 
-**VentSim Tunnel IFC Generation** (2025-02-19)
-- ✅ Added VentSim format detector and parser to builting-bedrock-ifc lambda
-- ✅ Implemented MAIN section parsing: 69 tunnel branches with 3D coordinates, cross-sections, liner types
-- ✅ Extract 7 named spaces (East Portal, West Portal, Diesel Gen, AC Room, Office, Exhaust Chamber, Exhaust Shaft)
-- ✅ Extract 3 fans with properties and positions
-- ✅ Added tunnel branch IFC generation to Python lambda:
-  - Rectangular profiles: IfcWallStandardCase + IfcRectangleProfileDef
-  - Round ducts: IfcMember + IfcCircleProfileDef
-  - Proper 3D placement using direction vectors and coordinate normalization
-  - Material color coding by liner type (concrete vs blasted)
-  - Property sets with tunnel data (dimensions, area, liner type)
-- ✅ Created builting-bedrock-ifc.zip for deployment
-- ✅ Python lambda ready for Docker build and ECR push
-- **Expected improvement**: 1,500 → 10,000-15,000 IFC lines | 100 → 150+ elements | accurate 3D tunnel network
+### TO-DO: Manual AWS Setup Required
+1. ~~**Create `builting-css-pipeline` Lambda**~~ ✅ deployed
+2. **Update existing Lambda functions** (upload new zips):
+   - ~~`builting-bedrock-ifc` → `builting-bedrock-ifc.zip`~~ ✅ deployed (2026-02-28)
+   - `builting-json-to-ifc` → rebuild Docker image and push to ECR (updated: placement/storey/validator overhaul 2026-03-02)
+   - `builting-store-ifc` → `builting-store-ifc.zip`
+   - `builting-main` → `builting-main.zip` (has new SFN client dependency)
+   - `builting-orchestrator-trigger` → `builting-orchestrator-trigger.zip`
+3. ~~**Add ENV variable** `STATE_MACHINE_ARN` to `builting-main`~~ ✅ done
+4. ~~**Add API Gateway route**: `POST /api/renders/{id}/finalize`~~ ✅ done
+5. **Update Step Function** `builting-render-state-machine` with `backend/step-function/current_json.json`
+6. **Rebuild and push Docker image** for `builting-json-to-ifc` (Python Lambda with updated lambda_function.py)
+7. Test end-to-end flow
 
-### TO-DO:
-- Deploy builting-bedrock-ifc.zip to AWS Lambda (manual step)
-- Build and push Python lambda Docker image to ECR (manual step via deploy.sh)
-- Test end-to-end with beggars_tomb_ventsim.txt file
-- screenshot of render in the render list view for each
+### Remaining Phases
+- **Phase 2A**: DWG geometry support (DWG→DXF→CSS pipeline)
+- **Phase 2B**: Multi-pass Bedrock extraction (domain classification → geometry → semantics → consistency)
+- **Phase 3**: XLSX/DOCX/PDF file format support
+- **Phase 5**: Testing, CI, regression fixtures
 
 ### Reach Goals
-1. Human-in-the-loop approval in Step Function
+1. Human-in-the-loop approval after generation so add fixes
 2. Edit/retry failed renders
-3. Monitoring & logging improvements
-4. Multi-level buildings with ramps and stairs (IfcRamp, IfcStair)
-5. Window/door placement from Bedrock data
-6. MEP (mechanical/electrical/plumbing) systems visualization
-7. Complex curved geometries for tunnels (IfcArbitraryClosedProfileDef with swept arcs)
+3. Multi-level buildings with ramps and stairs
 
-**References**: See DEPLOYMENT_GUIDE_IFC4.md for deployment instructions and testing procedures
+**References**: See DEPLOYMENT_GUIDE_IFC4.md and backend/schemas/css-v1.0.md
