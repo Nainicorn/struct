@@ -307,11 +307,11 @@
     align-items: center;
     justify-content: center;
     padding: 4px 8px;
-    background: rgba(212, 165, 165, 0.15);
-    border: 1px solid rgba(212, 165, 165, 0.3);
+    background: rgba(180, 167, 214, 0.15);
+    border: 1px solid rgba(180, 167, 214, 0.3);
     border-radius: 4px;
     font-size: 0.7rem;
-    color: #d4a5a5;
+    color: #b4a7d6;
     font-weight: 600;
     text-transform: uppercase;
     width: fit-content;
@@ -433,7 +433,7 @@
 }
 
 .__renderbox-send {
-    background: linear-gradient(135deg, #d4a5a5 0%, #c4949f 100%);
+    background: linear-gradient(135deg, #b4a7d6 0%, #7d6fa3 100%);
     border: none;
     cursor: pointer;
     display: flex;
@@ -447,7 +447,7 @@
 
 .__renderbox-send:hover {
     transform: scale(1.05);
-    background: linear-gradient(135deg, #e0b5b5 0%, #d4a4af 100%);
+    background: linear-gradient(135deg, #c9bde6 0%, #8d7fb3 100%);
 }
 
 .__renderbox-send:active {

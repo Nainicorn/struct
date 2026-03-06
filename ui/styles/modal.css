@@ -75,12 +75,12 @@
 }
 
 .__modal-btn-primary {
-    background: #e74c3c;
+    background: #7d6fa3;
     color: #ffffff;
 }
 
 .__modal-btn-primary:hover {
-    background: #c0392b;
+    background: #6d5a93;
     transform: translateY(-2px);
 }
 

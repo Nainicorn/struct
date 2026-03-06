@@ -122,12 +122,12 @@ body[data-collapsed="true"] .__header-logo-text {
     display: flex;
     align-items: center;
     gap: 8px;
-    background: #ffffff;
+    background: linear-gradient(135deg, #b4a7d6 0%, #7d6fa3 100%);
     border: none;
     cursor: pointer;
     padding: 10px 16px;
     border-radius: 8px;
-    color: #211747;
+    color: #ffffff;
     font-weight: 500;
     font-size: 0.875rem;
     transition: all 0.2s ease;
@@ -136,7 +136,7 @@ body[data-collapsed="true"] .__header-logo-text {
 }
 
 .__header-logout:hover {
-    background: #f5f5f5;
+    background: linear-gradient(135deg, #c9bde6 0%, #8d7fb3 100%);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     transform: translateY(-2px);
 }
