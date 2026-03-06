@@ -236,9 +236,8 @@ const renderbox = {
         try {
             const render = await rendersService.getRender(renderId);
 
-            if (!render) {
-                this._showError('Render not found');
-                // Refresh sidebar to remove stale entry
+            if (!render || render.error) {
+                this._showError(render?.error || 'Render not found');
                 document.dispatchEvent(new CustomEvent('rendersUpdated'));
                 return;
             }
@@ -265,10 +264,36 @@ const renderbox = {
                 document.dispatchEvent(new CustomEvent('renderSelected', {
                     detail: { render }
                 }));
-            } else if (render.status === 'processing' || render.status === 'pending') {
-                this._showError(`Render is still ${render.status}. Please try again later.`);
             } else if (render.status === 'failed') {
-                this._showError(`Render failed: ${render.error_message || 'Unknown error'}`);
+                const errorMsg = render.error_message || 'Unknown error occurred during rendering';
+                const shouldDelete = await modalService.confirm(
+                    'Render Failed',
+                    `This render failed to process.\n\nError: ${errorMsg}\n\nWould you like to delete it?`,
+                    'Delete',
+                    'Keep'
+                );
+                if (shouldDelete) {
+                    await rendersService.deleteRender(renderId);
+                    document.dispatchEvent(new CustomEvent('rendersUpdated'));
+                    document.dispatchEvent(new CustomEvent('newRenderRequested'));
+                }
+            } else if (render.status === 'processing' || render.status === 'pending') {
+                const ageMinutes = (Date.now() / 1000 - (render.created_at || 0)) / 60;
+                if (ageMinutes > 3) {
+                    const shouldDelete = await modalService.confirm(
+                        'Render Stalled',
+                        `This render has been ${render.status} for over ${Math.floor(ageMinutes)} minutes and may have failed.\n\nWould you like to delete it?`,
+                        'Delete',
+                        'Keep Waiting'
+                    );
+                    if (shouldDelete) {
+                        await rendersService.deleteRender(renderId);
+                        document.dispatchEvent(new CustomEvent('rendersUpdated'));
+                        document.dispatchEvent(new CustomEvent('newRenderRequested'));
+                    }
+                } else {
+                    await modalService.alert('Render In Progress', `This render is still ${render.status}. Please check back shortly.`);
+                }
             }
         } catch (error) {
             console.error('Error loading render:', error);
@@ -634,17 +659,31 @@ const renderbox = {
                 this._stopPolling();
                 this._hideLoadingState();
 
-                // Show error immediately and prominently
                 const errorMsg = render.error_message || 'Unknown error occurred during rendering';
                 console.error('Render failed with status:', errorMsg);
 
-                // Use alert for immediate visibility, then show in modal
                 await modalService.alert(
                     'Render Failed',
                     `Your render failed to process.\n\nError: ${errorMsg}\n\nYou can try again with different files or settings.`
                 );
 
-                // Also refresh sidebar to show the failed status
+                this._handleNewRender();
+                document.dispatchEvent(new CustomEvent('rendersUpdated'));
+                return;
+            } else if (render.status === 'pending' && elapsed > 180000) {
+                // Status still 'pending' after 3 minutes — pipeline likely failed
+                // without updating DynamoDB
+                this._stopPolling();
+                this._hideLoadingState();
+
+                console.error('Render stalled in pending state after 3 minutes');
+
+                await modalService.alert(
+                    'Render Failed',
+                    'Your render appears to have failed. The pipeline did not respond within the expected time.\n\nPlease try again with different files or settings.'
+                );
+
+                this._handleNewRender();
                 document.dispatchEvent(new CustomEvent('rendersUpdated'));
                 return;
             }
@@ -660,13 +699,18 @@ const renderbox = {
                 delay = 5000;  // 5s for next 2 minutes
             } else if (elapsed < 600000) {
                 delay = 10000; // 10s for up to 10 minutes
-            } else if (elapsed < 1800000) {
-                delay = 15000; // 15s for up to 30 minutes
             } else {
-                // Timeout after 30 minutes
+                // Timeout after 10 minutes
                 this._stopPolling();
                 this._hideLoadingState();
-                this._showError('Render is taking longer than expected. Check the sidebar for updates.');
+
+                await modalService.alert(
+                    'Render Timed Out',
+                    'Your render is taking longer than expected and may have failed.\n\nPlease try again or check with a smaller file.'
+                );
+
+                this._handleNewRender();
+                document.dispatchEvent(new CustomEvent('rendersUpdated'));
                 return;
             }
 

@@ -323,26 +323,100 @@ def create_mesh_geometry(f, subcontext, vertices, faces):
 
 
 def create_element_geometry(f, subcontext, geometry, elem_id=None):
-    """Create IFC geometry from CSS geometry definition. Returns (solid_or_surface, pds)."""
+    """Create IFC geometry from CSS geometry definition. Returns (solid_or_surface, pds, fallback_used).
+    Implements escalation chain: extrusion → sanitized extrusion → mesh fallback → None."""
     method = geometry.get('method', 'EXTRUSION')
+    fallback_used = None
 
     if method == 'MESH':
         vertices = geometry.get('vertices', [])
         faces = geometry.get('faces', [])
         if not vertices or not faces:
-            return None, None
-        return create_mesh_geometry(f, subcontext, vertices, faces)
+            return None, None, 'proxy_no_geometry'
+        result = create_mesh_geometry(f, subcontext, vertices, faces)
+        return result[0], result[1], None
 
     # EXTRUSION or SWEEP — both use profile + direction + depth
     profile_data = geometry.get('profile', {'type': 'RECTANGLE', 'width': 1, 'height': 1})
-    profile_def = create_profile(f, profile_data)
     direction = geometry.get('direction', {'x': 0, 'y': 0, 'z': 1})
     depth = geometry.get('depth', 1.0)
 
     if depth <= 0:
         depth = 0.01  # clamp to minimum
 
-    return create_extrusion(f, subcontext, profile_def, direction, depth, elem_id=elem_id)
+    # Attempt 1: Normal extrusion
+    try:
+        profile_def = create_profile(f, profile_data)
+        solid, pds = create_extrusion(f, subcontext, profile_def, direction, depth, elem_id=elem_id)
+        return solid, pds, None
+    except Exception as e1:
+        if elem_id:
+            print(f"Warning: Extrusion failed for {elem_id}: {e1}, trying sanitized params")
+
+    # Attempt 2: Sanitized extrusion
+    try:
+        sanitized_depth = max(depth, 1e-4)
+        sanitized_profile = dict(profile_data)
+        if sanitized_profile.get('width') is not None:
+            sanitized_profile['width'] = max(float(sanitized_profile.get('width', 1)), 1e-4)
+        if sanitized_profile.get('height') is not None:
+            sanitized_profile['height'] = max(float(sanitized_profile.get('height', 1)), 1e-4)
+        if sanitized_profile.get('radius') is not None:
+            sanitized_profile['radius'] = max(float(sanitized_profile.get('radius', 0.5)), 1e-4)
+
+        profile_def = create_profile(f, sanitized_profile)
+        solid, pds = create_extrusion(f, subcontext, profile_def, direction, sanitized_depth, elem_id=elem_id)
+        fallback_used = 'sanitized_extrusion'
+        return solid, pds, fallback_used
+    except Exception as e2:
+        if elem_id:
+            print(f"Warning: Sanitized extrusion failed for {elem_id}: {e2}, trying mesh fallback")
+
+    # Attempt 3: Mesh fallback — create bounding box as IfcTriangulatedFaceSet
+    try:
+        w = max(float(profile_data.get('width', profile_data.get('radius', 1))), 0.01)
+        h = max(float(profile_data.get('height', profile_data.get('radius', 1))), 0.01)
+        d = max(float(depth), 0.01)
+        hw, hh = w / 2.0, h / 2.0
+
+        # 8 vertices of a box centered at origin
+        coords = [
+            (-hw, -hh, 0.0), (hw, -hh, 0.0), (hw, hh, 0.0), (-hw, hh, 0.0),
+            (-hw, -hh, d),   (hw, -hh, d),   (hw, hh, d),   (-hw, hh, d),
+        ]
+        coord_list = f.create_entity('IfcCartesianPointList3D', CoordList=coords)
+
+        # 12 triangles (2 per face)
+        indices = [
+            (1,2,3), (1,3,4),  # bottom
+            (5,7,6), (5,8,7),  # top
+            (1,5,6), (1,6,2),  # front
+            (3,7,8), (3,8,4),  # back
+            (1,4,8), (1,8,5),  # left
+            (2,6,7), (2,7,3),  # right
+        ]
+        tri_face_set = f.create_entity(
+            'IfcTriangulatedFaceSet',
+            Coordinates=coord_list,
+            CoordIndex=indices
+        )
+
+        body_rep = f.create_entity(
+            'IfcShapeRepresentation',
+            ContextOfItems=subcontext,
+            RepresentationIdentifier='Body',
+            RepresentationType='Tessellation',
+            Items=(tri_face_set,)
+        )
+        pds = f.create_entity('IfcProductDefinitionShape', Representations=(body_rep,))
+        fallback_used = 'mesh'
+        if elem_id:
+            print(f"Mesh fallback used for {elem_id}")
+        return tri_face_set, pds, fallback_used
+    except Exception as e3:
+        if elem_id:
+            print(f"Warning: All geometry attempts failed for {elem_id}: {e3}")
+        return None, None, 'proxy_no_geometry'
 
 
 # ============================================================================
@@ -602,12 +676,16 @@ def generate_ifc4_from_css(css):
             # Create placement (with sanitized axis/ref)
             elem_lp = create_element_placement(f, storey_lp, placement_data, elem_id=css_id)
 
-            # Create geometry (with normalized direction)
-            solid_or_surface, pds = create_element_geometry(f, subcontext, geometry_data, elem_id=css_id)
+            # Create geometry (with normalized direction + fallback chain)
+            solid_or_surface, pds, fallback_used = create_element_geometry(f, subcontext, geometry_data, elem_id=css_id)
             if solid_or_surface is None or pds is None:
                 print(f"Warning: Failed to create geometry for {css_id}, skipping")
                 error_count += 1
                 continue
+            if fallback_used:
+                if 'geometryFallbacks' not in metadata:
+                    metadata['geometryFallbacks'] = {}
+                metadata['geometryFallbacks'][css_id] = fallback_used
 
             # Apply material/color
             if material_data:
@@ -983,6 +1061,89 @@ def validate_ifc(ifc_content, user_id, render_id):
         if sanitized_directions > 0:
             warnings.append(f"{sanitized_directions} direction vectors were sanitized during generation")
 
+        # ---- Viewer compatibility checks (Phase 6E) ----
+        compatibility_issues = []
+        mesh_fallback_count = 0
+        proxy_fallback_count = 0
+
+        # Check for IfcTriangulatedFaceSet (mesh fallbacks)
+        try:
+            mesh_fallback_count = len(ifc_file.by_type('IfcTriangulatedFaceSet'))
+        except Exception:
+            pass
+
+        # Check all IfcDirection for NaN/Inf
+        for direction in ifc_file.by_type('IfcDirection'):
+            try:
+                for r in direction.DirectionRatios:
+                    if not math.isfinite(float(r)):
+                        compatibility_issues.append({
+                            'severity': 'error',
+                            'type': 'nan_inf_direction',
+                            'detail': f'IfcDirection #{direction.id()} has non-finite value'
+                        })
+                        break
+            except Exception:
+                pass
+
+        # Check IfcCartesianPoint for large coordinates
+        for point in ifc_file.by_type('IfcCartesianPoint'):
+            try:
+                for c in point.Coordinates:
+                    if abs(float(c)) > 1e6:
+                        compatibility_issues.append({
+                            'severity': 'warning',
+                            'type': 'large_coordinate',
+                            'detail': f'IfcCartesianPoint #{point.id()} has coordinate > 1e6'
+                        })
+                        break
+            except Exception:
+                pass
+
+        # Check storey containment — every non-spatial element should be in a storey
+        contained_elements = set()
+        for rel in ifc_file.by_type('IfcRelContainedInSpatialStructure'):
+            try:
+                for elem in rel.RelatedElements:
+                    contained_elements.add(elem.id())
+            except Exception:
+                pass
+
+        orphaned = 0
+        for product in non_spatial:
+            if product.id() not in contained_elements:
+                orphaned += 1
+        if orphaned > 0:
+            compatibility_issues.append({
+                'severity': 'warning',
+                'type': 'orphaned_elements',
+                'detail': f'{orphaned} elements not contained by any storey'
+            })
+
+        # Check every non-spatial element has Body representation
+        missing_body = 0
+        for product in non_spatial:
+            has_body = False
+            if product.Representation:
+                for rep in product.Representation.Representations:
+                    if rep.RepresentationIdentifier == 'Body':
+                        has_body = True
+                        break
+            if not has_body:
+                missing_body += 1
+        if missing_body > 0:
+            compatibility_issues.append({
+                'severity': 'warning',
+                'type': 'missing_body_rep',
+                'detail': f'{missing_body} elements missing Body representation'
+            })
+
+        # Compute compatibility score
+        total_checks = len(non_spatial) * 2 + len(ifc_file.by_type('IfcDirection'))
+        issue_weight = len([i for i in compatibility_issues if i['severity'] == 'error']) * 10 + \
+                       len([i for i in compatibility_issues if i['severity'] == 'warning'])
+        compatibility_score = max(0, min(100, 100 - int(issue_weight / max(total_checks, 1) * 100)))
+
         # Element count summary
         for product in products:
             entity_type = product.is_a()
@@ -1037,6 +1198,10 @@ def validate_ifc(ifc_content, user_id, render_id):
         'warnings': warnings,
         'elementSummary': element_summary,
         'bbox': bbox,
+        'compatibilityScore': compatibility_score if 'compatibility_score' in dir() else None,
+        'compatibilityIssues': compatibility_issues if 'compatibility_issues' in dir() else [],
+        'meshFallbackCount': mesh_fallback_count if 'mesh_fallback_count' in dir() else 0,
+        'proxyFallbackCount': proxy_fallback_count if 'proxy_fallback_count' in dir() else 0,
     }
     try:
         report_key = f'uploads/{user_id}/{render_id}/reports/validation_report.json'
@@ -1058,12 +1223,25 @@ def handler(event, context):
     """Lambda handler: CSS → IFC4 conversion with caching, validation, and self-healing."""
     print(f"JsonToIFC input: {json.dumps(event)[:500]}")
 
-    css = event.get('css')
     render_id = event.get('renderId')
     user_id = event.get('userId')
 
+    # Load CSS from S3 (avoids Step Function 256KB state limit)
+    css_s3_key = event.get('cssS3Key')
+    data_bucket = event.get('bucket', 'builting-data')
+    css = event.get('css')  # fallback for direct invocation
+
+    if css_s3_key and not css:
+        try:
+            print(f"Loading CSS from S3: s3://{data_bucket}/{css_s3_key}")
+            response = s3_client.get_object(Bucket=data_bucket, Key=css_s3_key)
+            css = json.loads(response['Body'].read().decode('utf-8'))
+            print(f"CSS loaded: {len(css.get('elements', []))} elements")
+        except Exception as e:
+            raise ValueError(f'Failed to load CSS from S3: {e}')
+
     if not css:
-        raise ValueError('No CSS provided in event')
+        raise ValueError('No CSS provided (neither cssS3Key nor css in event)')
 
     if css.get('cssVersion') != '1.0':
         print(f"Warning: unexpected CSS version: {css.get('cssVersion')}")
@@ -1108,7 +1286,7 @@ def handler(event, context):
         s3_client.put_object(Bucket=bucket, Key=s3_key, Body=ifc_content.encode('utf-8'), ContentType='text/plain')
         print(f'IFC saved to S3: s3://{bucket}/{s3_key}')
     except Exception as s3_error:
-        print(f'Warning: Failed to save to S3: {s3_error}')
+        raise RuntimeError(f'Failed to save IFC to S3: {s3_error}')
 
     return {
         'renderId': render_id,

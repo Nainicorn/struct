@@ -1,21 +1,36 @@
 /**
  * CSS Pipeline Lambda (consolidated)
  *
- * Runs: ValidateCSS → RepairCSS (if needed) → NormalizeGeometry
+ * Runs: ValidateCSS → RepairCSS (if needed) → NormalizeGeometry → MergeWalls → InferOpenings → InferSlabs
  * All in one Lambda call to reduce cold starts and simplify the Step Function.
  *
- * Input: { css, userId, renderId, bucket }
- * Output: { css (validated/repaired/normalized), validationResult, ... }
+ * Input: { cssS3Key, userId, renderId, bucket }
+ * Output: { cssS3Key (processed CSS saved back to S3) }
  */
+
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+
+const s3 = new S3Client({ region: 'us-east-1' });
 
 export const handler = async (event) => {
   console.log('CSS Pipeline invoked');
 
-  const { css, userId, renderId, bucket } = event;
+  const { cssS3Key, userId, renderId, bucket } = event;
+
+  // Load CSS from S3
+  let css;
+  try {
+    const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: cssS3Key }));
+    css = JSON.parse(await response.Body.transformToString());
+    console.log(`Loaded CSS from S3: ${cssS3Key} (${css.elements?.length || 0} elements)`);
+  } catch (err) {
+    console.error('Failed to load CSS from S3:', err.message);
+    throw new Error(`Failed to load CSS from S3: ${err.message}`);
+  }
 
   if (!css || !css.elements) {
     console.log('No CSS or elements');
-    return { ...event, validationResult: { valid: false, repairable: false, errors: [{ field: 'css', message: 'Missing CSS' }] } };
+    throw new Error('CSS loaded from S3 has no elements');
   }
 
   // ========== STEP 1: VALIDATE ==========
@@ -32,7 +47,29 @@ export const handler = async (event) => {
   normalizeGeometry(css);
   console.log('Geometry normalization complete');
 
-  return { ...event, css, validationResult };
+  // ========== STEP 4: MERGE WALLS ==========
+  mergeWalls(css);
+  console.log('Wall merge complete');
+
+  // ========== STEP 5: INFER OPENINGS ==========
+  inferOpenings(css);
+  console.log('Opening inference complete');
+
+  // ========== STEP 6: INFER SLABS ==========
+  inferSlabs(css);
+  console.log('Slab inference complete');
+
+  // Save processed CSS back to S3
+  const processedKey = `uploads/${userId}/${renderId}/css/css_processed.json`;
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: processedKey,
+    Body: JSON.stringify(css),
+    ContentType: 'application/json'
+  }));
+  console.log(`Processed CSS saved to S3: ${processedKey}`);
+
+  return { cssS3Key: processedKey };
 };
 
 
@@ -316,4 +353,283 @@ function clamp(val, max) { return Math.max(-max, Math.min(max, val)); }
 function sanitizeDir(d) {
   d.x = safe(d.x); d.y = safe(d.y); d.z = safe(d.z);
   if (d.x === 0 && d.y === 0 && d.z === 0) d.z = 1;
+}
+
+
+// ============================================================================
+// WALL ALIGNMENT + MERGE (Phase 6A)
+// ============================================================================
+
+function mergeWalls(css) {
+  if (!css.elements || css.elements.length === 0) return;
+
+  const ANGLE_TOL = 3 * Math.PI / 180; // 3 degrees
+  const SNAP_TOL = 5 * Math.PI / 180;  // 5 degrees for axis snap
+  const ENDPOINT_TOL = 0.05; // meters
+  const THICKNESS_TOL = 0.10; // 10% relative
+
+  // Only process WALL elements
+  const walls = css.elements.filter(e => (e.type === 'WALL' || e.semantic_type === 'WALL'));
+  if (walls.length < 2) return;
+
+  // Snap direction to dominant axis if within SNAP_TOL
+  for (const wall of walls) {
+    const dir = wall.geometry?.direction;
+    if (!dir) continue;
+    const dx = dir.x ?? dir[0] ?? 0;
+    const dy = dir.y ?? dir[1] ?? 0;
+    const dz = dir.z ?? dir[2] ?? 0;
+    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (len < 1e-6) continue;
+    const nx = dx/len, ny = dy/len, nz = dz/len;
+    // Check proximity to cardinal axes
+    if (Math.abs(Math.abs(nx) - 1) < Math.sin(SNAP_TOL)) {
+      dir.x = Math.sign(nx) || 1; dir.y = 0; dir.z = 0;
+    } else if (Math.abs(Math.abs(ny) - 1) < Math.sin(SNAP_TOL)) {
+      dir.x = 0; dir.y = Math.sign(ny) || 1; dir.z = 0;
+    } else if (Math.abs(Math.abs(nz) - 1) < Math.sin(SNAP_TOL)) {
+      dir.x = 0; dir.y = 0; dir.z = Math.sign(nz) || 1;
+    }
+  }
+
+  // Group walls by container (storey)
+  const wallsByContainer = {};
+  for (const wall of walls) {
+    const cid = wall.container || 'level-1';
+    if (!wallsByContainer[cid]) wallsByContainer[cid] = [];
+    wallsByContainer[cid].push(wall);
+  }
+
+  const mergedKeys = new Set();
+  let mergeIndex = 0;
+
+  for (const [containerId, containerWalls] of Object.entries(wallsByContainer)) {
+    // Try to merge pairs within same container
+    const merged = new Set();
+    for (let i = 0; i < containerWalls.length; i++) {
+      if (merged.has(i)) continue;
+      const a = containerWalls[i];
+      for (let j = i + 1; j < containerWalls.length; j++) {
+        if (merged.has(j)) continue;
+        const b = containerWalls[j];
+        if (!canMergeWalls(a, b, ANGLE_TOL, ENDPOINT_TOL, THICKNESS_TOL)) continue;
+
+        // Merge b into a
+        const mergedFromA = a.metadata?.mergedFrom || [a.element_key || a.id];
+        const mergedFromB = b.metadata?.mergedFrom || [b.element_key || b.id];
+
+        // Compute new merged wall: extend length, average position
+        const aOrigin = getOrigin(a);
+        const bOrigin = getOrigin(b);
+        const aLen = getWallLength(a);
+        const bLen = getWallLength(b);
+        const aDir = getDir(a);
+
+        // Project b's center onto a's line to find total extent
+        const abVec = [bOrigin[0] - aOrigin[0], bOrigin[1] - aOrigin[1], bOrigin[2] - aOrigin[2]];
+        const proj = abVec[0]*aDir[0] + abVec[1]*aDir[1] + abVec[2]*aDir[2];
+
+        // Endpoints of a along its direction
+        const aStart = -aLen/2;
+        const aEnd = aLen/2;
+        const bStart = proj - bLen/2;
+        const bEnd = proj + bLen/2;
+
+        const newStart = Math.min(aStart, bStart);
+        const newEnd = Math.max(aEnd, bEnd);
+        const newLen = newEnd - newStart;
+        const newMid = (newStart + newEnd) / 2;
+
+        // New origin = a's origin shifted along direction by newMid
+        const newOrigin = [
+          aOrigin[0] + aDir[0] * newMid,
+          aOrigin[1] + aDir[1] * newMid,
+          aOrigin[2] + aDir[2] * newMid
+        ];
+
+        // Update a with merged values
+        setOrigin(a, newOrigin);
+        setWallLength(a, newLen);
+
+        if (!a.metadata) a.metadata = {};
+        a.metadata.mergedFrom = [...mergedFromA, ...mergedFromB];
+        a.element_key = `merged_wall_${containerId}_${mergeIndex++}`;
+
+        mergedKeys.add(b.element_key || b.id);
+        merged.add(j);
+      }
+    }
+  }
+
+  // Remove merged-away elements
+  if (mergedKeys.size > 0) {
+    css.elements = css.elements.filter(e => !mergedKeys.has(e.element_key || e.id));
+    console.log(`Merged ${mergedKeys.size} wall segments`);
+  }
+}
+
+function canMergeWalls(a, b, angleTol, endpointTol, thicknessTol) {
+  const dirA = getDir(a);
+  const dirB = getDir(b);
+
+  // Check angle between directions (use absolute dot product for anti-parallel)
+  const dot = Math.abs(dirA[0]*dirB[0] + dirA[1]*dirB[1] + dirA[2]*dirB[2]);
+  if (dot < Math.cos(angleTol)) return false;
+
+  // Check thickness compatibility (within 10%)
+  const thickA = getWallThickness(a);
+  const thickB = getWallThickness(b);
+  if (thickA > 0 && thickB > 0) {
+    const ratio = Math.abs(thickA - thickB) / Math.max(thickA, thickB);
+    if (ratio > thicknessTol) return false;
+  }
+
+  // Check if endpoints are close enough
+  const aOrigin = getOrigin(a);
+  const bOrigin = getOrigin(b);
+  const aLen = getWallLength(a);
+  const bLen = getWallLength(b);
+
+  // Compute endpoints of both walls
+  const aEnd1 = [aOrigin[0] - dirA[0]*aLen/2, aOrigin[1] - dirA[1]*aLen/2, aOrigin[2] - dirA[2]*aLen/2];
+  const aEnd2 = [aOrigin[0] + dirA[0]*aLen/2, aOrigin[1] + dirA[1]*aLen/2, aOrigin[2] + dirA[2]*aLen/2];
+  const bEnd1 = [bOrigin[0] - dirB[0]*bLen/2, bOrigin[1] - dirB[1]*bLen/2, bOrigin[2] - dirB[2]*bLen/2];
+  const bEnd2 = [bOrigin[0] + dirB[0]*bLen/2, bOrigin[1] + dirB[1]*bLen/2, bOrigin[2] + dirB[2]*bLen/2];
+
+  // Check if any endpoint pair is within tolerance
+  const minDist = Math.min(
+    dist3(aEnd1, bEnd1), dist3(aEnd1, bEnd2),
+    dist3(aEnd2, bEnd1), dist3(aEnd2, bEnd2)
+  );
+  return minDist <= endpointTol;
+}
+
+function getOrigin(elem) {
+  const o = elem.placement?.origin || elem.placement?.position || {};
+  return [o.x ?? 0, o.y ?? 0, o.z ?? 0];
+}
+
+function setOrigin(elem, coords) {
+  if (elem.placement?.origin) {
+    elem.placement.origin.x = coords[0];
+    elem.placement.origin.y = coords[1];
+    elem.placement.origin.z = coords[2];
+  } else if (elem.placement?.position) {
+    elem.placement.position.x = coords[0];
+    elem.placement.position.y = coords[1];
+    elem.placement.position.z = coords[2];
+  }
+}
+
+function getDir(elem) {
+  const d = elem.geometry?.direction || {};
+  const dx = d.x ?? d[0] ?? 1;
+  const dy = d.y ?? d[1] ?? 0;
+  const dz = d.z ?? d[2] ?? 0;
+  const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  return len > 1e-6 ? [dx/len, dy/len, dz/len] : [1, 0, 0];
+}
+
+function getWallLength(elem) {
+  return elem.geometry?.depth || elem.geometry?.length_m || 1;
+}
+
+function setWallLength(elem, len) {
+  if (elem.geometry?.depth !== undefined) elem.geometry.depth = len;
+  if (elem.geometry?.length_m !== undefined) elem.geometry.length_m = len;
+}
+
+function getWallThickness(elem) {
+  const p = elem.geometry?.profile || {};
+  return p.width || p.width_m || p.height || p.height_m || 0;
+}
+
+function dist3(a, b) {
+  return Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2);
+}
+
+
+// ============================================================================
+// OPENING INFERENCE (Phase 6B)
+// ============================================================================
+
+function inferOpenings(css) {
+  if (!css.elements || css.elements.length === 0) return;
+
+  const HOST_DISTANCE_TOL = 0.5; // meters
+
+  const walls = css.elements.filter(e => (e.type === 'WALL' || e.semantic_type === 'WALL'));
+  const openingCandidates = css.elements.filter(e => {
+    const t = (e.type || e.semantic_type || '').toUpperCase();
+    return t === 'DOOR' || t === 'WINDOW';
+  });
+
+  if (walls.length === 0 || openingCandidates.length === 0) return;
+
+  let matched = 0;
+  for (const candidate of openingCandidates) {
+    const candOrigin = getOrigin(candidate);
+    const candContainer = candidate.container || 'level-1';
+
+    let bestWall = null;
+    let bestDist = Infinity;
+
+    for (const wall of walls) {
+      const wallContainer = wall.container || 'level-1';
+      if (wallContainer !== candContainer) continue; // same storey only
+
+      const wallOrigin = getOrigin(wall);
+      const d = dist3(candOrigin, wallOrigin);
+      if (d < bestDist) {
+        bestDist = d;
+        bestWall = wall;
+      }
+    }
+
+    if (bestWall && bestDist <= HOST_DISTANCE_TOL) {
+      if (!candidate.metadata) candidate.metadata = {};
+      candidate.metadata.hostWallKey = bestWall.element_key || bestWall.id;
+      matched++;
+    }
+    // If no wall within threshold, keep as-is (PROXY guardrail)
+  }
+
+  if (matched > 0) {
+    console.log(`Matched ${matched} openings to host walls`);
+  }
+}
+
+
+// ============================================================================
+// SLAB INFERENCE (Phase 6C)
+// ============================================================================
+
+function inferSlabs(css) {
+  if (!css.elements || css.elements.length === 0) return;
+
+  let upgraded = 0;
+  for (const elem of css.elements) {
+    const t = (elem.type || elem.semantic_type || '').toUpperCase();
+    if (t !== 'SLAB') continue;
+
+    // Ensure slab has a PredefinedType
+    if (!elem.properties) elem.properties = {};
+    if (!elem.properties.slabType) {
+      // Determine floor vs roof based on storey position
+      const levels = css.levelsOrSegments || [];
+      const container = elem.container || 'level-1';
+      const levelIndex = levels.findIndex(l => l.id === container);
+
+      if (levelIndex === levels.length - 1 && levels.length > 1 && levelIndex > 0) {
+        elem.properties.slabType = 'ROOF';
+      } else {
+        elem.properties.slabType = 'FLOOR';
+      }
+      upgraded++;
+    }
+  }
+
+  if (upgraded > 0) {
+    console.log(`Assigned slabType to ${upgraded} slab elements`);
+  }
 }

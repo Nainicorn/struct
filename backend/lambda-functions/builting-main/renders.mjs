@@ -167,7 +167,7 @@ const renders = {
     await dynamo.send(new UpdateCommand({
       TableName,
       Key: { user_id: userId, render_id: renderId },
-      UpdateExpression: 'SET upload_finalized = :true, fileManifest = :manifest',
+      UpdateExpression: 'SET upload_finalized = :true, fileManifest = :manifest, orchestration_started = :true',
       ExpressionAttributeValues: {
         ':true': true,
         ':manifest': fileManifest

@@ -1,5 +1,5 @@
 {
-  "Comment": "CSS Pipeline (consolidated): ReadMetadata → Extract (with inline fallback) → SaveSnapshot → CSSPipeline (validate+repair+normalize) → GenerateIFC (with inline validation+self-healing) → StoreIFC",
+  "Comment": "CSS Pipeline: ReadMetadata → Extract (saves CSS to S3) → CSSPipeline (reads/writes CSS via S3) → GenerateIFC (reads CSS from S3) → StoreIFC. Catch-all error handler writes 'failed' status to DynamoDB.",
   "StartAt": "ReadRenderMetadata",
   "States": {
     "ReadRenderMetadata": {
@@ -7,7 +7,8 @@
       "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-read-metadata",
       "ResultPath": "$.metadata",
       "Next": "ExtractBuildingSpec",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
     "ExtractBuildingSpec": {
@@ -21,53 +22,39 @@
         "description.$": "$.metadata.render.description"
       },
       "ResultPath": "$.specResult",
-      "Next": "SaveCSSSnapshot",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
-    },
-
-    "SaveCSSSnapshot": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
-      "Parameters": {
-        "Bucket": "builting-data",
-        "Key.$": "States.Format('uploads/{}/{}/css/css_snapshot.json', $.userId, $.renderId)",
-        "Body.$": "States.JsonToString($.specResult.css)",
-        "ContentType": "application/json"
-      },
-      "ResultPath": "$.cssSnapshotResult",
       "Next": "CSSPipeline",
-      "Catch": [{
-        "ErrorEquals": ["States.ALL"],
-        "ResultPath": "$.cssSnapshotError",
-        "Next": "CSSPipeline"
-      }]
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
     "CSSPipeline": {
       "Type": "Task",
       "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-css-pipeline",
       "Parameters": {
-        "css.$": "$.specResult.css",
+        "cssS3Key.$": "$.specResult.cssS3Key",
         "userId.$": "$.userId",
         "renderId.$": "$.renderId",
         "bucket.$": "$.bucket"
       },
       "ResultPath": "$.pipelineResult",
       "Next": "GenerateIFC",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 1, "BackoffRate": 2 }]
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 1, "BackoffRate": 2 }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
     "GenerateIFC": {
       "Type": "Task",
       "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-json-to-ifc",
       "Parameters": {
-        "css.$": "$.pipelineResult.css",
+        "cssS3Key.$": "$.pipelineResult.cssS3Key",
+        "bucket.$": "$.bucket",
         "renderId.$": "$.renderId",
         "userId.$": "$.userId"
       },
       "ResultPath": "$.ifcResult",
       "Next": "StoreIFC",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
     "StoreIFC": {
@@ -82,6 +69,19 @@
         "elementCounts.$": "$.ifcResult.elementCounts",
         "outputMode.$": "$.ifcResult.outputMode",
         "cssHash.$": "$.ifcResult.cssHash"
+      },
+      "End": true,
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
+    },
+
+    "HandleFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store-ifc",
+      "Parameters": {
+        "failureMode": true,
+        "renderId.$": "$.renderId",
+        "userId.$": "$.userId",
+        "error.$": "$.error"
       },
       "End": true,
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]

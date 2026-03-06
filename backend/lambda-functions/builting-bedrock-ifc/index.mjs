@@ -1,10 +1,29 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { createHash } from 'crypto';
 import pdf from 'pdf-parse';
+import { extractXlsxText } from './parsers/xlsxParser.mjs';
+import { extractDocxText } from './parsers/docxParser.mjs';
+import { parseDxfToCSS } from './parsers/dxfParser.mjs';
 
 const bedrock = new BedrockRuntimeClient({ region: 'us-east-1' });
 const s3 = new S3Client({ region: 'us-east-1' });
+
+// ============================================================================
+// UTILITY: Save CSS to S3 (avoids Step Function 256KB state limit)
+// ============================================================================
+
+async function saveCSSToS3(bucket, userId, renderId, css) {
+  const key = `uploads/${userId}/${renderId}/css/css_raw.json`;
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: JSON.stringify(css),
+    ContentType: 'application/json'
+  }));
+  console.log(`CSS saved to S3: s3://${bucket}/${key} (${JSON.stringify(css).length} bytes)`);
+  return key;
+}
 
 // ============================================================================
 // UTILITY: Deterministic Element ID
@@ -26,6 +45,8 @@ async function downloadFile(bucket, key) {
     );
 
     const ext = key.toLowerCase().split('.').pop();
+    const fileName = key.split('/').pop();
+
     if (ext === 'txt') {
       return { content: await response.Body.transformToString(), type: 'text' };
     } else if (ext === 'pdf') {
@@ -37,6 +58,24 @@ async function downloadFile(bucket, key) {
         console.warn(`Failed to extract text from PDF ${key}:`, err.message);
         return { content: null, type: 'unsupported', reason: err.message };
       }
+    } else if (ext === 'xlsx' || ext === 'xls') {
+      const buffer = Buffer.from(await response.Body.transformToByteArray());
+      const text = extractXlsxText(buffer, fileName);
+      return {
+        content: text,
+        type: 'text',
+        contentType: 'text/plain; extracted-from=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      };
+    } else if (ext === 'docx') {
+      const buffer = Buffer.from(await response.Body.transformToByteArray());
+      const text = await extractDocxText(buffer, fileName);
+      return {
+        content: text,
+        type: 'text',
+        contentType: 'text/plain; extracted-from=application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      };
+    } else if (ext === 'dxf') {
+      return { content: await response.Body.transformToString(), type: 'text', contentType: 'text/dxf' };
     } else {
       return { content: null, type: 'unsupported', reason: `Unsupported format: ${ext}` };
     }
@@ -221,14 +260,17 @@ function parseVentSimToCSS(content, sourceFileName) {
       };
 
       const id = elemId(geometry, placement);
+      const branchName = branch.name || `Branch_${branch.unique_no}`;
+      const element_key = `ventsim_branch_${branch.unique_no}`;
       const type = 'TUNNEL_SEGMENT';
       elementCounts[type] = (elementCounts[type] || 0) + 1;
 
       elements.push({
         id,
+        element_key,
         type,
         semanticType: 'IfcBuildingElementProxy',
-        name: branch.name || `Branch ${branch.unique_no}`,
+        name: branchName,
         placement,
         geometry,
         container: 'seg-tunnel-main',
@@ -274,10 +316,12 @@ function parseVentSimToCSS(content, sourceFileName) {
       };
 
       const id = elemId(geometry, placement);
+      const element_key = `ventsim_fan_${fan.fan_id || i}`;
       elementCounts['EQUIPMENT'] = (elementCounts['EQUIPMENT'] || 0) + 1;
 
       elements.push({
         id,
+        element_key,
         type: 'EQUIPMENT',
         semanticType: 'IfcFan',
         name: fan.name,
@@ -299,52 +343,13 @@ function parseVentSimToCSS(content, sourceFileName) {
       });
     }
 
-    // Add named spaces as SPACE elements
-    let spaceIdx = 0;
-    for (const [spaceName, spaceBranches] of Object.entries(namedSpaces)) {
-      const sx = spaceBranches[0].x1 - minX;
-      const sy = spaceBranches[0].y1 - minY;
-      const sz = spaceBranches[0].z1 - minZ;
-
-      const placement = {
-        origin: { x: sx, y: sy, z: sz },
-        axis: { x: 0, y: 0, z: 1 },
-        refDirection: { x: 1, y: 0, z: 0 }
-      };
-      const geometry = {
-        method: 'EXTRUSION',
-        profile: { type: 'RECTANGLE', width: 10, height: 5 },
-        direction: { x: 0, y: 0, z: 1 },
-        depth: 5
-      };
-
-      const id = elemId(geometry, placement);
-      elementCounts['SPACE'] = (elementCounts['SPACE'] || 0) + 1;
-
-      elements.push({
-        id,
-        type: 'SPACE',
-        semanticType: 'IfcSpace',
-        name: spaceName,
-        placement,
-        geometry,
-        container: 'seg-tunnel-main',
-        relationships: [],
-        properties: { usage: 'OTHER', branchCount: spaceBranches.length },
-        material: {
-          name: 'space',
-          color: [0.8, 0.9, 1.0],
-          transparency: 0.5
-        },
-        confidence: 0.85,
-        source: 'VSM'
-      });
-      spaceIdx++;
-    }
+    // Named spaces are tracked in metadata but NOT rendered as separate geometry
+    // (they were previously 10x5x5m hardcoded boxes that appeared as random blocks).
+    // The tunnel branches themselves already represent named areas via their names.
+    const spaceCount = Object.keys(namedSpaces).length;
 
     const branchCount = branches.length;
     const fanCount = fans.length;
-    const spaceCount = Object.keys(namedSpaces).length;
 
     const css = {
       cssVersion: '1.0',
@@ -691,44 +696,213 @@ function buildingSpecToCSS(spec, sourceFiles) {
 // MINIMAL CSS FALLBACK (replaces standalone CreateMinimalCSS Lambda)
 // ============================================================================
 
-function createMinimalCSS(reason, sourceFiles = []) {
-  console.log(`Creating minimal CSS fallback: ${reason}`);
-  return {
-    cssVersion: '1.0',
-    domain: 'UNKNOWN',
-    facility: {
-      name: 'Unknown Structure',
-      units: 'M',
-      origin: { x: 0, y: 0, z: 0 },
-      axes: 'RIGHT_HANDED_Z_UP',
-      description: 'Extraction failed — minimal placeholder generated'
-    },
-    levelsOrSegments: [{ id: 'level-1', type: 'STOREY', name: 'Ground Floor', elevation_m: 0, height_m: 3 }],
-    elements: [{
-      id: 'proxy-envelope',
-      type: 'PROXY',
-      semanticType: 'BUILDING_ENVELOPE',
-      name: 'Placeholder Envelope',
-      placement: { origin: { x: 0, y: 0, z: 0 }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 } },
-      geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: 10, height: 10 }, direction: { x: 0, y: 0, z: 1 }, depth: 3 },
-      container: 'level-1',
-      relationships: [],
-      properties: { extractionFailed: true, failureReason: reason },
-      material: { name: 'unknown', color: [0.7, 0.7, 0.7], transparency: 0 },
-      confidence: 0.0,
-      source: 'DEFAULT'
-    }],
-    metadata: {
-      sourceFiles,
-      outputMode: 'PROXY_ONLY',
-      validationStatus: 'REPAIRED',
-      unitNormalizationApplied: true,
-      cssHash: null,
-      elementCounts: { PROXY: 1 },
-      bbox: { min: { x: 0, y: 0, z: 0 }, max: { x: 10, y: 10, z: 3 } },
-      repairLog: []
+// ============================================================================
+// ENRICHMENT — whitelist-only metadata patches from supplementary files
+// ============================================================================
+
+const ENRICHMENT_WHITELIST = new Set(['name', 'description', 'materials', 'psets']);
+const ENRICHMENT_GEOMETRY_FIELDS = new Set([
+  'placement', 'dimensions', 'width', 'height', 'depth', 'direction',
+  'elevation', 'semantic_type', 'profile', 'length_m', 'depth_m',
+  'width_m', 'height_m', 'geometry', 'position'
+]);
+const MAX_CHARS_PER_FILE = 50_000;
+const MAX_TOTAL_SUPPLEMENTARY = 120_000;
+const MULTI_PASS = process.env.MULTI_PASS !== 'false';
+
+/**
+ * Build supplementary text from non-primary files with round-robin truncation.
+ */
+function buildSupplementaryText(files) {
+  const truncatedFiles = [];
+  let sections = files.map(f => {
+    const header = `=== File: ${f.name} (${f.contentType || 'text/plain'}) ===`;
+    let content = f.content || '';
+    const originalChars = content.length;
+
+    if (content.length > MAX_CHARS_PER_FILE) {
+      content = content.slice(0, MAX_CHARS_PER_FILE) + '\n...[truncated]';
+      truncatedFiles.push({ name: f.name, originalChars, keptChars: MAX_CHARS_PER_FILE });
     }
+    return { name: f.name, text: `${header}\n${content}`, length: header.length + 1 + content.length, originalChars };
+  });
+
+  // Check total and apply round-robin truncation if needed
+  const totalLength = sections.reduce((sum, s) => sum + s.length, 0);
+  if (totalLength > MAX_TOTAL_SUPPLEMENTARY) {
+    const perFileAllowance = Math.floor(MAX_TOTAL_SUPPLEMENTARY / sections.length);
+    sections = sections.map(s => {
+      if (s.length > perFileAllowance) {
+        const truncated = s.text.slice(0, perFileAllowance) + '\n...[truncated]';
+        if (!truncatedFiles.find(t => t.name === s.name)) {
+          truncatedFiles.push({ name: s.name, originalChars: s.originalChars, keptChars: perFileAllowance });
+        }
+        return { ...s, text: truncated };
+      }
+      return s;
+    });
+  }
+
+  return {
+    text: sections.map(s => s.text).join('\n\n'),
+    truncatedFiles
   };
+}
+
+/**
+ * Validate enrichment patch schema (v1.0).
+ */
+function validatePatchSchema(response) {
+  if (!response || typeof response !== 'object') return false;
+  if (response.version !== '1.0') return false;
+  const allowedKeys = new Set(['version', 'patches']);
+  for (const key of Object.keys(response)) {
+    if (!allowedKeys.has(key)) return false;
+  }
+  if (!Array.isArray(response.patches)) return false;
+  for (const patch of response.patches) {
+    if (typeof patch.element_key !== 'string') return false;
+    if (!patch.updates || typeof patch.updates !== 'object') return false;
+  }
+  return true;
+}
+
+/**
+ * Enrich CSS with metadata patches from supplementary files via Bedrock.
+ * Only updates name, description, materials, psets. Never touches geometry.
+ */
+async function enrichCSS(cssData, supplementaryText, bedrockClient = bedrock) {
+  // Collect all elements from both CSS structures:
+  // - VentSim/DXF: top-level cssData.elements[]
+  // - Bedrock: cssData.storeys[].elements[]
+  const allElements = [];
+  if (Array.isArray(cssData.elements)) {
+    allElements.push(...cssData.elements);
+  }
+  for (const storey of (cssData.storeys || [])) {
+    if (Array.isArray(storey.elements)) {
+      allElements.push(...storey.elements);
+    }
+  }
+
+  // Use element_key if available, otherwise fall back to id
+  const elementKeys = allElements.map(el => el.element_key || el.id).filter(Boolean);
+
+  if (elementKeys.length === 0) {
+    console.log('No element_keys found in CSS — skipping enrichment');
+    return cssData;
+  }
+
+  // Build a summary with keys AND names so Bedrock can match meaningfully
+  const elementSummary = allElements.slice(0, 80).map(el => {
+    const key = el.element_key || el.id;
+    const name = el.name || '';
+    const type = el.type || el.semanticType || '';
+    return `  ${key} (name: "${name}", type: ${type})`;
+  }).join('\n');
+
+  const prompt = `You are enriching a building model with supplementary document data.
+The model has ${elementKeys.length} elements:
+${elementSummary}${elementKeys.length > 80 ? '\n  ... and more' : ''}
+
+Supplementary documents:
+${supplementaryText}
+
+Return ONLY valid JSON matching this exact schema:
+{
+  "version": "1.0",
+  "patches": [
+    {
+      "element_key": "<exact key from list above>",
+      "updates": {
+        "name": "optional new name",
+        "description": "optional description",
+        "materials": ["optional", "materials"],
+        "psets": { "Pset_Name": { "Property": "Value" } }
+      }
+    }
+  ]
+}
+
+Rules:
+- Only use element_keys from the list above
+- Only set name, description, materials, psets
+- Do NOT include placement, dimensions, geometry, semantic_type, or any geometry fields
+- Return empty patches array if no enrichment possible`;
+
+  try {
+    const response = await bedrockClient.send(new InvokeModelCommand({
+      modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      contentType: 'application/json',
+      accept: 'application/json',
+      body: JSON.stringify({
+        anthropic_version: 'bedrock-2023-05-31',
+        max_tokens: 8192,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    }));
+
+    const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+    const text = responseBody.content?.[0]?.text || '';
+
+    // Extract JSON from response
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn('Enrichment: no JSON found in Bedrock response');
+      return cssData;
+    }
+
+    const patchData = JSON.parse(jsonMatch[0]);
+
+    // Validate schema
+    if (!validatePatchSchema(patchData)) {
+      console.warn('Enrichment: patch schema validation failed');
+      return cssData;
+    }
+
+    // Build element lookup by key (supports both CSS structures)
+    const elementMap = new Map();
+    for (const el of allElements) {
+      const key = el.element_key || el.id;
+      if (key) elementMap.set(key, el);
+    }
+
+    // Apply patches with whitelist enforcement
+    let appliedCount = 0;
+    for (const patch of patchData.patches) {
+      const element = elementMap.get(patch.element_key);
+      if (!element) {
+        console.warn(`Enrichment: unmatched element_key=${patch.element_key}`);
+        continue;
+      }
+
+      for (const [field, value] of Object.entries(patch.updates)) {
+        if (ENRICHMENT_GEOMETRY_FIELDS.has(field)) {
+          console.warn(`REJECTED geometry edit for element_key=${patch.element_key} field=${field}`);
+          continue;
+        }
+        if (!ENRICHMENT_WHITELIST.has(field)) {
+          console.warn(`REJECTED unknown field for element_key=${patch.element_key} field=${field}`);
+          continue;
+        }
+        element[field] = value;
+      }
+      appliedCount++;
+    }
+
+    console.log(`Enrichment: applied ${appliedCount}/${patchData.patches.length} patches`);
+
+    // Update diagnostics
+    if (cssData.metadata?.diagnostics) {
+      cssData.metadata.diagnostics.enrichmentApplied = appliedCount > 0;
+      cssData.metadata.diagnostics.enrichmentPatchCount = appliedCount;
+    }
+
+    return cssData;
+  } catch (err) {
+    console.warn('Enrichment failed:', err.message);
+    return cssData;
+  }
 }
 
 // ============================================================================
@@ -784,31 +958,107 @@ export const handler = async (event) => {
       const sf = sourceFiles.find(f => f.name === ventSimFile.name);
       if (sf) sf.role = 'geometry';
 
-      const css = parseVentSimToCSS(ventSimFile.content, ventSimFile.name);
+      let css = parseVentSimToCSS(ventSimFile.content, ventSimFile.name);
 
       if (css) {
-        // Merge all source file statuses
         css.metadata.sourceFiles = sourceFiles;
+
+        // Enrichment: use supplementary files to add metadata to CSS elements
+        const otherFiles = processedFiles.filter(f => f !== ventSimFile);
+        if (otherFiles.length > 0) {
+          const { text: suppText, truncatedFiles } = buildSupplementaryText(otherFiles);
+          if (css.metadata?.diagnostics) css.metadata.diagnostics.truncatedFiles = truncatedFiles;
+          css = await enrichCSS(css, suppText);
+        }
 
         const ai_generated_title = css.facility.name;
         const ai_generated_description = css.facility.description;
 
         console.log('VentSim CSS extraction complete');
-        return {
-          ...event,
-          css,
-          ai_generated_title,
-          ai_generated_description
-        };
+        const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
+        return { cssS3Key, ai_generated_title, ai_generated_description };
       }
     }
 
-    // ---- BEDROCK EXTRACTION ----
-    // Build prompt for CSS output
-    const messageContent = [
-      {
-        type: 'text',
-        text: `You are an expert in interpreting architectural and engineering documents to extract building specifications.
+    // ---- DXF DETECTION ----
+    const dxfFile = processedFiles.find(f => f.name.toLowerCase().endsWith('.dxf'));
+    if (dxfFile) {
+      console.log('Detected DXF format in file:', dxfFile.name);
+      const sf = sourceFiles.find(f => f.name === dxfFile.name);
+      if (sf) sf.role = 'geometry';
+
+      let css = parseDxfToCSS(dxfFile.content);
+      if (css) {
+        css.metadata.sourceFiles = sourceFiles;
+
+        // Enrichment: use supplementary files to add metadata to CSS elements
+        const otherFiles = processedFiles.filter(f => f !== dxfFile);
+        if (otherFiles.length > 0) {
+          const { text: suppText, truncatedFiles } = buildSupplementaryText(otherFiles);
+          if (css.metadata?.diagnostics) css.metadata.diagnostics.truncatedFiles = truncatedFiles;
+          css = await enrichCSS(css, suppText);
+        }
+
+        const ai_generated_title = css.metadata.title || 'DXF Import';
+        const ai_generated_description = `DXF model with ${css.metadata.diagnostics?.elementCount || 0} elements (${css.metadata.diagnostics?.proxyCount || 0} proxy, ${css.metadata.diagnostics?.semanticUpgradeCount || 0} semantic)`;
+
+        console.log('DXF CSS extraction complete');
+        const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
+        return { cssS3Key, ai_generated_title, ai_generated_description };
+      }
+    }
+
+    // ---- BEDROCK EXTRACTION (single-pass or multi-pass) ----
+
+    // Helper: call Bedrock with a prompt and return parsed JSON (or null)
+    async function callBedrock(prompt, maxTokens = 4096) {
+      const response = await bedrock.send(new InvokeModelCommand({
+        modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+        contentType: 'application/json',
+        accept: 'application/json',
+        body: JSON.stringify({
+          anthropic_version: 'bedrock-2023-05-31',
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      }));
+      const body = JSON.parse(response.body instanceof Uint8Array ? new TextDecoder().decode(response.body) : response.body);
+      const text = body.content?.[0]?.text || '';
+      if (!text) return null;
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      return JSON.parse(match[0]);
+    }
+
+    // Helper: prepare file content for Bedrock prompts
+    function prepareFileContent(files) {
+      const MAX_FILE_CHARS = 50000;
+      const MAX_TOTAL_CHARS = 150000;
+      const RELEVANT_KEYWORDS = /ventilation|hvac|system|fan|duct|equipment|air|flow|pressure|shaft|dimension|floor|wall|room|column|beam|slab|foundation|elevation|height|width|length|material|concrete|steel/i;
+      let totalChars = 0;
+      const parts = [];
+
+      for (const file of files) {
+        if (totalChars >= MAX_TOTAL_CHARS) break;
+        let content = file.content;
+        if (content.length > 30000) {
+          const paragraphs = content.split(/\n\s*\n/);
+          const relevant = paragraphs.filter(p => RELEVANT_KEYWORDS.test(p));
+          content = relevant.length > 0 ? relevant.join('\n\n') : content.substring(0, 30000);
+        }
+        if (content.length > MAX_FILE_CHARS) content = content.substring(0, MAX_FILE_CHARS) + '\n[... truncated ...]';
+        totalChars += content.length;
+        parts.push(`File: ${file.name}\n\n${content}`);
+      }
+      return parts.join('\n\n---\n\n');
+    }
+
+    // Single-pass extraction (existing behavior)
+    async function singlePassExtraction() {
+      console.log('Running single-pass Bedrock extraction...');
+      const fileContent = prepareFileContent(processedFiles);
+
+      const prompt = `You are an expert in interpreting architectural and engineering documents to extract building specifications.
 Extract structured data from the provided files and return it as a JSON object. ALL DIMENSIONS IN METRES.
 
 Return ONLY valid JSON (no markdown, no explanations):
@@ -838,104 +1088,199 @@ Convert feet/inches to metres. Use realistic defaults for missing values. Return
 Building Description:
 ${descriptionContent || '(No description provided)'}
 
-${sourceFiles.filter(f => f.parseStatus === 'unsupported').length > 0 ? `\nNote: These file types were uploaded but could not be parsed: ${sourceFiles.filter(f => f.parseStatus === 'unsupported').map(f => f.name).join(', ')}` : ''}`
-      }
-    ];
+${sourceFiles.filter(f => f.parseStatus === 'unsupported').length > 0 ? `\nNote: These file types were uploaded but could not be parsed: ${sourceFiles.filter(f => f.parseStatus === 'unsupported').map(f => f.name).join(', ')}` : ''}
 
-    // Add file contents with smart extraction
-    const RELEVANT_KEYWORDS = /ventilation|hvac|system|fan|duct|equipment|air|flow|pressure|shaft|dimension|floor|wall|room|column|beam|slab|foundation|elevation|height|width|length|material|concrete|steel/i;
-    const MAX_FILE_CHARS = 50000;
-    const MAX_TOTAL_CHARS = 150000;
-    let totalChars = 0;
+${fileContent}`;
 
-    for (const file of processedFiles) {
-      if (totalChars >= MAX_TOTAL_CHARS) {
-        console.log(`Stopping file inclusion - reached ${MAX_TOTAL_CHARS} character limit`);
-        break;
-      }
+      return await callBedrock(prompt);
+    }
 
-      let content = file.content;
+    // Multi-pass extraction
+    async function multiPassExtraction() {
+      console.log('Running multi-pass Bedrock extraction...');
 
-      if (content.length > 30000) {
-        const paragraphs = content.split(/\n\s*\n/);
-        const relevantSections = paragraphs.filter(p => RELEVANT_KEYWORDS.test(p));
-        if (relevantSections.length > 0) {
-          content = relevantSections.join('\n\n');
+      // Pass 1 — Classify (advisory, skip if fails)
+      let classification = null;
+      try {
+        const snippets = processedFiles.map(f => `File: ${f.name}\n${f.content.slice(0, 2000)}`).join('\n---\n');
+        const pass1Prompt = `Classify these building/engineering documents. Return ONLY valid JSON:
+{
+  "buildingType": "BUILDING|OFFICE|WAREHOUSE|TUNNEL|FACILITY|PARKING|HOSPITAL|SCHOOL|INDUSTRIAL|RESIDENTIAL",
+  "domainHints": ["architecture", "structural", "mechanical", "electrical", etc.],
+  "fileRoles": { "filename.txt": "floor_plan|specifications|schedule|description|other" }
+}
+
+Documents:
+${snippets}`;
+
+        const pass1Result = await callBedrock(pass1Prompt, 2048);
+        if (pass1Result && pass1Result.buildingType && typeof pass1Result.buildingType === 'string') {
+          classification = pass1Result;
+          console.log(`Pass 1 classification: ${classification.buildingType}, hints: ${classification.domainHints?.join(', ')}`);
         } else {
-          content = content.substring(0, 30000);
+          console.warn('Pass 1: classification schema invalid, using generic prompts');
         }
+      } catch (err) {
+        console.warn('Pass 1 failed, using generic prompts:', err.message);
       }
 
-      if (content.length > MAX_FILE_CHARS) {
-        content = content.substring(0, MAX_FILE_CHARS) + '\n[... truncated ...]';
+      // Pass 2 — Geometry (main extraction, fallback to single-pass if invalid)
+      const domainContext = classification
+        ? `This is a ${classification.buildingType} project with domain hints: ${classification.domainHints?.join(', ')}.`
+        : 'Extract building geometry from the provided documents.';
+
+      const fileContent = prepareFileContent(processedFiles);
+      const pass2Prompt = `${domainContext}
+You are an expert in interpreting architectural and engineering documents to extract building specifications.
+Extract structured data and return it as a JSON object. ALL DIMENSIONS IN METRES.
+
+Return ONLY valid JSON (no markdown, no explanations):
+
+{
+  "buildingName": "string",
+  "buildingType": "BUILDING | OFFICE | WAREHOUSE | TUNNEL | FACILITY | PARKING | HOSPITAL | SCHOOL | INDUSTRIAL | RESIDENTIAL",
+  "dimensions": { "length_m": number, "width_m": number, "height_m": number, "wall_thickness_m": number },
+  "elevations": { "floor_level_m": number },
+  "rooms": [{ "name": "string", "usage": "string", "length_m": number, "width_m": number, "height_m": number, "x_position_m": number, "y_position_m": number }],
+  "openings": [{ "type": "DOOR|WINDOW", "wall_side": "NORTH|SOUTH|EAST|WEST", "x_offset_m": number, "width_m": number, "height_m": number, "sill_height_m": number }],
+  "ventilation": { "system_type": "string", "num_fans": number },
+  "equipment": [{ "name": "string", "type": "string", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number }],
+  "materials": { "walls": "string", "floor": "string", "roof": "string" },
+  "structural_system": "FRAME|LOADBEARING|SHELL|TRUSS|OTHER",
+  "structure": { "column_grid": [], "floor_to_floor_height_m": number, "num_floors": number },
+  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number }]
+}
+
+Convert feet/inches to metres. Use realistic defaults for missing values. Return empty arrays [] when no data.
+
+Building Description:
+${descriptionContent || '(No description provided)'}
+
+${fileContent}`;
+
+      let buildingSpec;
+      try {
+        buildingSpec = await callBedrock(pass2Prompt);
+        if (!buildingSpec || !buildingSpec.dimensions) {
+          console.warn('Pass 2: geometry schema invalid, falling back to single-pass');
+          return await singlePassExtraction();
+        }
+        console.log(`Pass 2 geometry extracted: ${buildingSpec.buildingName || 'unnamed'}`);
+      } catch (err) {
+        console.warn('Pass 2 failed, falling back to single-pass:', err.message);
+        return await singlePassExtraction();
       }
 
-      totalChars += content.length;
-      messageContent.push({ type: 'text', text: `File: ${file.name}\n\n${content}` });
+      // Pass 3 — Semantics (enrichment patches, skip if fails)
+      // Convert buildingSpec to CSS first so we have element_keys
+      applyBuildingSpecDefaults(buildingSpec);
+      let css = buildingSpecToCSS(buildingSpec, sourceFiles);
+
+      try {
+        const elementSummary = (css.storeys || []).flatMap(s => (s.elements || []).map(e => e.element_key)).filter(Boolean).slice(0, 50);
+        const pass3Prompt = `You are enriching a building model with additional metadata.
+The model has these element keys: ${elementSummary.join(', ')}
+
+Source documents:
+${fileContent.slice(0, 50000)}
+
+Return ONLY valid JSON:
+{
+  "version": "1.0",
+  "patches": [
+    {
+      "element_key": "<exact key from above>",
+      "updates": {
+        "name": "optional display name",
+        "description": "optional description",
+        "materials": ["optional", "materials"],
+        "psets": { "Pset_Name": { "Property": "Value" } }
+      }
+    }
+  ]
+}
+
+Rules: Only use element_keys from the list. Only set name, description, materials, psets. No geometry fields.`;
+
+        const pass3Result = await callBedrock(pass3Prompt, 4096);
+        if (pass3Result && validatePatchSchema(pass3Result)) {
+          // Apply patches via whitelist
+          const elementMap = new Map();
+          for (const storey of (css.storeys || [])) {
+            for (const el of (storey.elements || [])) {
+              if (el.element_key) elementMap.set(el.element_key, el);
+            }
+          }
+          let patchCount = 0;
+          for (const patch of pass3Result.patches) {
+            const element = elementMap.get(patch.element_key);
+            if (!element) continue;
+            for (const [field, value] of Object.entries(patch.updates)) {
+              if (ENRICHMENT_GEOMETRY_FIELDS.has(field)) {
+                console.warn(`Pass 3: REJECTED geometry edit for element_key=${patch.element_key} field=${field}`);
+                continue;
+              }
+              if (ENRICHMENT_WHITELIST.has(field)) element[field] = value;
+            }
+            patchCount++;
+          }
+          console.log(`Pass 3: applied ${patchCount} semantic patches`);
+        } else {
+          console.warn('Pass 3: patch schema invalid, returning Pass 2 CSS as-is');
+        }
+      } catch (err) {
+        console.warn('Pass 3 failed, returning Pass 2 CSS:', err.message);
+      }
+
+      return { buildingSpec, enrichedCSS: css };
     }
 
-    console.log('Calling Bedrock Claude 3 Sonnet...');
-
-    const response = await bedrock.send(
-      new InvokeModelCommand({
-        modelId: 'anthropic.claude-3-sonnet-20240229-v1:0',
-        contentType: 'application/json',
-        accept: 'application/json',
-        body: JSON.stringify({
-          anthropic_version: 'bedrock-2023-05-31',
-          max_tokens: 4096,
-          messages: [{ role: 'user', content: messageContent }]
-        })
-      })
-    );
-
-    const responseBody = JSON.parse(
-      response.body instanceof Uint8Array
-        ? new TextDecoder().decode(response.body)
-        : response.body
-    );
-
-    let responseText = '';
-    if (responseBody.content && responseBody.content.length > 0) {
-      responseText = responseBody.content[0].text || '';
+    // Apply defaults to building spec
+    function applyBuildingSpecDefaults(spec) {
+      if (!spec.buildingName) spec.buildingName = 'Structure';
+      if (!spec.buildingType) spec.buildingType = 'BUILDING';
+      if (!spec.dimensions) spec.dimensions = { length_m: 20, width_m: 10, height_m: 3, wall_thickness_m: 0.3 };
+      if (spec.dimensions.wall_thickness_m === undefined) spec.dimensions.wall_thickness_m = 0.3;
+      if (!spec.elevations) spec.elevations = {};
+      if (spec.elevations.floor_level_m === undefined) spec.elevations.floor_level_m = 0.0;
+      if (!spec.rooms) spec.rooms = [];
+      if (!spec.openings) spec.openings = [];
+      if (!spec.ventilation) spec.ventilation = { system_type: 'natural', num_fans: 0 };
+      if (!spec.equipment) spec.equipment = [];
+      if (!spec.materials) spec.materials = { walls: 'concrete', floor: 'concrete', roof: 'metal' };
+      if (!spec.structural_system) spec.structural_system = 'LOADBEARING';
     }
 
-    if (!responseText) {
-      console.error('Bedrock returned empty response');
-      const css = createMinimalCSS('Empty Bedrock response', sourceFiles);
-      return { ...event, css, ai_generated_title: 'Structure', ai_generated_description: 'Extraction produced empty response' };
-    }
-
-    // Parse JSON response
+    // Run extraction
     let buildingSpec;
+    let enrichedCSS = null;
     try {
-      let cleanText = responseText.trim();
-      const fenceMatch = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      if (fenceMatch) cleanText = fenceMatch[1];
-      buildingSpec = JSON.parse(cleanText);
+      if (MULTI_PASS) {
+        const result = await multiPassExtraction();
+        buildingSpec = result.buildingSpec;
+        enrichedCSS = result.enrichedCSS;
+      } else {
+        buildingSpec = await singlePassExtraction();
+      }
     } catch (err) {
-      console.error('Failed to parse Bedrock JSON response:', err.message);
-      console.error('Response text:', responseText.substring(0, 500));
-      const css = createMinimalCSS(`Invalid JSON from Bedrock: ${err.message}`, sourceFiles);
-      return { ...event, css, ai_generated_title: 'Structure', ai_generated_description: 'Extraction produced invalid JSON' };
+      console.error('Bedrock extraction failed:', err.message, err.stack);
+      console.error('Bedrock extraction error details:', JSON.stringify({ name: err.name, code: err.$metadata?.httpStatusCode, requestId: err.$metadata?.requestId }));
+      throw new Error(`Bedrock extraction failed: ${err.message}`);
     }
 
-    // Apply defaults
-    if (!buildingSpec.buildingName) buildingSpec.buildingName = 'Structure';
-    if (!buildingSpec.buildingType) buildingSpec.buildingType = 'BUILDING';
-    if (!buildingSpec.dimensions) buildingSpec.dimensions = { length_m: 20, width_m: 10, height_m: 3, wall_thickness_m: 0.3 };
-    if (buildingSpec.dimensions.wall_thickness_m === undefined) buildingSpec.dimensions.wall_thickness_m = 0.3;
-    if (!buildingSpec.elevations) buildingSpec.elevations = {};
-    if (buildingSpec.elevations.floor_level_m === undefined) buildingSpec.elevations.floor_level_m = 0.0;
-    if (!buildingSpec.rooms) buildingSpec.rooms = [];
-    if (!buildingSpec.openings) buildingSpec.openings = [];
-    if (!buildingSpec.ventilation) buildingSpec.ventilation = { system_type: 'natural', num_fans: 0 };
-    if (!buildingSpec.equipment) buildingSpec.equipment = [];
-    if (!buildingSpec.materials) buildingSpec.materials = { walls: 'concrete', floor: 'concrete', roof: 'metal' };
-    if (!buildingSpec.structural_system) buildingSpec.structural_system = 'LOADBEARING';
+    if (!buildingSpec) {
+      console.error('Bedrock returned empty/unparseable response');
+      throw new Error('Bedrock returned empty or unparseable response');
+    }
 
-    // Convert buildingSpec to CSS
-    const css = buildingSpecToCSS(buildingSpec, sourceFiles);
+    // Use enriched CSS from multi-pass if available, otherwise convert from spec
+    let css;
+    if (enrichedCSS) {
+      css = enrichedCSS;
+    } else {
+      applyBuildingSpecDefaults(buildingSpec);
+      css = buildingSpecToCSS(buildingSpec, sourceFiles);
+    }
 
     // Generate AI title and description
     const ai_generated_title = buildingSpec.buildingName || 'Structure Model';
@@ -951,23 +1296,13 @@ ${sourceFiles.filter(f => f.parseStatus === 'unsupported').length > 0 ? `\nNote:
 
     css.facility.description = ai_generated_description;
 
-    console.log(`CSS generated: ${css.elements.length} elements, domain=${css.domain}`);
+    console.log(`CSS generated: ${css.elements?.length || 0} elements, domain=${css.domain}`);
 
-    return {
-      ...event,
-      css,
-      ai_generated_title,
-      ai_generated_description
-    };
+    const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
+    return { cssS3Key, ai_generated_title, ai_generated_description };
   } catch (error) {
     console.error('ExtractBuildingSpec error:', error);
-    // Generate minimal CSS inline instead of returning null
-    const css = createMinimalCSS(error.message, []);
-    return {
-      ...event,
-      css,
-      ai_generated_title: 'Structure',
-      ai_generated_description: 'Extraction failed — placeholder generated'
-    };
+    // Let the error propagate to the Step Function so HandleFailure can mark it as failed
+    throw error;
   }
 };

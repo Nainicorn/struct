@@ -82,3 +82,73 @@ Fixed 9 critical issues in `builting-json-to-ifc-python/lambda_function.py`:
 - `test_no_invalid_direction_vectors` (degenerate input sanitized)
 - `test_placement_chain` (Building relative to Site)
 - `test_per_element_proxy_fallback` (one bad element doesn't proxy everything)
+
+---
+
+## Phase 3: XLSX/DOCX File Format Support (2026-03-03)
+- New parser: `parsers/xlsxParser.mjs` — extracts text from XLSX (200 row/50 col limits, sheet headers, 50k char cap)
+- New parser: `parsers/docxParser.mjs` — extracts text from DOCX via mammoth (50k char cap)
+- Extended `downloadFile()` in `builting-bedrock-ifc/index.mjs` to detect .xlsx/.docx/.xls extensions
+- Error-resilient: parsers return error-note strings on failure, never throw
+
+---
+
+## Phase 2A: DXF Geometry Support (2026-03-03)
+- New parser: `parsers/dxfParser.mjs` (~300 lines) — DXF→CSS v1.0 conversion
+- PROXY-first approach: defaults to PROXY, upgrades only with strong layer evidence
+- Entity processors: LINE (midpoint+distance), POLYLINE (segment-per-edge with vertex dedupe), CIRCLE, ARC (always PROXY), FACESET
+- INSERT block expansion: recursion depth limit (5), cycle detection, array expansion (rowCount/columnCount), entity count cap (50k)
+- INSUNITS handling: 21-entry lookup table, unit scaling before geometry derivation
+- Semantic upgrades: WALL (layer WALL* + length threshold), COLUMN (layer COLUMN* + radius bounds), SLAB (layer SLAB* + 3DFACE)
+- Excluded layers: DIM/GRID/TEXT/ANNO/DEFPOINTS/HATCH/XREF/VIEWPORT
+- Degenerate segment skip (<1e-6m) and polyline vertex deduplication
+- Deterministic element_key generation per matching rules
+- CSS diagnostics metadata (parserUsed, elementCount, proxyCount, semanticUpgradeCount)
+
+---
+
+## Phase 2B: Multi-pass Bedrock + Enrichment (2026-03-03)
+- `enrichCSS()`: Bedrock-powered enrichment with strict whitelist (name, description, materials, psets only)
+- Geometry field rejection: logs and ignores any patch touching placement/dimensions/direction/semantic_type
+- Versioned patch schema v1.0 with validation (version, element_key, updates fields)
+- `buildSupplementaryText()`: per-file sections with headers, round-robin truncation (50k/file, 120k total)
+- Multi-pass Bedrock extraction (behind `MULTI_PASS` env var, default true):
+  - Pass 1 (Classify): advisory, generic prompts if fails
+  - Pass 2 (Geometry): CSS v1.0 extraction, single-pass fallback if fails
+  - Pass 3 (Semantics): patch-only, preserves Pass 2 geometry if fails
+- Integrated enrichment into VentSim and DXF paths
+
+---
+
+## Phase 5: Testing, CI, Bundling (2026-03-03)
+- Vitest setup for `builting-bedrock-ifc` and `builting-css-pipeline`
+- 34 tests in `builting-bedrock-ifc` (18 parser + 16 enrichment)
+- 8 tests in `builting-css-pipeline` (Phase 6 wall merge, openings, slabs)
+- Test fixtures: sample.dxf, sample-ventsim.txt, sample-building.json
+- GitHub Actions CI: `.github/workflows/ci.yml` (Node.js 20 + Python 3.11 jobs)
+- esbuild bundling: `npm run build` → 5.7MB minified, 1.6MB zip
+- No AWS calls in any tests
+
+---
+
+## Phase 6: IFC Quality Improvements (2026-03-03)
+
+### 6A: Wall Alignment + Merging
+- `mergeWalls()` in CSS pipeline: snaps direction to cardinal axis within 5°, merges collinear walls
+- Merge criteria: angle < 3°, endpoints within 0.05m, same thickness within 10%, same storey
+- Provenance: `metadata.mergedFrom` with original element_keys
+
+### 6B: Opening Inference (Doors/Windows)
+- `inferOpenings()` in CSS pipeline: matches DOOR/WINDOW to nearest WALL on same storey (0.5m threshold)
+- Sets `metadata.hostWallKey` on matched openings; unmatched kept as-is
+
+### 6C: Slab Inference
+- `inferSlabs()` in CSS pipeline: assigns `properties.slabType` = FLOOR or ROOF based on storey position
+
+### 6D: Mesh Fallback
+- 3-step escalation in `create_element_geometry()`: normal extrusion → sanitized extrusion → IfcTriangulatedFaceSet mesh
+- Tracks fallback type in `metadata.geometryFallbacks`
+
+### 6E: Viewer Compatibility Validation
+- Enhanced `validate_ifc()`: NaN/Inf directions, large coordinates (>1e6), storey containment, missing Body rep
+- `compatibilityScore` (0-100), `meshFallbackCount`, `proxyFallbackCount` in report

@@ -75,9 +75,9 @@ The backend folder contains the most recent code or information that is is ident
       - builting-main (node.js20 and arm64): API gateway router for auth, user data, renders, presigned URLs, and finalize endpoint
       - builting-orchestrator-trigger (node.js20 and arm64): SNS trigger on S3 file upload; checks finalized flag, deduplicates and starts Step Function
       - builting-read-metadata (node.js20 and arm64): retrieves render from DynamoDB and lists uploaded files from S3
-      - builting-bedrock-ifc (node.js20 and arm64): downloads files from S3, extracts building specs as CSS v1.0 via Bedrock + VentSim parser; includes inline minimal CSS fallback on failure
-      - builting-css-pipeline (node.js20 and arm64): consolidated Lambda that runs ValidateCSS → RepairCSS (if needed) → NormalizeGeometry in one call
-      - builting-json-to-ifc (python3.11 container): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, robust axis/direction sanitization, conditional Z subtraction (placementZIsAbsolute flag), improved bbox with profile bounds
+      - builting-bedrock-ifc (node.js20 and arm64): downloads files from S3, extracts building specs as CSS v1.0 via Bedrock + VentSim/DXF/XLSX/DOCX parsers + multi-pass Bedrock extraction + enrichment; esbuild-bundled (5.7MB)
+      - builting-css-pipeline (node.js20 and arm64): consolidated Lambda that runs ValidateCSS → RepairCSS → NormalizeGeometry → MergeWalls → InferOpenings → InferSlabs
+      - builting-json-to-ifc (python3.11 container): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, mesh fallback (IfcTriangulatedFaceSet), viewer compatibility scoring
       - builting-store-ifc (node.js20 and arm64): updates DynamoDB with IFC path, elementCounts, outputMode, cssHash
 
     - Step Function
@@ -149,28 +149,20 @@ See `completed.md` for full implementation history.
 - IFC Placement/Storey/Validator Overhaul (2026-03-02): fixed placement chain (Building→Site), storey elevation logic, conditional Z subtraction with `placementZIsAbsolute` flag, axis/refDirection sanitization, IfcWall (not StandardCase), validator excludes spatial containers, improved bbox with profile bounds, 8 CSS v1.0 regression tests ✅
 
 ### TO-DO: Manual AWS Setup Required
-1. ~~**Create `builting-css-pipeline` Lambda**~~ ✅ deployed
-2. **Update existing Lambda functions** (upload new zips):
-   - ~~`builting-bedrock-ifc` → `builting-bedrock-ifc.zip`~~ ✅ deployed (2026-02-28)
-   - `builting-json-to-ifc` → rebuild Docker image and push to ECR (updated: placement/storey/validator overhaul 2026-03-02)
-   - `builting-store-ifc` → `builting-store-ifc.zip`
-   - `builting-main` → `builting-main.zip` (has new SFN client dependency)
-   - `builting-orchestrator-trigger` → `builting-orchestrator-trigger.zip`
-3. ~~**Add ENV variable** `STATE_MACHINE_ARN` to `builting-main`~~ ✅ done
-4. ~~**Add API Gateway route**: `POST /api/renders/{id}/finalize`~~ ✅ done
-5. **Update Step Function** `builting-render-state-machine` with `backend/step-function/current_json.json`
-6. **Rebuild and push Docker image** for `builting-json-to-ifc` (Python Lambda with updated lambda_function.py)
-7. Test end-to-end flow
-
-### Remaining Phases
-- **Phase 2A**: DWG geometry support (DWG→DXF→CSS pipeline)
-- **Phase 2B**: Multi-pass Bedrock extraction (domain classification → geometry → semantics → consistency)
-- **Phase 3**: XLSX/DOCX/PDF file format support
-- **Phase 5**: Testing, CI, regression fixtures
+1. **Update `builting-bedrock-ifc`** → upload `builting-bedrock-ifc.zip` (1.6MB, esbuild-bundled)
+2. **Update `builting-css-pipeline`** → upload `builting-css-pipeline.zip` (6.2KB)
+3. **Rebuild & push Docker image** for `builting-json-to-ifc` (mesh fallback + viewer validation)
+4. **Update `builting-store-ifc`** → `builting-store-ifc.zip` (from previous session)
+5. **Update `builting-main`** → `builting-main.zip` (from previous session)
+6. **Update `builting-orchestrator-trigger`** → `builting-orchestrator-trigger.zip` (from previous session)
+7. **Update Step Function** `builting-render-state-machine` with `backend/step-function/current_json.json`
+8. Test end-to-end flow
 
 ### Reach Goals
 1. Human-in-the-loop approval after generation so add fixes
 2. Edit/retry failed renders
 3. Multi-level buildings with ramps and stairs
+4. MEP systems visualization
+5. Complex curved geometries for tunnels
 
 **References**: See DEPLOYMENT_GUIDE_IFC4.md and backend/schemas/css-v1.0.md

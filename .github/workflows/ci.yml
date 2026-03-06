@@ -1,0 +1,26 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test-bedrock-ifc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: cd backend/lambda-functions/builting-bedrock-ifc && npm ci && npm test
+    # No AWS creds needed — all tests use mocked Bedrock/S3
+
+  test-ifc-generator:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.11-slim
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps + pinned Python packages
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends build-essential
+          pip install --no-cache-dir \
+            "ifcopenshell==0.8.1" \
+            "pytest>=7.0,<9.0"
+      - run: cd backend/lambda-functions/builting-json-to-ifc-python && python -m pytest test_ifc4.py -v
