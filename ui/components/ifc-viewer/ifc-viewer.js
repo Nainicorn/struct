@@ -18,7 +18,8 @@ const ifcViewer = {
             this.viewer = new Viewer({
                 canvasId: canvas.id,
                 transparent: false,
-                backgroundColor: [0.164, 0.164, 0.164] // Match #2a2a2a dark theme
+                backgroundColor: [0.164, 0.164, 0.164], // Match #2a2a2a dark theme
+                preserveDrawingBuffer: true // Required for canvas snapshot capture
             });
 
             // Initialize web-ifc API instance
@@ -121,6 +122,59 @@ const ifcViewer = {
             this.currentModel.destroy();
             this.currentModel = null;
             console.log('Model cleared');
+        }
+    },
+
+    /**
+     * Capture a square thumbnail snapshot of the current viewer canvas.
+     * Returns a base64 JPEG data URL or null if capture fails or canvas is blank.
+     * @param {number} [size=200] - Target dimension (square)
+     * @returns {string|null}
+     */
+    getSnapshot(size = 200) {
+        try {
+            // Try xeokit's canvas path first, then fall back to DOM lookup
+            let srcCanvas = this.viewer?.scene?.canvas?.canvas;
+            if (!srcCanvas) {
+                srcCanvas = document.getElementById('ifc-viewer-canvas');
+            }
+            if (!srcCanvas || srcCanvas.width === 0 || srcCanvas.height === 0) {
+                console.warn('[Snapshot] No canvas found or canvas has zero size');
+                return null;
+            }
+
+            const offscreen = document.createElement('canvas');
+            offscreen.width = size;
+            offscreen.height = size;
+            const ctx = offscreen.getContext('2d');
+
+            // Center-crop the largest square from the source canvas
+            const sq = Math.min(srcCanvas.width, srcCanvas.height);
+            const sx = (srcCanvas.width - sq) / 2;
+            const sy = (srcCanvas.height - sq) / 2;
+            ctx.drawImage(srcCanvas, sx, sy, sq, sq, 0, 0, size, size);
+
+            // Blank detection: sample pixels to ensure the model is visible
+            const sample = ctx.getImageData(0, 0, size, size).data;
+            const bgR = 42, bgG = 42, bgB = 42; // viewer bg ~#2a2a2a
+            let nonBgPixels = 0;
+            const step = 40; // sample every 40th pixel for speed
+            for (let i = 0; i < sample.length; i += step * 4) {
+                const r = sample[i], g = sample[i + 1], b = sample[i + 2];
+                if (Math.abs(r - bgR) > 12 || Math.abs(g - bgG) > 12 || Math.abs(b - bgB) > 12) {
+                    nonBgPixels++;
+                }
+            }
+            const totalSampled = Math.ceil(sample.length / (step * 4));
+            if (nonBgPixels / totalSampled < 0.03) {
+                // Less than 3% non-background — likely blank canvas
+                return null;
+            }
+
+            return offscreen.toDataURL('image/jpeg', 0.72);
+        } catch (e) {
+            console.warn('Snapshot capture failed:', e);
+            return null;
         }
     },
 

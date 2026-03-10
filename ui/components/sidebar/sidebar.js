@@ -5,8 +5,48 @@ import rendersService from '../../services/rendersService.js';
 import modalService from '../../services/modalService.js';
 import renderbox from '../renderbox/renderbox.js';
 
+/* ─── Thumbnail Cache ─── */
+const THUMB_PREFIX = 'builting_thumb_';
+const THUMB_MAX_ENTRIES = 50;
+const thumbnailCache = {
+    _mem: {},
+
+    get(renderId) {
+        // Memory first, then localStorage
+        if (this._mem[renderId]) return this._mem[renderId];
+        try {
+            const val = localStorage.getItem(THUMB_PREFIX + renderId);
+            if (val) { this._mem[renderId] = val; return val; }
+        } catch (_) { /* storage unavailable */ }
+        return null;
+    },
+
+    set(renderId, dataUrl) {
+        if (!renderId || !dataUrl) return;
+        this._mem[renderId] = dataUrl;
+        try {
+            // Evict oldest if over limit
+            const keys = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith(THUMB_PREFIX)) keys.push(k);
+            }
+            if (keys.length >= THUMB_MAX_ENTRIES) {
+                localStorage.removeItem(keys[0]);
+            }
+            localStorage.setItem(THUMB_PREFIX + renderId, dataUrl);
+        } catch (_) { /* quota exceeded — memory cache still works */ }
+    },
+
+    remove(renderId) {
+        delete this._mem[renderId];
+        try { localStorage.removeItem(THUMB_PREFIX + renderId); } catch (_) {}
+    }
+};
+
 const sidebar = {
     element: null,
+    thumbnailCache, // Expose for renderbox to use
 
     // Initialize the sidebar component
     async init() {
@@ -35,6 +75,14 @@ const sidebar = {
             this.loadRenders();
         });
 
+        // Listen for thumbnail captures from the viewer
+        document.addEventListener('thumbnailCaptured', (e) => {
+            const { renderId, dataUrl } = e.detail || {};
+            if (renderId && dataUrl) {
+                this.updateThumbnail(renderId, dataUrl);
+            }
+        });
+
         // Delegate click events for render items
         const rendersContainer = this.element.querySelector('.__sidebar-renders');
         if (rendersContainer) {
@@ -57,6 +105,7 @@ const sidebar = {
         }
     },
 
+
     /**
      * Load all renders for current user
      */
@@ -72,7 +121,7 @@ const sidebar = {
             const renders = data.renders || [];
 
             if (renders.length === 0) {
-                rendersContainer.innerHTML = '<div class="__renders-empty">No renders yet. Create one to get started!</div>';
+                rendersContainer.innerHTML = '<div class="__renders-empty">No renders yet</div>';
                 return;
             }
 
@@ -88,7 +137,7 @@ const sidebar = {
     },
 
     /**
-     * Render list of renders as thumbnail grid
+     * Render list of renders as compact list items
      */
     _renderRendersList(renders) {
         const rendersContainer = this.element.querySelector('.__sidebar-renders');
@@ -102,20 +151,37 @@ const sidebar = {
 
         rendersContainer.innerHTML = sorted.map(render => {
             const fullTitle = render.ai_generated_title || render.title || 'Untitled Render';
-            const truncatedTitle = this._truncateToTwoWords(fullTitle);
             const status = render.status || 'unknown';
-            const statusClass = `__render-status-${status}`;
-            const thumbnailUrl = this._getThumbnailUrl(render);
+            const dotClass = `__render-item-status-dot--${status}`;
+            const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+
+            // Build metadata line: status + date only
+            const metaParts = [statusLabel];
+            if (render.created_at) {
+                metaParts.push(this._relativeTime(render.created_at));
+            }
+            const metaLine = metaParts.join(' \u00B7 ');
+
+            // Thumbnail: cached image or placeholder
+            const thumbData = thumbnailCache.get(render.render_id);
+            const thumbContent = thumbData
+                ? `<img class="__render-thumb-img" src="${thumbData}" alt="" draggable="false" />`
+                : `<svg class="__render-thumb-placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+                       <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>
+                   </svg>`;
 
             return `
-                <div class="__render-item" data-render-id="${render.render_id}">
-                    <div class="__render-item-thumbnail">
-                        <div class="__render-item-image" style="background-image: url('${thumbnailUrl}')"></div>
-                        <div class="__render-item-status ${statusClass}" title="${status}"></div>
+                <div class="__render-item" data-render-id="${render.render_id}" tabindex="0" role="button" aria-label="${fullTitle}">
+                    <div class="__render-thumb">
+                        ${thumbContent}
+                        <span class="__render-item-status-dot ${dotClass}"></span>
                     </div>
-                    <div class="__render-item-title">
-                        <span title="${fullTitle}">${truncatedTitle}</span>
-                        <button class="__render-delete-btn" title="Delete render">
+                    <div class="__render-item-info">
+                        <div class="__render-item-content">
+                            <span class="__render-item-title" title="${fullTitle}">${fullTitle}</span>
+                            <span class="__render-item-meta">${metaLine}</span>
+                        </div>
+                        <button class="__render-delete-btn" title="Delete render" aria-label="Delete render">
                             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                             </svg>
@@ -127,20 +193,41 @@ const sidebar = {
     },
 
     /**
-     * Get thumbnail URL for render (placeholder for now)
+     * Format a Unix timestamp as relative time
      */
-    _getThumbnailUrl(render) {
-        // Return a placeholder data URL based on status
-        // The actual styling is done with CSS classes
-        return 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"%3E%3Crect fill="%23333" width="200" height="200"/%3E%3C/svg%3E';
+    _relativeTime(timestamp) {
+        const now = Date.now() / 1000;
+        const diff = Math.max(0, now - timestamp);
+
+        if (diff < 60) return 'Just now';
+        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+        if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+        if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+        return new Date(timestamp * 1000).toLocaleDateString();
     },
 
     /**
-     * Truncate title to maximum 2 words
+     * Update thumbnail for a specific render in the sidebar (called externally)
      */
-    _truncateToTwoWords(title) {
-        const words = title.trim().split(/\s+/);
-        return words.slice(0, 2).join(' ');
+    updateThumbnail(renderId, dataUrl) {
+        if (!renderId || !dataUrl) return;
+        thumbnailCache.set(renderId, dataUrl);
+        const thumb = this.element?.querySelector(`[data-render-id="${renderId}"] .__render-thumb`);
+        if (!thumb) return;
+        // Replace placeholder SVG with real image
+        const existing = thumb.querySelector('.__render-thumb-img');
+        if (existing) {
+            existing.src = dataUrl;
+        } else {
+            const placeholder = thumb.querySelector('.__render-thumb-placeholder');
+            if (placeholder) placeholder.remove();
+            const img = document.createElement('img');
+            img.className = '__render-thumb-img';
+            img.src = dataUrl;
+            img.alt = '';
+            img.draggable = false;
+            thumb.prepend(img);
+        }
     },
 
     /**
@@ -180,6 +267,7 @@ const sidebar = {
 
         try {
             await rendersService.deleteRender(renderId);
+            thumbnailCache.remove(renderId);
 
             // Hide details panel and go back to welcome screen
             document.dispatchEvent(new CustomEvent('newRenderRequested'));

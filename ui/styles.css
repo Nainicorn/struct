@@ -1,55 +1,153 @@
 /* Import Material Icons */
 @import './material.css';
 
-/* Global Styles */
+/* ─── Design Tokens ─── */
+:root {
+    /* Background layers */
+    --bg-base: #0f1117;
+    --bg-surface: #161920;
+    --bg-elevated: #1c1f28;
+    --bg-hover: #242731;
+    --bg-active: #2a2d38;
 
+    /* Borders */
+    --border-subtle: #2a2d38;
+    --border-default: #363940;
+    --border-strong: #4a4d57;
+
+    /* Text */
+    --text-primary: #e8eaed;
+    --text-secondary: #a1a7b0;
+    --text-muted: #6b7280;
+
+    /* Accent (restrained purple) */
+    --accent: #7c6bbd;
+    --accent-hover: #8d7fd0;
+    --accent-subtle: rgba(124, 107, 189, 0.12);
+    --accent-ring: rgba(124, 107, 189, 0.35);
+
+    /* Status */
+    --status-success: #34d399;
+    --status-warning: #fbbf24;
+    --status-error: #f87171;
+    --status-info: #60a5fa;
+
+    /* Destructive */
+    --destructive: #f87171;
+    --destructive-bg: rgba(248, 113, 113, 0.1);
+    --destructive-border: rgba(248, 113, 113, 0.25);
+
+    /* Typography */
+    --font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-size-xs: 12px;
+    --font-size-sm: 13px;
+    --font-size-base: 14px;
+    --font-size-md: 16px;
+    --font-size-lg: 20px;
+
+    /* Spacing */
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
+
+    /* Transitions */
+    --transition: 0.15s ease;
+}
+
+/* ─── Global Reset ─── */
 * {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
 }
 
 html, body {
-  width: 100%;
-  height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background-color: #f5f5f5;
-  color: #333;
+    width: 100%;
+    height: 100%;
+    font-family: var(--font-family);
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-size: var(--font-size-base);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
 #app {
-  width: 100%;
-  height: 100%;
+    width: 100%;
+    height: 100%;
 }
 
+/* ─── Global Button Reset ─── */
 button {
-  cursor: pointer;
-  border: none;
-  border-radius: 4px;
-  padding: 8px 16px;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.3s ease;
+    cursor: pointer;
+    border: none;
+    border-radius: var(--radius-md);
+    padding: 8px 16px;
+    font-size: var(--font-size-base);
+    font-weight: 500;
+    font-family: var(--font-family);
+    transition: all var(--transition);
+    background: transparent;
+    color: var(--text-primary);
 }
 
 button:hover {
-  opacity: 0.9;
+    opacity: 0.9;
 }
 
+button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* ─── Global Input Reset ─── */
 input[type="text"],
 input[type="email"],
+input[type="password"],
 textarea {
-  padding: 8px 12px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  font-family: inherit;
-  font-size: 14px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    font-family: var(--font-family);
+    font-size: var(--font-size-base);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+input[type="text"]::placeholder,
+input[type="email"]::placeholder,
+input[type="password"]::placeholder,
+textarea::placeholder {
+    color: var(--text-muted);
 }
 
 input[type="text"]:focus,
 input[type="email"]:focus,
+input[type="password"]:focus,
 textarea:focus {
-  outline: none;
-  border-color: #4CAF50;
-  box-shadow: 0 0 5px rgba(76, 175, 80, 0.3);
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border-default);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--border-strong);
 }

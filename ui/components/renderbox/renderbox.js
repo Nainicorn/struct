@@ -86,6 +86,16 @@ const renderbox = {
     },
 
     /**
+     * Update the input label text above the input bar
+     */
+    _updateInputLabel(text) {
+        const labelEl = this.element.querySelector('.__renderbox-input-label');
+        if (labelEl) {
+            labelEl.textContent = text;
+        }
+    },
+
+    /**
      * Update the input placeholder text
      */
     _updateInputPlaceholder(text) {
@@ -174,6 +184,16 @@ const renderbox = {
             const canvas = this.element.querySelector('#ifc-viewer-canvas');
             if (canvas) canvas.focus();
 
+            // Capture thumbnail only if one doesn't already exist in the cache.
+            // This keeps sidebar thumbnails static once captured.
+            const renderId = this.element.dataset.renderId;
+            if (renderId) {
+                const sidebar = (await import('../sidebar/sidebar.js')).default;
+                if (!sidebar.thumbnailCache.get(renderId)) {
+                    this._captureThumbnail(renderId);
+                }
+            }
+
             console.log('IFC file loaded successfully');
         } catch (error) {
             console.error('Failed to load IFC file:', error);
@@ -211,8 +231,9 @@ const renderbox = {
         this._hideLoadingState();
         this.element.dataset.state = 'new-render';
         delete this.element.dataset.renderId;
-        this._updateMessage('What do you want to render today?');
-        this._updateInputPlaceholder('What do you want to render today?');
+        this._updateMessage('Select a render from the sidebar or create a new one');
+        this._updateInputPlaceholder('Describe the structure you want to generate...');
+        this._updateInputLabel('Describe your structure');
         // Clear input content so placeholder reappears
         const descriptionInput = this.element.querySelector('.__renderbox-description');
         if (descriptionInput) {
@@ -243,15 +264,17 @@ const renderbox = {
             }
 
             if (render.status === 'completed') {
+                // Set renderId before load so thumbnail capture can use it
+                this.element.dataset.renderId = renderId;
+                this.element.dataset.state = 'viewing-render';
+
                 // Load IFC from backend
                 const { fileData } = await rendersService.getDownloadUrl(renderId);
                 await this.loadIFCFromBase64(fileData);
-
-                this.element.dataset.state = 'viewing-render';
-                this.element.dataset.renderId = renderId;
                 this.currentRenderTitle = render.ai_generated_title || render.title || null;
-                this._updateMessage('Edit render?');
-                this._updateInputPlaceholder('What edits would you like to make?');
+                this._updateMessage('');
+                this._updateInputPlaceholder('Describe refinements to apply...');
+                this._updateInputLabel('Refinement');
                 // Clear input content so placeholder reappears
                 const descriptionInput = this.element.querySelector('.__renderbox-description');
                 if (descriptionInput) {
@@ -589,6 +612,9 @@ const renderbox = {
             const textEl = uploadLoadingEl.querySelector('.__renderbox-loading-text');
             if (textEl) textEl.textContent = message;
         }
+        // Hide the empty-state logo so loading overlay doesn't overlap it
+        const emptyIcon = this.element.querySelector('.__renderbox-empty-icon');
+        if (emptyIcon) emptyIcon.style.display = 'none';
         // Disable buttons during upload
         const startBtn = this.element.querySelector('.__renderbox-start');
         const attachBtn = this.element.querySelector('.__renderbox-attach');
@@ -602,6 +628,9 @@ const renderbox = {
     _hideLoadingState() {
         const uploadLoadingEl = this.element.querySelector('.__renderbox-upload-loading');
         if (uploadLoadingEl) uploadLoadingEl.style.display = 'none';
+        // Restore the empty-state logo
+        const emptyIcon = this.element.querySelector('.__renderbox-empty-icon');
+        if (emptyIcon) emptyIcon.style.display = '';
         // Re-enable buttons
         const startBtn = this.element.querySelector('.__renderbox-start');
         const attachBtn = this.element.querySelector('.__renderbox-attach');
@@ -616,15 +645,18 @@ const renderbox = {
         const uploadLoadingEl = this.element.querySelector('.__renderbox-upload-loading');
         if (uploadLoadingEl) {
             const textEl = uploadLoadingEl.querySelector('.__renderbox-loading-text');
+            const elapsedEl = uploadLoadingEl.querySelector('.__renderbox-pipeline-elapsed');
             if (textEl) {
-                // Show elapsed time if available
+                // Show elapsed time in pipeline status
                 if (message.includes('(')) {
                     const timeMatch = message.match(/\(([^)]+)\)/);
-                    if (timeMatch) {
-                        textEl.textContent = `Processing • ${timeMatch[1]}`;
+                    textEl.textContent = 'Processing';
+                    if (timeMatch && elapsedEl) {
+                        elapsedEl.textContent = timeMatch[1];
                     }
                 } else {
-                    textEl.textContent = 'Processing';
+                    textEl.textContent = message.includes('Processing') ? 'Processing' : message;
+                    if (elapsedEl) elapsedEl.textContent = '';
                 }
             }
         }
@@ -791,7 +823,8 @@ const renderbox = {
             this.element.dataset.state = 'viewing-render';
             this.element.dataset.renderId = render.render_id;
             this.currentRenderTitle = render.ai_generated_title || render.title || null;
-            this._updateInputPlaceholder('What edits would you like to make?');
+            this._updateInputPlaceholder('Describe refinements to apply...');
+            this._updateInputLabel('Refinement');
             this._displayMetadata(render);
 
             // Notify details sidebar with full render object
@@ -817,6 +850,37 @@ const renderbox = {
             console.error('Error completing render:', error);
             this._showError('Failed to complete render: ' + error.message);
         }
+    },
+
+    /**
+     * Capture thumbnail from viewer canvas with retry.
+     * Waits for xeokit to paint, retries if canvas is still blank.
+     */
+    _captureThumbnail(renderId, attempt = 0) {
+        const maxAttempts = 4;
+        const delays = [800, 1800, 3500, 6000]; // progressive delays
+
+        setTimeout(() => {
+            // Force xeokit to render a frame before capturing
+            if (ifcViewer.viewer) {
+                try { ifcViewer.viewer.scene.render(true); } catch (_) {}
+            }
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    const snap = ifcViewer.getSnapshot();
+                    console.log(`[Thumbnail] attempt ${attempt + 1}/${maxAttempts} for ${renderId}: ${snap ? 'captured (' + Math.round(snap.length / 1024) + 'KB)' : 'blank'}`);
+                    if (snap) {
+                        document.dispatchEvent(new CustomEvent('thumbnailCaptured', {
+                            detail: { renderId, dataUrl: snap }
+                        }));
+                    } else if (attempt < maxAttempts - 1) {
+                        this._captureThumbnail(renderId, attempt + 1);
+                    } else {
+                        console.warn('[Thumbnail] all attempts failed for', renderId);
+                    }
+                });
+            });
+        }, delays[attempt]);
     }
 };
 

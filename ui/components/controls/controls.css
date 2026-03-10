@@ -1,31 +1,38 @@
 .__controls-new {
-    background: none;
-    border: none;
+    background: var(--accent-subtle);
+    border: 1px solid var(--accent);
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 10px;
-    color: #7d6fa3;
-    font-size: 0.875rem;
+    gap: 8px;
+    color: var(--accent);
+    font-size: var(--font-size-sm);
     font-weight: 500;
-    padding: 8px 0;
-    transition: all 0.2s ease;
-    border-radius: 6px;
+    padding: 8px 12px;
+    transition: all var(--transition);
+    border-radius: var(--radius-md);
     width: 100%;
+    font-family: var(--font-family);
 }
 
 .__controls-new:hover {
-    background-color: rgba(180, 167, 214, 0.1);
-    color: #6d5a93;
+    background: rgba(124, 107, 189, 0.2);
+    color: var(--accent-hover);
+    border-color: var(--accent-hover);
 }
 
 .__controls-new:active {
     transform: scale(0.98);
 }
 
+.__controls-new:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
 .__controls-new-icon {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     flex-shrink: 0;
 }
 
@@ -36,8 +43,14 @@
 body[data-collapsed="true"] .__controls-new {
     width: auto;
     gap: 0;
-    padding: 6px;
+    padding: 8px;
     justify-content: center;
+    border-color: transparent;
+    background: transparent;
+}
+
+body[data-collapsed="true"] .__controls-new:hover {
+    background: var(--bg-hover);
 }
 
 body[data-collapsed="true"] .__controls-new-text {

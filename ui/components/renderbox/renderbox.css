@@ -1,94 +1,104 @@
 .__renderbox {
     display: flex;
     flex-direction: column;
-    padding: 20px;
+    padding: 16px;
     gap: 0;
     position: relative;
-    background: rgba(0, 0, 0, 0.1);
+    background: var(--bg-base);
 }
 
 .__renderbox-container {
     display: flex;
     flex-direction: column;
     height: 100%;
-    gap: 16px;
+    gap: 12px;
 }
 
-/* Title Bar (shown above viewer) */
+/* ─── Title Bar ─── */
 .__renderbox-title-bar {
     display: none;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(100, 80, 150, 0.2);
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border-subtle);
 }
 
 .__renderbox-title {
     margin: 0;
-    font-size: 1.25rem;
+    font-size: var(--font-size-md);
     font-weight: 600;
-    color: #e8d9f0;
+    color: var(--text-primary);
 }
 
-/* Content Area - Always visible flex container */
+/* ─── Content Area ─── */
 .__renderbox-content {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     flex: 1;
-    gap: 16px;
+    gap: 12px;
     padding: 20px;
 }
 
-/* IFC Viewer - Hidden by default */
+/* ─── IFC Viewer ─── */
 .__renderbox-viewer {
     display: none;
     flex: 1;
-    background-color: #2a2a2a;
+    background-color: #1a1c23;
     background-image:
         repeating-linear-gradient(
             0deg,
-            rgba(255, 255, 255, 0.12) 0px,
-            rgba(255, 255, 255, 0.12) 1px,
+            rgba(255, 255, 255, 0.06) 0px,
+            rgba(255, 255, 255, 0.06) 1px,
             transparent 1px,
-            transparent 40px
+            transparent 32px
         ),
         repeating-linear-gradient(
             90deg,
-            rgba(255, 255, 255, 0.12) 0px,
-            rgba(255, 255, 255, 0.12) 1px,
+            rgba(255, 255, 255, 0.06) 0px,
+            rgba(255, 255, 255, 0.06) 1px,
             transparent 1px,
-            transparent 40px
+            transparent 32px
         );
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    min-height: 500px;
+    border: 1px solid var(--border-subtle);
+    min-height: 400px;
     position: relative;
 }
 
-/* Download button inside viewer */
+.__renderbox[data-state="viewing-render"] .__renderbox-viewer {
+    display: block;
+    margin-bottom: 12px;
+}
+
+.__renderbox-viewer canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/* Download button */
 .__renderbox-viewer-download {
     position: absolute;
     bottom: 12px;
     right: 12px;
-    background: rgba(255, 255, 255, 0.15);
-    border: 1px solid rgba(255, 255, 255, 0.25);
-    border-radius: 8px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
     cursor: pointer;
-    padding: 10px;
+    padding: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #fff;
-    transition: all 0.2s ease;
+    color: var(--text-secondary);
+    transition: all var(--transition);
     z-index: 5;
 }
 
 .__renderbox-viewer-download:hover {
-    background: rgba(255, 255, 255, 0.25);
-    border-color: rgba(255, 255, 255, 0.4);
-    transform: scale(1.05);
+    background: var(--bg-hover);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
 }
 
 .__renderbox-viewer-download:active {
@@ -96,11 +106,11 @@
 }
 
 .__renderbox-viewer-download svg {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
 }
 
-/* Grid overlay on top of viewer */
+/* Grid overlay */
 .__renderbox-grid-overlay {
     position: absolute;
     top: 0;
@@ -110,34 +120,23 @@
     background-image:
         repeating-linear-gradient(
             0deg,
-            rgba(255, 255, 255, 0.1) 0px,
-            rgba(255, 255, 255, 0.1) 1px,
+            rgba(255, 255, 255, 0.04) 0px,
+            rgba(255, 255, 255, 0.04) 1px,
             transparent 1px,
-            transparent 40px
+            transparent 32px
         ),
         repeating-linear-gradient(
             90deg,
-            rgba(255, 255, 255, 0.1) 0px,
-            rgba(255, 255, 255, 0.1) 1px,
+            rgba(255, 255, 255, 0.04) 0px,
+            rgba(255, 255, 255, 0.04) 1px,
             transparent 1px,
-            transparent 40px
+            transparent 32px
         );
     pointer-events: none;
     z-index: 1;
 }
 
-/* Show viewer only when viewing a render */
-.__renderbox[data-state="viewing-render"] .__renderbox-viewer {
-    display: block;
-    margin-bottom: 20px;
-}
-
-.__renderbox-viewer canvas {
-    width: 100%;
-    height: 100%;
-    display: block;
-}
-
+/* ─── Loading States ─── */
 .__renderbox-loading {
     position: absolute;
     top: 0;
@@ -148,17 +147,17 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: rgba(42, 42, 42, 0.95);
+    background: rgba(26, 28, 35, 0.95);
     z-index: 10;
-    border-radius: 12px;
-    gap: 16px;
+    border-radius: var(--radius-lg);
+    gap: 12px;
 }
 
 .__renderbox-loading-spinner {
-    width: 56px;
-    height: 56px;
-    border: 4px solid rgba(180, 167, 214, 0.3);
-    border-top-color: #b4a7d6;
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border-default);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: __renderbox-spinner-rotate 1s linear infinite;
 }
@@ -168,30 +167,57 @@
 }
 
 .__renderbox-loading-text {
-    font-size: 1.1rem;
-    color: #b4a7d6;
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
     font-weight: 500;
 }
 
-/* Upload/Processing Loading State */
+/* Upload/Processing Loading */
 .__renderbox-upload-loading {
     position: absolute;
     bottom: 100%;
     left: 50%;
     transform: translateX(-50%);
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 16px;
-    margin-bottom: 220px;
+    margin-bottom: 180px;
     z-index: 10;
 }
 
-/* Message Display */
+/* Pipeline status bar */
+.__renderbox-pipeline-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.__renderbox-pipeline-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border-default);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: __renderbox-spinner-rotate 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+.__renderbox-pipeline-elapsed {
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+
+/* ─── Messages ─── */
 .__renderbox-message {
     text-align: center;
-    color: #b4a7d6;
+    color: var(--text-muted);
 }
 
 .__renderbox[data-state="viewing-render"] .__renderbox-content {
@@ -202,35 +228,43 @@
     display: none;
 }
 
+/* Empty state icon */
+.__renderbox-empty-icon {
+    width: 48px;
+    height: 48px;
+    color: var(--border-strong);
+    margin-bottom: 8px;
+}
+
 .__renderbox-message-welcome {
-    font-size: 1.5rem;
-    font-weight: 500;
-    margin: 0 0 12px 0;
-    color: #b4a7d6;
-    font-family: 'Franklin Gothic', 'Century Gothic', 'Arial Black', sans-serif;
+    font-size: var(--font-size-base);
+    font-weight: 400;
+    margin: 0 0 4px 0;
+    color: var(--text-muted);
+    display: none;
 }
 
 .__renderbox-user-name {
-    font-weight: 600;
-    color: #e8d9f0;
+    font-weight: 500;
+    color: var(--text-secondary);
 }
 
 .__renderbox-message-text {
-    font-size: 1.875rem;
+    font-size: var(--font-size-md);
     font-weight: 500;
     margin: 0;
-    color: #e8d9f0;
-    font-family: 'Franklin Gothic', 'Century Gothic', 'Arial Black', sans-serif;
+    color: var(--text-secondary);
 }
 
-/* Render Metadata */
+/* ─── Metadata ─── */
 .__renderbox-metadata {
     display: none;
     width: 100%;
     max-width: 600px;
-    padding: 16px;
-    background: rgba(180, 167, 214, 0.05);
-    border-radius: 8px;
+    padding: 12px;
+    background: var(--bg-elevated);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-subtle);
 }
 
 .__renderbox[data-state="viewing-render"] .__renderbox-metadata {
@@ -238,19 +272,19 @@
 }
 
 .__renderbox-metadata-title {
-    font-size: 1.25rem;
+    font-size: var(--font-size-md);
     font-weight: 600;
-    color: #e8d9f0;
-    margin-bottom: 8px;
+    color: var(--text-primary);
+    margin-bottom: 4px;
 }
 
 .__renderbox-metadata-description {
-    font-size: 0.95rem;
-    color: #b4a7d6;
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
     line-height: 1.5;
 }
 
-/* File Staging Area */
+/* ─── File Staging ─── */
 .__renderbox-file-staging {
     position: absolute;
     bottom: 100%;
@@ -258,14 +292,14 @@
     transform: translateX(-50%);
     width: 100%;
     max-width: 800px;
-    padding: 0 16px;
+    padding: 0 12px;
     margin-bottom: 8px;
 }
 
 .__renderbox-file-grid {
     display: flex;
-    gap: 12px;
-    margin-bottom: 12px;
+    gap: 8px;
+    margin-bottom: 8px;
     overflow-x: auto;
     padding-bottom: 4px;
     scroll-behavior: smooth;
@@ -273,45 +307,48 @@
 
 .__renderbox-file-item-box {
     position: relative;
-    min-width: 140px;
-    height: 80px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 12px;
-    padding: 12px;
+    min-width: 130px;
+    height: 72px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    padding: 10px;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
     overflow: hidden;
     cursor: pointer;
-    transition: all 0.2s ease;
-    font-size: 0.85rem;
+    transition: all var(--transition);
+    font-size: var(--font-size-xs);
     flex-shrink: 0;
 }
 
 .__renderbox-file-item-box:hover {
-    border-color: rgba(255, 255, 255, 0.25);
-    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--border-strong);
+    background: var(--bg-hover);
 }
 
 .__renderbox-file-item-box-name {
     font-weight: 500;
-    color: #e8d9f0;
+    color: var(--text-primary);
     word-break: break-word;
     line-height: 1.2;
-    padding-right: 24px;
+    padding-right: 20px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .__renderbox-file-item-box-badge {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 4px 8px;
-    background: rgba(180, 167, 214, 0.15);
-    border: 1px solid rgba(180, 167, 214, 0.3);
-    border-radius: 4px;
-    font-size: 0.7rem;
-    color: #b4a7d6;
+    padding: 2px 6px;
+    background: var(--accent-subtle);
+    border: 1px solid rgba(124, 107, 189, 0.2);
+    border-radius: 3px;
+    font-size: 10px;
+    color: var(--accent);
     font-weight: 600;
     text-transform: uppercase;
     width: fit-content;
@@ -320,18 +357,18 @@
 
 .__renderbox-file-item-remove {
     position: absolute;
-    top: 8px;
-    right: 8px;
-    background: rgba(255, 255, 255, 0.05);
+    top: 6px;
+    right: 6px;
+    background: transparent;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 4px;
-    color: #999;
-    transition: all 0.2s ease;
+    padding: 3px;
+    color: var(--text-muted);
+    transition: all var(--transition);
     opacity: 0;
 }
 
@@ -340,11 +377,11 @@
 }
 
 .__renderbox-file-item-remove:hover {
-    background: rgba(255, 100, 100, 0.2);
-    color: #ff6464;
+    background: var(--destructive-bg);
+    color: var(--destructive);
 }
 
-/* Footer */
+/* ─── Footer / Input ─── */
 .__renderbox-footer {
     flex-shrink: 0;
     position: relative;
@@ -358,37 +395,52 @@
     width: 100%;
 }
 
+/* Input label */
+.__renderbox-input-label {
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+    align-self: flex-start;
+    max-width: 800px;
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 4px;
+}
+
 .__renderbox-chat-input {
     display: flex;
     align-items: center;
-    gap: 12px;
-    background: #3a3a3a;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 16px;
-    padding: 14px 16px;
-    transition: all 0.2s ease;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+    gap: 10px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    padding: 10px 14px;
+    transition: all var(--transition);
     width: 100%;
     max-width: 800px;
     margin: 0 auto;
 }
 
 .__renderbox-chat-input:focus-within {
-    border-color: rgba(180, 167, 214, 0.3);
-    box-shadow: 0 4px 32px rgba(180, 167, 214, 0.15);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 .__renderbox-input {
     flex: 1;
     background: none;
     border: none;
-    color: #fff;
-    font-size: 1rem;
-    font-family: inherit;
+    color: var(--text-primary);
+    font-size: var(--font-size-base);
+    font-family: var(--font-family);
     outline: none;
-    caret-color: #fff;
+    caret-color: var(--text-primary);
     line-height: 1.5;
-    min-height: 24px;
+    min-height: 22px;
     max-height: 120px;
     overflow-y: auto;
     word-wrap: break-word;
@@ -400,7 +452,7 @@
 
 .__renderbox-input.is-empty:before {
     content: attr(placeholder);
-    color: #999;
+    color: var(--text-muted);
     pointer-events: none;
     position: absolute;
     top: 2px;
@@ -409,7 +461,7 @@
 
 .__renderbox-chat-actions {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
     flex-shrink: 0;
 }
@@ -422,51 +474,55 @@
     align-items: center;
     justify-content: center;
     padding: 6px;
-    border-radius: 6px;
-    transition: all 0.2s ease;
-    color: #666;
+    border-radius: var(--radius-md);
+    transition: all var(--transition);
+    color: var(--text-muted);
 }
 
 .__renderbox-attach:hover {
-    background-color: rgba(255, 255, 255, 0.1);
-    color: #999;
+    background-color: var(--bg-hover);
+    color: var(--text-secondary);
 }
 
 .__renderbox-send {
-    background: linear-gradient(135deg, #b4a7d6 0%, #7d6fa3 100%);
+    background: var(--accent);
     border: none;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 8px 12px;
-    border-radius: 6px;
-    color: #fff;
-    transition: all 0.2s ease;
+    padding: 7px 12px;
+    border-radius: var(--radius-md);
+    color: #ffffff;
+    transition: all var(--transition);
 }
 
 .__renderbox-send:hover {
-    transform: scale(1.05);
-    background: linear-gradient(135deg, #c9bde6 0%, #8d7fb3 100%);
+    background: var(--accent-hover);
 }
 
 .__renderbox-send:active {
     transform: scale(0.95);
 }
 
-.__renderbox-action-icon {
-    width: 20px;
-    height: 20px;
+.__renderbox-send:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
+.__renderbox-action-icon {
+    width: 18px;
+    height: 18px;
+}
+
+/* ─── Responsive ─── */
 @media (max-width: 768px) {
     .__renderbox {
-        padding: 12px;
+        padding: 10px;
     }
 
     .__renderbox-viewer {
-        min-height: 400px;
-        margin-bottom: 12px;
+        min-height: 300px;
     }
 
     .__renderbox-chat-input {
