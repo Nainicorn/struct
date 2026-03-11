@@ -1,5 +1,19 @@
 # Completed Implementation History
 
+## Phase 4 — AWS Console Setup + Bug Fixes (2026-03-10)
+- All Lambda zips uploaded to AWS console (builting-router, builting-read, builting-extract, builting-store, builting-transform)
+- Docker image deployed for `builting-generate` (arm64, `--provenance=false` to avoid manifest error)
+- Lambda timeouts configured (30s router/read/store, 60s transform, 300s extract/generate)
+- API Gateway throttle set (Rate=50, Burst=100)
+- S3 block public access + encryption verified
+- IAM policy updated: added `arn:aws:bedrock:*:*:inference-profile/*` for Bedrock access
+- IAM policy updated: state machine ARN corrected to `builting-state-machine`
+- Dockerfile fixed: multi-arch micromamba download with `ARG TARGETARCH`
+- Fixed text-only upload 400 error: empty `fileNames[]` → auto-create `input.txt` Blob from description
+- Fixed modal text overflow: `word-break: break-word`, `overflow-wrap: break-word`, `white-space: pre-wrap`, `max-height: 80vh`, `overflow-y: auto`
+- Fixed sidebar collapse behavior: `_userCollapsed`/`_autoCollapsed` state tracking in layout.js, `sidebarToggled` event from header.js
+- End-to-end flow tested and working
+
 ## Backend Hardening Phase 3 — Env Var Portability (2026-03-10)
 - All Lambdas: removed `{ region: 'us-east-1' }` from SDK clients (runtime provides `AWS_REGION`)
 - All Lambdas: hardcoded bucket/table names → `process.env.X || 'default'` pattern

@@ -141,6 +141,58 @@ body[data-collapsed="true"] .__sidebar {
     .__sidebar-controls {
         padding: 12px 8px 8px 8px;
     }
+
+    /* When toggled open at this breakpoint, expand as overlay drawer */
+    body[data-collapsed="false"] .__sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        width: 250px;
+        z-index: 200;
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.3);
+    }
+
+    body[data-collapsed="false"] .__sidebar-section-label {
+        display: block;
+    }
+
+    body[data-collapsed="false"] .__sidebar-renders {
+        display: flex;
+    }
+
+    body[data-collapsed="false"] .__controls-new-text {
+        display: inline;
+    }
+
+    body[data-collapsed="false"] .__controls-new {
+        width: 100%;
+        gap: 8px;
+        padding: 8px 12px;
+        justify-content: flex-start;
+        border-color: var(--accent);
+        background: var(--accent-subtle);
+    }
+
+    body[data-collapsed="false"] .__sidebar-controls {
+        padding: 12px 12px 8px 12px;
+    }
+
+    /* Backdrop for overlay */
+    .__sidebar-backdrop {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 199;
+    }
+
+    body[data-collapsed="false"] .__sidebar-backdrop {
+        display: block;
+    }
 }
 
 /* Input stacks vertically below 700px */

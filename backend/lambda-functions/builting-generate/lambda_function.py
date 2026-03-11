@@ -827,21 +827,63 @@ def generate_ifc4_from_css(css):
                               f"median z={median_z:.2f}m — may already be storey-relative. "
                               f"Check metadata.placementZIsAbsolute flag.")
 
-    # ---- Process VOIDS relationships ----
+    # ---- Process VOIDS relationships (v3.2: IfcOpeningElement intermediary) ----
+    opening_elements_for_storey = {}  # container_id -> list of IfcOpeningElement
     for elem in elements:
         relationships = elem.get('relationships', [])
         css_id = elem.get('id', '')
+        container_id = elem.get('container', '')
 
         for rel in relationships:
             rel_type = rel.get('type', '')
             target_id = rel.get('target', '')
 
             if rel_type == 'VOIDS' and css_id in ifc_elements_by_css_id and target_id in ifc_elements_by_css_id:
-                opening_elem = ifc_elements_by_css_id[css_id]
-                host_elem = ifc_elements_by_css_id[target_id]
+                door_or_window = ifc_elements_by_css_id[css_id]
+                host_wall = ifc_elements_by_css_id[target_id]
+
                 try:
-                    f.create_entity('IfcRelVoidsElement', GlobalId=new_guid(), OwnerHistory=owner,
-                                    RelatingBuildingElement=host_elem, RelatedOpeningElement=opening_elem)
+                    ifc_type = door_or_window.is_a()
+
+                    if ifc_type in ('IfcDoor', 'IfcWindow'):
+                        # IFC spec requires: Wall → IfcOpeningElement → IfcDoor/IfcWindow
+                        # Create an IfcOpeningElement with same placement and geometry
+                        opening_element = f.create_entity(
+                            'IfcOpeningElement',
+                            GlobalId=new_guid(),
+                            OwnerHistory=owner,
+                            Name=f"Opening_{css_id}",
+                            ObjectPlacement=door_or_window.ObjectPlacement,
+                            Representation=door_or_window.Representation,
+                        )
+
+                        # Wall → IfcOpeningElement (VOIDS)
+                        f.create_entity('IfcRelVoidsElement',
+                                        GlobalId=new_guid(), OwnerHistory=owner,
+                                        RelatingBuildingElement=host_wall,
+                                        RelatedOpeningElement=opening_element)
+
+                        # IfcOpeningElement → IfcDoor/IfcWindow (FILLS)
+                        f.create_entity('IfcRelFillsElement',
+                                        GlobalId=new_guid(), OwnerHistory=owner,
+                                        RelatingOpeningElement=opening_element,
+                                        RelatedBuildingElement=door_or_window)
+
+                        # Track opening element for storey containment
+                        if container_id not in opening_elements_for_storey:
+                            opening_elements_for_storey[container_id] = []
+                        opening_elements_for_storey[container_id].append(opening_element)
+
+                    elif ifc_type == 'IfcOpeningElement':
+                        # Already an IfcOpeningElement — use directly
+                        f.create_entity('IfcRelVoidsElement',
+                                        GlobalId=new_guid(), OwnerHistory=owner,
+                                        RelatingBuildingElement=host_wall,
+                                        RelatedOpeningElement=door_or_window)
+                    else:
+                        # Fallback: skip — cannot create VOIDS for non-door/window/opening types
+                        print(f"Warning: VOIDS skipped for {css_id} ({ifc_type}) — not a door/window/opening")
+
                 except Exception as e:
                     print(f"Warning: Could not create VOIDS relationship {css_id} → {target_id}: {e}")
 
@@ -857,12 +899,16 @@ def generate_ifc4_from_css(css):
     # ---- Relate elements to storeys ----
     for container_id, ifc_elems in elements_by_container.items():
         if container_id in storey_map and ifc_elems:
+            # Include any IfcOpeningElements created for this storey
+            all_elems = list(ifc_elems)
+            if container_id in opening_elements_for_storey:
+                all_elems.extend(opening_elements_for_storey[container_id])
             storey_entity, _, _elev = storey_map[container_id]
             f.create_entity(
                 'IfcRelContainedInSpatialStructure',
                 GlobalId=new_guid(),
                 OwnerHistory=owner,
-                RelatedElements=tuple(ifc_elems),
+                RelatedElements=tuple(all_elems),
                 RelatingStructure=storey_entity
             )
 

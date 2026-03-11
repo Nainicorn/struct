@@ -27,19 +27,28 @@ const renders = {
         return await renders.finalizeRender(userId, renderId);
       }
 
+      // GET /api/renders/{renderId}/download - download IFC
+      if (method === 'GET' && path.includes('/download')) {
+        const renderId = path.split('/').slice(-2)[0];
+        return await renders.getDownloadUrl(userId, renderId);
+      }
+
+      // GET /api/renders/{renderId}/sources/{fileName} - download source file
+      if (method === 'GET' && path.includes('/sources/')) {
+        const parts = path.split('/');
+        const sourcesIdx = parts.indexOf('sources');
+        const renderId = parts[sourcesIdx - 1];
+        const fileName = decodeURIComponent(parts[sourcesIdx + 1]);
+        return await renders.getSourceFile(userId, renderId, fileName);
+      }
+
       // GET /api/renders - list all renders for user
-      if (method === 'GET' && !path.includes('/download')) {
+      if (method === 'GET') {
         const renderId = path.split('/').pop();
         if (renderId && renderId !== 'renders' && renderId !== 'api') {
           return await renders.getRender(userId, renderId);
         }
         return await renders.listRenders(userId);
-      }
-
-      // GET /api/renders/{renderId}/download - download URL
-      if (method === 'GET' && path.includes('/download')) {
-        const renderId = path.split('/').slice(-2)[0];
-        return await renders.getDownloadUrl(userId, renderId);
       }
 
       // DELETE /api/renders/{renderId}
@@ -131,6 +140,31 @@ const renders = {
       fileName: `render-${renderId}.ifc`,
       render
     };
+  },
+
+  getSourceFile: async (userId, renderId, fileName) => {
+    const render = await renders.getRender(userId, renderId);
+    if (render.error) return render;
+
+    // Validate the file is in source_files list
+    if (!render.source_files || !render.source_files.includes(fileName)) {
+      return { error: 'File not found in this render', statusCode: 404 };
+    }
+
+    const key = `uploads/${userId}/${renderId}/${fileName}`;
+    try {
+      const response = await s3.send(new GetObjectCommand({ Bucket: DATA_BUCKET, Key: key }));
+      const buffer = await response.Body.transformToByteArray();
+      const base64 = Buffer.from(buffer).toString('base64');
+
+      return {
+        fileData: base64,
+        fileName
+      };
+    } catch (err) {
+      console.error('Error fetching source file:', err.message);
+      return { error: 'File not found in storage', statusCode: 404 };
+    }
   },
 
   finalizeRender: async (userId, renderId) => {

@@ -1,6 +1,6 @@
 # Text-to-3D Project Status & Architecture
 
-**Claude Code Constraints**
+**Constraints**
 - update claude.md file everytime you or user finishes a part of the major implementation & when you or user updates code/zip
 - everytime a task is complete, remove the context associated with it in the claude.md file and put it into completed.md
 - claude.md should only contain main context of project and remaining steps and completed.md should contain everything that has been implemented both in frontend and backend
@@ -138,26 +138,6 @@ The backend folder contains the most recent code or information that is is ident
 
 ### COMPLETED ✅
 See `completed.md` for full implementation history.
-
-**Summary of completed work:**
-- IFC4 Generator (2025-02-19): full IFC4 schema, materials, property sets, building-type geometry
-- VentSim Tunnel Parser (2025-02-19): MAIN section parsing, 69 branches, fans, named spaces
-- CSS Pipeline Overhaul Phase 1+4 (2026-02-28): CSS v1.0 schema, upload finalization, confidence-based IFC generation, builting-css-pipeline Lambda, simplified Step Function
-- VentSim Geometry Bug Fixes (2026-02-28): fixed extrusion direction, refDirection, coordinate normalization, header parsing → tunnel now renders as correct flat network ✅
-- IFC Placement/Storey/Validator Overhaul (2026-03-02): fixed placement chain (Building→Site), storey elevation logic, conditional Z subtraction with `placementZIsAbsolute` flag, axis/refDirection sanitization, IfcWall (not StandardCase), validator excludes spatial containers, improved bbox with profile bounds, 8 CSS v1.0 regression tests ✅
-- Backend Hardening Phase 1 (2026-03-10): IAM consolidation (builting-role), scrypt password hashing, HMAC-signed tokens, centralized auth gate, Bearer token auth (cross-origin), upload validation (extension allowlist, path traversal checks), self-only user access ✅
-- Backend Hardening Phase 2 (2026-03-10): render status model (uploading→processing→completed/failed), finalize idempotency via DynamoDB conditional update, STATE_MACHINE_ARN fail-fast ✅
-- AWS Cleanup (2026-03-10): removed builting-orchestrator-trigger Lambda + SNS topic, renamed all Lambdas (router/read/extract/transform/generate/store), renamed state machine to builting-state-machine, renamed ECR repo to builting-generate, updated API Gateway integration, all zips rebuilt ✅
-- Backend Hardening Phase 3 (2026-03-10): env var portability — removed hardcoded regions, replaced bucket/table names with `process.env.X || 'default'`, API Gateway URL to config constant, all zips rebuilt ✅
-
-### TO-DO: Phase 4 — AWS Console Setup (March 19 deadline)
-
-1. Upload Lambda zips to AWS console (builting-router, builting-read, builting-extract, builting-store, builting-transform)
-2. Deploy new `builting-generate` image: Lambda console → Deploy new image → select `latest`
-3. Set Lambda timeouts (30s router/read/store, 60s transform, 300s extract/generate)
-4. Set API Gateway throttle (100/50 req/s)
-5. Verify S3 block public access + encryption
-6. Test end-to-end flow
 
 ### Reach Goals
 1. Human-in-the-loop approval after generation so add fixes

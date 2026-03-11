@@ -124,7 +124,7 @@ const details = {
     },
 
     /**
-     * Display source files as boxes
+     * Display source files as downloadable boxes
      */
     _displayFiles(fileNames) {
         const filesContainer = this.element.querySelector('.__details-files');
@@ -133,12 +133,50 @@ const details = {
         filesContainer.innerHTML = fileNames.map((fileName) => {
             const fileExt = this._getFileExtension(fileName);
             return `
-                <div class="__details-file-item-box" title="${fileName}">
+                <div class="__details-file-item-box __details-file-downloadable" data-filename="${fileName}" title="Click to download ${fileName}">
                     <span class="__details-file-item-box-name">${fileName}</span>
                     <span class="__details-file-item-box-badge">${fileExt}</span>
                 </div>
             `;
         }).join('');
+
+        // Bind click handlers for download
+        filesContainer.querySelectorAll('.__details-file-downloadable').forEach(el => {
+            el.addEventListener('click', () => this._downloadSourceFile(el.dataset.filename));
+        });
+    },
+
+    /**
+     * Download a source file
+     */
+    async _downloadSourceFile(fileName) {
+        if (!this.currentRender) return;
+
+        try {
+            const result = await rendersService.getSourceFile(this.currentRender.render_id, fileName);
+            if (result.error) {
+                console.error('Source file download error:', result.error);
+                return;
+            }
+
+            // Decode base64 and trigger download
+            const byteChars = atob(result.fileData);
+            const byteArray = new Uint8Array(byteChars.length);
+            for (let i = 0; i < byteChars.length; i++) {
+                byteArray[i] = byteChars.charCodeAt(i);
+            }
+            const blob = new Blob([byteArray]);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error('Error downloading source file:', error);
+        }
     },
 
     /**

@@ -403,15 +403,30 @@ function buildingSpecToCSS(spec, sourceFiles) {
   const height = dims.height_m || 3;
   const wallThickness = dims.wall_thickness_m || 0.3;
   const floorLevel = spec.elevations?.floor_level_m || 0;
-  const numFloors = spec.structure?.num_floors || 1;
-  const floorToFloor = spec.structure?.floor_to_floor_height_m || height;
+  let numFloors = spec.structure?.num_floors || 1;
+  let floorToFloor = spec.structure?.floor_to_floor_height_m || height;
+
+  // v3.2: Structure classification
+  const buildingType = (spec.buildingType || 'BUILDING').toUpperCase();
+  const structureClassMap = {
+    'BUILDING': 'BUILDING', 'OFFICE': 'BUILDING', 'WAREHOUSE': 'BUILDING',
+    'RESIDENTIAL': 'BUILDING', 'HOSPITAL': 'BUILDING', 'SCHOOL': 'BUILDING', 'PARKING': 'BUILDING',
+    'TUNNEL': 'LINEAR',
+    'FACILITY': 'FACILITY', 'INDUSTRIAL': 'FACILITY'
+  };
+  const structureClass = structureClassMap[buildingType] || 'BUILDING';
+
+  // v3.2: Validate storey parameters
+  numFloors = Math.max(1, Math.min(20, numFloors)); // cap at 20
+  floorToFloor = Math.max(2.0, Math.min(10.0, floorToFloor)); // 2-10m
+  if (structureClass === 'LINEAR') numFloors = 1; // tunnels: single level
 
   // Map buildingType to domain
   const domainMap = {
     'TUNNEL': 'TUNNEL', 'INDUSTRIAL': 'INDUSTRIAL', 'FACILITY': 'INDUSTRIAL',
     'CIVIL': 'CIVIL', 'STRUCTURAL': 'STRUCTURAL'
   };
-  const domain = domainMap[spec.buildingType] || 'ARCH';
+  const domain = domainMap[buildingType] || 'ARCH';
 
   // Build levels
   const levels = [];
@@ -427,28 +442,34 @@ function buildingSpecToCSS(spec, sourceFiles) {
 
   const elements = [];
   const elementCounts = {};
+  const skippedRooms = [];
+  const skippedOpenings = [];
 
   function addElement(el) {
     elementCounts[el.type] = (elementCounts[el.type] || 0) + 1;
     elements.push(el);
   }
 
+  // v3.2: Normalize floor field — clamp to valid range, overflow → top floor
+  function normalizeFloor(rawFloor) {
+    if (!rawFloor || numFloors === 1) return 1;
+    const f = Math.max(1, Math.round(rawFloor));
+    if (f > numFloors) return numFloors; // overflow → top floor
+    return f;
+  }
+
   // Helper for element creation
   function makeElement(type, semanticType, name, placement, geometry, container, props = {}, material = null, confidence = 0.7, source = 'LLM') {
     const id = elemId(geometry, placement);
-    return { id, type, semanticType, name, placement, geometry, container, relationships: [], properties: props, material, confidence, source };
+    return { id, type, semanticType, name, placement, geometry, container, relationships: [], properties: props, material, confidence, source, metadata: {} };
   }
 
   // ---- EXTERIOR WALLS (4 walls per floor) ----
-  // NOTE: IfcRectangleProfileDef is centered at its placement origin, so each
-  // wall's origin must be the centroid of that wall panel, not its corner.
-  // Building footprint: X=[0, length], Y=[0, width]
   for (let f = 0; f < numFloors; f++) {
     const levelId = `level-${f + 1}`;
     const baseZ = floorLevel + (f * floorToFloor);
     const wt = wallThickness;
 
-    // South wall: X=[0, length], Y=[0, wt] → centroid (length/2, wt/2)
     addElement(makeElement('WALL', 'IfcWallStandardCase', `South Wall F${f + 1}`,
       { origin: { x: length / 2, y: wt / 2, z: baseZ } },
       { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
@@ -456,7 +477,6 @@ function buildingSpecToCSS(spec, sourceFiles) {
       { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
     ));
 
-    // North wall: X=[0, length], Y=[width-wt, width] → centroid (length/2, width-wt/2)
     addElement(makeElement('WALL', 'IfcWallStandardCase', `North Wall F${f + 1}`,
       { origin: { x: length / 2, y: width - wt / 2, z: baseZ } },
       { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
@@ -464,7 +484,6 @@ function buildingSpecToCSS(spec, sourceFiles) {
       { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
     ));
 
-    // West wall: X=[0, wt], Y=[0, width] → centroid (wt/2, width/2)
     addElement(makeElement('WALL', 'IfcWallStandardCase', `West Wall F${f + 1}`,
       { origin: { x: wt / 2, y: width / 2, z: baseZ } },
       { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wt, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
@@ -472,7 +491,6 @@ function buildingSpecToCSS(spec, sourceFiles) {
       { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
     ));
 
-    // East wall: X=[length-wt, length], Y=[0, width] → centroid (length-wt/2, width/2)
     addElement(makeElement('WALL', 'IfcWallStandardCase', `East Wall F${f + 1}`,
       { origin: { x: length - wt / 2, y: width / 2, z: baseZ } },
       { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wt, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
@@ -480,7 +498,6 @@ function buildingSpecToCSS(spec, sourceFiles) {
       { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
     ));
 
-    // Floor slab: X=[0, length], Y=[0, width] → centroid (length/2, width/2)
     addElement(makeElement('SLAB', 'IfcSlab', `Floor Slab F${f + 1}`,
       { origin: { x: length / 2, y: width / 2, z: baseZ } },
       { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.2 },
@@ -488,7 +505,6 @@ function buildingSpecToCSS(spec, sourceFiles) {
       { name: spec.materials?.floor || 'concrete', color: [0.6, 0.6, 0.6], transparency: 0 }
     ));
 
-    // Roof slab (only on top floor): same footprint as floor
     if (f === numFloors - 1) {
       const roofZ = baseZ + floorToFloor;
       addElement(makeElement('SLAB', 'IfcSlab', 'Roof Slab',
@@ -501,15 +517,19 @@ function buildingSpecToCSS(spec, sourceFiles) {
   }
 
   // ---- INTERIOR WALLS ----
-  if (spec.interior_walls) {
+  if (spec.interior_walls && structureClass !== 'LINEAR') {
     for (const wall of spec.interior_walls) {
       const dx = (wall.x_end_m || 0) - (wall.x_start_m || 0);
       const dy = (wall.y_end_m || 0) - (wall.y_start_m || 0);
       const wallLength = Math.sqrt(dx * dx + dy * dy);
-      if (wallLength < 0.01) continue;
+      if (wallLength < 0.1 || wallLength > 500) continue; // v3.2: skip invalid lengths
       const thickness = wall.thickness_m || 0.15;
 
-      const placement = { origin: { x: wall.x_start_m || 0, y: wall.y_start_m || 0, z: floorLevel } };
+      const floor = normalizeFloor(wall.floor);
+      const levelId = `level-${floor}`;
+      const baseZ = floorLevel + ((floor - 1) * floorToFloor);
+
+      const placement = { origin: { x: wall.x_start_m || 0, y: wall.y_start_m || 0, z: baseZ } };
       const geometry = {
         method: 'EXTRUSION',
         profile: { type: 'RECTANGLE', width: wallLength, height: thickness },
@@ -518,7 +538,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
       };
 
       addElement(makeElement('WALL', 'IfcWallStandardCase', wall.name || 'Interior Wall',
-        placement, geometry, 'level-1',
+        placement, geometry, levelId,
         { isExternal: false },
         { name: 'plasterboard', color: [0.9, 0.9, 0.88], transparency: 0 },
         0.65
@@ -537,16 +557,10 @@ function buildingSpecToCSS(spec, sourceFiles) {
         for (let y = ySpacing; y < width - wallThickness; y += ySpacing) {
           for (let f = 0; f < numFloors; f++) {
             const baseZ = floorLevel + (f * floorToFloor);
-            const placement = { origin: { x: x + wallThickness, y: y + wallThickness, z: baseZ } };
-            const geometry = {
-              method: 'EXTRUSION',
-              profile: { type: 'RECTANGLE', width: colSize, height: colSize },
-              direction: { x: 0, y: 0, z: 1 },
-              depth: floorToFloor
-            };
-
             addElement(makeElement('COLUMN', 'IfcColumn', `Column ${x.toFixed(0)}-${y.toFixed(0)} F${f + 1}`,
-              placement, geometry, `level-${f + 1}`,
+              { origin: { x: x + wallThickness, y: y + wallThickness, z: baseZ } },
+              { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: colSize, height: colSize }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+              `level-${f + 1}`,
               { gridX: x, gridY: y },
               { name: 'concrete', color: [0.7, 0.7, 0.7], transparency: 0 },
               0.7
@@ -557,34 +571,65 @@ function buildingSpecToCSS(spec, sourceFiles) {
     }
   }
 
-  // ---- ROOMS (as SPACE elements) ----
-  if (spec.rooms) {
+  // ---- ROOMS (as SPACE elements) — v3.2: skip-oriented validation ----
+  if (spec.rooms && structureClass !== 'LINEAR') {
+    const maxInterior = { len: length - 2 * wallThickness, wid: width - 2 * wallThickness };
+    const maxCorrection = Math.min(2.0, width * 0.15);
+
     for (const room of spec.rooms) {
       const rLen = room.length_m || 5;
       const rWid = room.width_m || 4;
       const rHeight = room.height_m || floorToFloor;
-      const rx = room.x_position_m || 0;
-      const ry = room.y_position_m || 0;
 
-      const placement = { origin: { x: rx, y: ry, z: floorLevel } };
-      const geometry = {
-        method: 'EXTRUSION',
-        profile: { type: 'RECTANGLE', width: rLen, height: rWid },
-        direction: { x: 0, y: 0, z: 1 },
-        depth: rHeight
-      };
+      // v3.2: Skip if room exceeds footprint (never modify size)
+      if (rLen > maxInterior.len || rWid > maxInterior.wid) {
+        skippedRooms.push({ name: room.name || 'Room', skipReason: 'exceeds_footprint', rLen, rWid });
+        continue;
+      }
+      if (rLen <= 0 || rWid <= 0) {
+        skippedRooms.push({ name: room.name || 'Room', skipReason: 'invalid_dimensions' });
+        continue;
+      }
 
-      addElement(makeElement('SPACE', 'IfcSpace', room.name || 'Room',
-        placement, geometry, 'level-1',
+      const floor = normalizeFloor(room.floor);
+      const levelId = `level-${floor}`;
+      const baseZ = floorLevel + ((floor - 1) * floorToFloor);
+
+      // v3.2: Position clamping with relative threshold
+      let rx = room.x_position_m || wallThickness;
+      let ry = room.y_position_m || wallThickness;
+      const xMin = wallThickness, xMax = length - wallThickness - rLen;
+      const yMin = wallThickness, yMax = width - wallThickness - rWid;
+
+      const xCorrection = Math.max(0, xMin - rx) + Math.max(0, rx - xMax);
+      const yCorrection = Math.max(0, yMin - ry) + Math.max(0, ry - yMax);
+      const totalCorrection = Math.max(xCorrection, yCorrection);
+
+      if (totalCorrection > maxCorrection) {
+        skippedRooms.push({ name: room.name || 'Room', skipReason: 'position_correction_too_large', correction: totalCorrection });
+        continue;
+      }
+
+      const clamped = totalCorrection > 0;
+      rx = Math.max(xMin, Math.min(xMax, rx));
+      ry = Math.max(yMin, Math.min(yMax, ry));
+
+      const el = makeElement('SPACE', 'IfcSpace', room.name || 'Room',
+        { origin: { x: rx, y: ry, z: baseZ } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: rLen, height: rWid }, direction: { x: 0, y: 0, z: 1 }, depth: rHeight },
+        levelId,
         { usage: room.usage || 'OTHER' },
         { name: 'space', color: [0.8, 0.9, 1.0], transparency: 0.5 },
         0.7
-      ));
+      );
+      if (clamped) el.metadata.clampedToFootprint = true;
+      if (floor !== (room.floor || 1)) el.metadata.floorNormalized = true;
+      addElement(el);
     }
   }
 
-  // ---- OPENINGS (DOOR / WINDOW) ----
-  if (spec.openings) {
+  // ---- OPENINGS (DOOR / WINDOW) — v3.2: per-floor, skip for LINEAR ----
+  if (spec.openings && structureClass !== 'LINEAR') {
     const wallDims = { NORTH: { axis: 'x', base_y: width }, SOUTH: { axis: 'x', base_y: 0 }, EAST: { axis: 'y', base_x: length }, WEST: { axis: 'y', base_x: 0 } };
 
     for (const opening of spec.openings) {
@@ -596,6 +641,20 @@ function buildingSpecToCSS(spec, sourceFiles) {
       const offset = opening.x_offset_m || 1;
       const wallInfo = wallDims[side];
 
+      // v3.2: Pre-generation validation
+      if (oWidth > Math.min(10, length * 0.7)) {
+        skippedOpenings.push({ type: opening.type, side, skipReason: 'opening_too_wide' });
+        continue;
+      }
+      if (oHeight + sillHeight > floorToFloor + 0.2) {
+        skippedOpenings.push({ type: opening.type, side, skipReason: 'opening_exceeds_storey_height' });
+        continue;
+      }
+
+      const floor = normalizeFloor(opening.floor);
+      const levelId = `level-${floor}`;
+      const baseZ = floorLevel + ((floor - 1) * floorToFloor);
+
       let ox, oy;
       if (wallInfo.axis === 'x') {
         ox = offset;
@@ -605,7 +664,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
         oy = offset;
       }
 
-      const placement = { origin: { x: ox, y: oy, z: floorLevel + sillHeight } };
+      const placement = { origin: { x: ox, y: oy, z: baseZ + sillHeight } };
       const geometry = {
         method: 'EXTRUSION',
         profile: { type: 'RECTANGLE', width: oWidth, height: wallThickness },
@@ -616,7 +675,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
       const type = isDoor ? 'DOOR' : 'WINDOW';
       const semanticType = isDoor ? 'IfcDoor' : 'IfcWindow';
       addElement(makeElement(type, semanticType, `${opening.type} - ${side}`,
-        placement, geometry, 'level-1',
+        placement, geometry, levelId,
         { wallSide: side, sillHeight: sillHeight },
         { name: isDoor ? 'wood' : 'glass', color: isDoor ? [0.55, 0.35, 0.2] : [0.7, 0.85, 0.95], transparency: isDoor ? 0 : 0.3 },
         0.6
@@ -624,8 +683,14 @@ function buildingSpecToCSS(spec, sourceFiles) {
     }
   }
 
-  // ---- EQUIPMENT ----
+  // ---- EQUIPMENT — v3.2: per-floor, skip for LINEAR (unless fans) ----
   if (spec.equipment) {
+    const equipTypeMap = {
+      'GENERATOR': 'IfcElectricGenerator', 'PUMP': 'IfcPump', 'FAN': 'IfcFan',
+      'COMPRESSOR': 'IfcCompressor', 'TRANSFORMER': 'IfcTransformer', 'BOILER': 'IfcBoiler',
+      'CHILLER': 'IfcChiller', 'AHU': 'IfcAirToAirHeatRecovery'
+    };
+
     for (const equip of spec.equipment) {
       const eLen = equip.length_m || 1.5;
       const eWid = equip.width_m || 1.0;
@@ -633,23 +698,15 @@ function buildingSpecToCSS(spec, sourceFiles) {
       const ex = equip.x_position_m || 0;
       const ey = equip.y_position_m || 0;
 
-      const equipTypeMap = {
-        'GENERATOR': 'IfcElectricGenerator', 'PUMP': 'IfcPump', 'FAN': 'IfcFan',
-        'COMPRESSOR': 'IfcCompressor', 'TRANSFORMER': 'IfcTransformer', 'BOILER': 'IfcBoiler',
-        'CHILLER': 'IfcChiller', 'AHU': 'IfcAirToAirHeatRecovery'
-      };
-
-      const placement = { origin: { x: ex, y: ey, z: floorLevel } };
-      const geometry = {
-        method: 'EXTRUSION',
-        profile: { type: 'RECTANGLE', width: eLen, height: eWid },
-        direction: { x: 0, y: 0, z: 1 },
-        depth: eHeight
-      };
+      const floor = normalizeFloor(equip.floor);
+      const levelId = `level-${floor}`;
+      const baseZ = floorLevel + ((floor - 1) * floorToFloor);
 
       addElement(makeElement('EQUIPMENT', equipTypeMap[equip.type] || 'IfcBuildingElementProxy',
         equip.name || equip.type || 'Equipment',
-        placement, geometry, 'level-1',
+        { origin: { x: ex, y: ey, z: baseZ } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: eLen, height: eWid }, direction: { x: 0, y: 0, z: 1 }, depth: eHeight },
+        levelId,
         { equipmentType: equip.type || 'OTHER' },
         { name: 'steel', color: [0.5, 0.5, 0.55], transparency: 0 },
         0.65
@@ -681,6 +738,9 @@ function buildingSpecToCSS(spec, sourceFiles) {
       unitNormalizationApplied: true,
       cssHash: null,
       elementCounts,
+      structureClass,
+      skippedRooms: skippedRooms.length > 0 ? skippedRooms : undefined,
+      skippedOpenings: skippedOpenings.length > 0 ? skippedOpenings : undefined,
       bbox: {
         min: { x: 0, y: 0, z: floorLevel },
         max: { x: length, y: width, z: totalHeight }
@@ -1053,13 +1113,28 @@ export const handler = async (event) => {
       return parts.join('\n\n---\n\n');
     }
 
-    // Single-pass extraction (existing behavior)
+    // v3.2: Constraint rules for prompts
+    const CONSTRAINT_RULES = `
+IMPORTANT RULES:
+- Only extract information explicitly stated or clearly implied in the source text
+- Do NOT invent rooms, walls, or openings not mentioned in the input
+- If interior layout is not described, return empty rooms[] and interior_walls[]
+- If dimensions are not specified, use reasonable defaults for the building type
+- Prefer simple structural envelopes over guessed interior details
+- Omit uncertain geometry rather than guessing
+- For openings: only include doors/windows that are explicitly mentioned with clear placement
+- For BUILDING types (office, warehouse, residential, hospital, school): include rooms only if described, specify floor for each room, include openings only on walls where they are mentioned
+- For TUNNEL / LINEAR structures: do not generate rooms, interior_walls, or openings — focus on overall dimensions and equipment
+- For FACILITY / INDUSTRIAL structures: rooms optional, openings only if explicitly mentioned`;
+
+    // Single-pass extraction (v3.2: improved prompts)
     async function singlePassExtraction() {
       console.log('Running single-pass Bedrock extraction...');
       const fileContent = prepareFileContent(processedFiles);
 
       const prompt = `You are an expert in interpreting architectural and engineering documents to extract building specifications.
 Extract structured data from the provided files and return it as a JSON object. ALL DIMENSIONS IN METRES.
+${CONSTRAINT_RULES}
 
 Return ONLY valid JSON (no markdown, no explanations):
 
@@ -1073,15 +1148,18 @@ Return ONLY valid JSON (no markdown, no explanations):
     "wall_thickness_m": number (default 0.3)
   },
   "elevations": { "floor_level_m": number (default 0.0) },
-  "rooms": [{ "name": "string", "usage": "OFFICE|STORAGE|MECHANICAL|ELECTRICAL|CIRCULATION|WC|LOBBY|LAB|PARKING|OTHER", "length_m": number, "width_m": number, "height_m": number, "x_position_m": number, "y_position_m": number }],
-  "openings": [{ "type": "DOOR|WINDOW", "wall_side": "NORTH|SOUTH|EAST|WEST", "x_offset_m": number, "width_m": number, "height_m": number, "sill_height_m": number }],
+  "rooms": [{ "name": "string", "usage": "OFFICE|STORAGE|MECHANICAL|ELECTRICAL|CIRCULATION|WC|LOBBY|LAB|PARKING|OTHER", "length_m": number, "width_m": number, "height_m": number, "x_position_m": number, "y_position_m": number, "floor": number (1-indexed, default 1) }],
+  "openings": [{ "type": "DOOR|WINDOW", "wall_side": "NORTH|SOUTH|EAST|WEST", "x_offset_m": number, "width_m": number, "height_m": number, "sill_height_m": number, "floor": number (1-indexed, default 1) }],
   "ventilation": { "system_type": "natural|mechanical|hybrid", "intake_location": "string", "exhaust_location": "string", "num_fans": number },
-  "equipment": [{ "name": "string", "type": "GENERATOR|PUMP|FAN|COMPRESSOR|TRANSFORMER|BATTERY|CONVERTER|BOILER|CHILLER|AHU|OTHER", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number }],
+  "equipment": [{ "name": "string", "type": "GENERATOR|PUMP|FAN|COMPRESSOR|TRANSFORMER|BATTERY|CONVERTER|BOILER|CHILLER|AHU|OTHER", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number, "floor": number (1-indexed, default 1) }],
   "materials": { "walls": "concrete|brick|steel|timber|glass|other", "floor": "concrete|timber|raised_access|screed|other", "roof": "concrete|metal|membrane|tiles|other" },
   "structural_system": "FRAME|LOADBEARING|SHELL|TRUSS|OTHER",
   "structure": { "column_grid": [{ "x_spacing_m": number, "y_spacing_m": number, "column_size_m": number }], "floor_to_floor_height_m": number, "num_floors": number },
-  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number }]
+  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number, "floor": number (1-indexed, default 1) }]
 }
+
+Example output for a simple 2-storey office:
+{"buildingName":"Office Building","buildingType":"OFFICE","dimensions":{"length_m":30,"width_m":15,"height_m":7,"wall_thickness_m":0.3},"elevations":{"floor_level_m":0},"rooms":[{"name":"Reception","usage":"LOBBY","length_m":8,"width_m":6,"height_m":3.5,"x_position_m":1,"y_position_m":1,"floor":1},{"name":"Office A","usage":"OFFICE","length_m":6,"width_m":5,"height_m":3.5,"x_position_m":2,"y_position_m":2,"floor":2}],"openings":[{"type":"DOOR","wall_side":"SOUTH","x_offset_m":14,"width_m":1.2,"height_m":2.4,"sill_height_m":0,"floor":1}],"structure":{"num_floors":2,"floor_to_floor_height_m":3.5},"ventilation":{},"equipment":[],"materials":{"walls":"concrete","floor":"concrete","roof":"metal"},"structural_system":"FRAME","interior_walls":[]}
 
 Convert feet/inches to metres. Use realistic defaults for missing values. Return empty arrays [] when no data.
 
@@ -1092,7 +1170,7 @@ ${sourceFiles.filter(f => f.parseStatus === 'unsupported').length > 0 ? `\nNote:
 
 ${fileContent}`;
 
-      return await callBedrock(prompt);
+      return await callBedrock(prompt, 12288);
     }
 
     // Multi-pass extraction
@@ -1133,6 +1211,7 @@ ${snippets}`;
       const pass2Prompt = `${domainContext}
 You are an expert in interpreting architectural and engineering documents to extract building specifications.
 Extract structured data and return it as a JSON object. ALL DIMENSIONS IN METRES.
+${CONSTRAINT_RULES}
 
 Return ONLY valid JSON (no markdown, no explanations):
 
@@ -1141,14 +1220,14 @@ Return ONLY valid JSON (no markdown, no explanations):
   "buildingType": "BUILDING | OFFICE | WAREHOUSE | TUNNEL | FACILITY | PARKING | HOSPITAL | SCHOOL | INDUSTRIAL | RESIDENTIAL",
   "dimensions": { "length_m": number, "width_m": number, "height_m": number, "wall_thickness_m": number },
   "elevations": { "floor_level_m": number },
-  "rooms": [{ "name": "string", "usage": "string", "length_m": number, "width_m": number, "height_m": number, "x_position_m": number, "y_position_m": number }],
-  "openings": [{ "type": "DOOR|WINDOW", "wall_side": "NORTH|SOUTH|EAST|WEST", "x_offset_m": number, "width_m": number, "height_m": number, "sill_height_m": number }],
+  "rooms": [{ "name": "string", "usage": "string", "length_m": number, "width_m": number, "height_m": number, "x_position_m": number, "y_position_m": number, "floor": number }],
+  "openings": [{ "type": "DOOR|WINDOW", "wall_side": "NORTH|SOUTH|EAST|WEST", "x_offset_m": number, "width_m": number, "height_m": number, "sill_height_m": number, "floor": number }],
   "ventilation": { "system_type": "string", "num_fans": number },
-  "equipment": [{ "name": "string", "type": "string", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number }],
+  "equipment": [{ "name": "string", "type": "string", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number, "floor": number }],
   "materials": { "walls": "string", "floor": "string", "roof": "string" },
   "structural_system": "FRAME|LOADBEARING|SHELL|TRUSS|OTHER",
   "structure": { "column_grid": [], "floor_to_floor_height_m": number, "num_floors": number },
-  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number }]
+  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number, "floor": number }]
 }
 
 Convert feet/inches to metres. Use realistic defaults for missing values. Return empty arrays [] when no data.
@@ -1160,7 +1239,7 @@ ${fileContent}`;
 
       let buildingSpec;
       try {
-        buildingSpec = await callBedrock(pass2Prompt);
+        buildingSpec = await callBedrock(pass2Prompt, 12288);
         if (!buildingSpec || !buildingSpec.dimensions) {
           console.warn('Pass 2: geometry schema invalid, falling back to single-pass');
           return await singlePassExtraction();
@@ -1281,6 +1360,48 @@ Rules: Only use element_keys from the list. Only set name, description, material
       applyBuildingSpecDefaults(buildingSpec);
       css = buildingSpecToCSS(buildingSpec, sourceFiles);
     }
+
+    // v3.2: Facade fallback — generate openings from description if LLM returned none
+    const structureClass = css.metadata?.structureClass || 'BUILDING';
+    if (structureClass === 'BUILDING' && (!buildingSpec.openings || buildingSpec.openings.length === 0)) {
+      const desc = (descriptionContent || '').toLowerCase();
+      // Check for counted doors: "3 bay doors", "three garage doors", etc.
+      const countMatch = desc.match(/(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(?:bay|garage|loading|roller|overhead)\s+doors?/i);
+      const numberWords = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+      if (countMatch) {
+        const count = parseInt(countMatch[1]) || numberWords[countMatch[1]?.toLowerCase()] || 1;
+        const dims = buildingSpec.dimensions || {};
+        const bLength = dims.length_m || 20;
+        const doorWidth = Math.min(3.5, (bLength * 0.6) / count); // reasonable bay door width
+        const spacing = bLength / (count + 1);
+        for (let i = 0; i < count; i++) {
+          css.elements.push({
+            id: `facade-door-${i}`, type: 'DOOR', semanticType: 'IfcDoor',
+            name: `Bay Door ${i + 1}`,
+            placement: { origin: { x: spacing * (i + 1), y: 0, z: 0 } },
+            geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: doorWidth, height: dims.wall_thickness_m || 0.3 }, direction: { x: 0, y: 0, z: 1 }, depth: 3.0 },
+            container: 'level-1', relationships: [], properties: { wallSide: 'SOUTH', sillHeight: 0 },
+            material: { name: 'steel', color: [0.5, 0.5, 0.55], transparency: 0 }, confidence: 0.5, source: 'facade_fallback', metadata: {}
+          });
+        }
+        console.log(`Facade fallback: generated ${count} bay doors`);
+      } else if (/\b(main\s+)?entrance\b/i.test(desc)) {
+        const dims = buildingSpec.dimensions || {};
+        css.elements.push({
+          id: 'facade-entrance', type: 'DOOR', semanticType: 'IfcDoor',
+          name: 'Main Entrance',
+          placement: { origin: { x: (dims.length_m || 20) / 2, y: 0, z: 0 } },
+          geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: 1.2, height: dims.wall_thickness_m || 0.3 }, direction: { x: 0, y: 0, z: 1 }, depth: 2.4 },
+          container: 'level-1', relationships: [], properties: { wallSide: 'SOUTH', sillHeight: 0 },
+          material: { name: 'wood', color: [0.55, 0.35, 0.2], transparency: 0 }, confidence: 0.5, source: 'facade_fallback', metadata: {}
+        });
+        console.log('Facade fallback: generated 1 entrance door');
+      }
+      // If description is vague ("windows on all sides" etc.) — generate NONE
+    }
+
+    // v3.2: Envelope fallback — if too many elements removed, degrade to clean box
+    // (Applied after transform step removes bad openings — tracked via metadata)
 
     // Generate AI title and description
     const ai_generated_title = buildingSpec.buildingName || 'Structure Model';

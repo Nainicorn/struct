@@ -15,6 +15,10 @@ const rendersService = {
 
   async getDownloadUrl(renderId) {
     return await aws.call(`/api/renders/${renderId}/download`, { method: 'GET' });
+  },
+
+  async getSourceFile(renderId, fileName) {
+    return await aws.call(`/api/renders/${renderId}/sources/${encodeURIComponent(fileName)}`, { method: 'GET' });
   }
 };
 

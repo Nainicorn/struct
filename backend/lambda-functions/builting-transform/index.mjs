@@ -55,9 +55,16 @@ export const handler = async (event) => {
   inferOpenings(css);
   console.log('Opening inference complete');
 
+  // ========== STEP 5B: CREATE OPENING RELATIONSHIPS (VOIDS) ==========
+  createOpeningRelationships(css);
+  console.log('Opening relationships complete');
+
   // ========== STEP 6: INFER SLABS ==========
   inferSlabs(css);
   console.log('Slab inference complete');
+
+  // ========== STEP 7: ENVELOPE FALLBACK CHECK (v3.2) ==========
+  checkEnvelopeFallback(css);
 
   // Save processed CSS back to S3
   const processedKey = `uploads/${userId}/${renderId}/css/css_processed.json`;
@@ -365,7 +372,7 @@ function mergeWalls(css) {
 
   const ANGLE_TOL = 3 * Math.PI / 180; // 3 degrees
   const SNAP_TOL = 5 * Math.PI / 180;  // 5 degrees for axis snap
-  const ENDPOINT_TOL = 0.05; // meters
+  const ENDPOINT_TOL = 0.20; // meters (v3.2: increased from 0.05)
   const THICKNESS_TOL = 0.10; // 10% relative
 
   // Only process WALL elements
@@ -550,53 +557,549 @@ function dist3(a, b) {
 
 
 // ============================================================================
-// OPENING INFERENCE (Phase 6B)
+// OPENING INFERENCE (v3.2 — scored host-wall matching)
 // ============================================================================
+
+/**
+ * Normalize a 3D vector to unit length. Returns [0,0,1] if zero-length.
+ */
+function normalize(v) {
+  const len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+  return len > 1e-9 ? [v[0]/len, v[1]/len, v[2]/len] : [0, 0, 1];
+}
+
+/**
+ * Dot product of two 3-vectors.
+ */
+function dot3(a, b) {
+  return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+/**
+ * Get the horizontal length of a wall (the long dimension of its profile).
+ * Walls are EXTRUSION rectangles: profile = (length × thickness), depth = height.
+ */
+function getWallHorizontalLength(wall) {
+  const p = wall.geometry?.profile;
+  if (!p) return wall.geometry?.depth || 1;
+  const w = p.width || 1;
+  const h = p.height || 1;
+  return Math.max(w, h);
+}
+
+/**
+ * Get the horizontal axis direction of a wall.
+ * If profile.width >= profile.height, wall runs along X; otherwise along Y.
+ */
+function getWallHorizontalAxis(wall) {
+  const p = wall.geometry?.profile;
+  if (!p) return [1, 0, 0];
+  const w = p.width || 1;
+  const h = p.height || 1;
+  if (w >= h) return [1, 0, 0];
+  return [0, 1, 0];
+}
+
+/**
+ * Get wall endpoints along its horizontal axis.
+ */
+function getWallHorizontalEndpoints(wall) {
+  const origin = getOrigin(wall);
+  const axis = getWallHorizontalAxis(wall);
+  const halfLen = getWallHorizontalLength(wall) / 2;
+  return {
+    start: [origin[0] - axis[0]*halfLen, origin[1] - axis[1]*halfLen, origin[2]],
+    end:   [origin[0] + axis[0]*halfLen, origin[1] + axis[1]*halfLen, origin[2]]
+  };
+}
+
+/**
+ * Get wall thickness (the short dimension of its profile).
+ */
+function getWallThicknessFromProfile(wall) {
+  const p = wall.geometry?.profile;
+  if (!p) return 0.2;
+  const w = p.width || 1;
+  const h = p.height || 1;
+  return Math.min(w, h);
+}
+
+/**
+ * Get opening width — the wider profile dimension (horizontal extent of the opening).
+ */
+function getOpeningWidth(elem) {
+  const p = elem.geometry?.profile;
+  if (!p) return 1;
+  const w = p.width || 1;
+  const h = p.height || 1;
+  return Math.max(w, h);
+}
+
+/**
+ * Get opening height (the depth of the extrusion = vertical extent).
+ */
+function getOpeningHeight(elem) {
+  return elem.geometry?.depth || elem.geometry?.length_m || 2;
+}
+
+/**
+ * Get the opening's face normal — the direction it faces through the wall.
+ * This is along the thin profile dimension (not the extrusion direction).
+ */
+function getOpeningNormal(elem) {
+  const p = elem.geometry?.profile;
+  if (!p) return [0, 1, 0];
+  const w = p.width || 1;
+  const h = p.height || 1;
+  // Thin dimension determines face normal
+  if (h <= w) return [0, 1, 0]; // thin in Y → normal along Y
+  return [1, 0, 0]; // thin in X → normal along X
+}
+
+/**
+ * Project a point onto a line segment defined by two endpoints.
+ * Returns { t, closest, perpDist } where:
+ *   t = parameter along segment (0 = start, 1 = end)
+ *   closest = closest point on segment
+ *   perpDist = perpendicular distance from point to segment
+ */
+function projectPointToSegment(point, segStart, segEnd) {
+  const seg = [segEnd[0]-segStart[0], segEnd[1]-segStart[1], segEnd[2]-segStart[2]];
+  const segLen = Math.sqrt(seg[0]*seg[0] + seg[1]*seg[1] + seg[2]*seg[2]);
+  if (segLen < 1e-9) {
+    return { t: 0, closest: segStart, perpDist: dist3(point, segStart) };
+  }
+  const segDir = [seg[0]/segLen, seg[1]/segLen, seg[2]/segLen];
+  const toPoint = [point[0]-segStart[0], point[1]-segStart[1], point[2]-segStart[2]];
+  const proj = dot3(toPoint, segDir);
+  const t = proj / segLen; // 0..1 along segment
+  const tClamped = Math.max(0, Math.min(1, t));
+  const closest = [
+    segStart[0] + segDir[0] * tClamped * segLen,
+    segStart[1] + segDir[1] * tClamped * segLen,
+    segStart[2] + segDir[2] * tClamped * segLen
+  ];
+  const perpDist = dist3(point, closest);
+  return { t, tClamped, closest, perpDist, proj, segLen };
+}
+
+/**
+ * Get wall endpoints along horizontal axis (used by opening matching).
+ * Delegates to getWallHorizontalEndpoints.
+ */
+function getWallEndpoints(wall) {
+  return getWallHorizontalEndpoints(wall);
+}
 
 function inferOpenings(css) {
   if (!css.elements || css.elements.length === 0) return;
 
-  const HOST_DISTANCE_TOL = 0.5; // meters
+  const PERP_DIST_MAX = 1.0;         // max perpendicular distance to wall line
+  const SEGMENT_TOL = 0.2;           // opening can extend 0.2m past wall endpoints
+  const ORIENTATION_TOL = 0.2;       // |dot(openingNormal, wallAxis)| must be < this
+  const WIDTH_RATIO_MAX = 0.8;       // opening width must be < 80% of wall length
+  const AMBIGUITY_RATIO = 0.7;       // if best/second-best > this, skip (ambiguous)
+  const SALVAGE_PERP_MAX = 1.5;      // salvage pass: max perpendicular distance
+  const SALVAGE_SEGMENT_TOL = 0.5;   // salvage: projected point must be within segment ± this
 
-  const walls = css.elements.filter(e => (e.type === 'WALL' || e.semantic_type === 'WALL'));
+  // Get structure class from metadata (set by builting-extract)
+  const structureClass = (css.metadata?.structureClass || 'BUILDING').toUpperCase();
+
+  const walls = css.elements.filter(e => {
+    const t = (e.type || e.semantic_type || '').toUpperCase();
+    return t === 'WALL'; // only semantic WALLs, never PROXY
+  });
   const openingCandidates = css.elements.filter(e => {
     const t = (e.type || e.semantic_type || '').toUpperCase();
     return t === 'DOOR' || t === 'WINDOW';
   });
 
-  if (walls.length === 0 || openingCandidates.length === 0) return;
+  if (walls.length === 0 || openingCandidates.length === 0) {
+    // LINEAR structures: openings should not exist, skip all
+    if (structureClass === 'LINEAR' && openingCandidates.length > 0) {
+      _skipAllOpenings(css, openingCandidates, 'linear_structure_no_openings');
+    }
+    return;
+  }
+
+  // LINEAR structures: skip all openings
+  if (structureClass === 'LINEAR') {
+    _skipAllOpenings(css, openingCandidates, 'linear_structure_no_openings');
+    return;
+  }
+
+  css.metadata = css.metadata || {};
+  css.metadata.skippedOpenings = css.metadata.skippedOpenings || [];
 
   let matched = 0;
+  let skipped = 0;
+  const toRemove = new Set();
+
   for (const candidate of openingCandidates) {
-    const candOrigin = getOrigin(candidate);
-    const candContainer = candidate.container || 'level-1';
+    const result = _scoreOpeningAgainstWalls(candidate, walls, {
+      PERP_DIST_MAX, SEGMENT_TOL, ORIENTATION_TOL, WIDTH_RATIO_MAX, AMBIGUITY_RATIO
+    });
 
-    let bestWall = null;
-    let bestDist = Infinity;
+    if (result.matched) {
+      if (!candidate.metadata) candidate.metadata = {};
+      candidate.metadata.hostWallKey = result.wallKey;
+      candidate.metadata.hostWallMatchScore = result.score;
+      matched++;
+      continue;
+    }
 
-    for (const wall of walls) {
-      const wallContainer = wall.container || 'level-1';
-      if (wallContainer !== candContainer) continue; // same storey only
+    // Salvage pass: try snapping to nearest wall centerline
+    const salvageResult = _salvageOpening(candidate, walls, {
+      SALVAGE_PERP_MAX, SALVAGE_SEGMENT_TOL,
+      PERP_DIST_MAX, SEGMENT_TOL, ORIENTATION_TOL, WIDTH_RATIO_MAX, AMBIGUITY_RATIO
+    });
 
-      const wallOrigin = getOrigin(wall);
-      const d = dist3(candOrigin, wallOrigin);
-      if (d < bestDist) {
-        bestDist = d;
-        bestWall = wall;
+    if (salvageResult.matched) {
+      if (!candidate.metadata) candidate.metadata = {};
+      candidate.metadata.hostWallKey = salvageResult.wallKey;
+      candidate.metadata.hostWallMatchScore = salvageResult.score;
+      candidate.metadata.salvageSnapped = true;
+      // Apply the snap
+      setOrigin(candidate, salvageResult.snappedOrigin);
+      matched++;
+      continue;
+    }
+
+    // No match — skip the opening
+    const skipReason = result.rejectReason || salvageResult.rejectReason || 'no_wall_match';
+    if (structureClass === 'BUILDING' || structureClass === 'FACILITY') {
+      toRemove.add(candidate.id || candidate.element_key);
+      css.metadata.skippedOpenings.push({
+        id: candidate.id || candidate.element_key,
+        type: (candidate.type || '').toUpperCase(),
+        skipReason,
+        hostWallRejectReason: result.rejectReason
+      });
+      skipped++;
+    }
+  }
+
+  // Remove skipped openings from elements
+  if (toRemove.size > 0) {
+    css.elements = css.elements.filter(e => !toRemove.has(e.id || e.element_key));
+  }
+
+  // Window alignment heuristic: snap WINDOW sill heights on same wall
+  _alignWindowSillHeights(css);
+
+  console.log(`Opening inference: ${matched} matched, ${skipped} skipped`);
+}
+
+/**
+ * Score an opening against all candidate walls. Returns best match or rejection.
+ */
+function _scoreOpeningAgainstWalls(opening, walls, opts) {
+  const openingOrigin = getOrigin(opening);
+  const openingContainer = opening.container || 'level-1';
+  const openingWidth = getOpeningWidth(opening);
+  const openingNormal = normalize(getOpeningNormal(opening));
+
+  const scores = [];
+
+  for (const wall of walls) {
+    const wallContainer = wall.container || 'level-1';
+    if (wallContainer !== openingContainer) continue;
+
+    const wallType = (wall.type || wall.semantic_type || '').toUpperCase();
+    if (wallType !== 'WALL') continue;
+
+    const wallDir = normalize(getWallHorizontalAxis(wall));
+    const wallLength = getWallHorizontalLength(wall);
+    const { start, end } = getWallEndpoints(wall);
+
+    // Hard rejection: opening wider than 80% of wall
+    if (openingWidth >= wallLength * opts.WIDTH_RATIO_MAX) continue;
+
+    // Orientation check: opening normal should be perpendicular to wall axis.
+    // Try both profile-derived normal and its perpendicular, since the LLM
+    // uses a consistent width>height convention regardless of wall orientation.
+    const orientDot = Math.abs(dot3(openingNormal, wallDir));
+    const altNormal = [openingNormal[1], openingNormal[0], openingNormal[2]]; // swap X/Y
+    const altOrientDot = Math.abs(dot3(altNormal, wallDir));
+    if (orientDot > opts.ORIENTATION_TOL && altOrientDot > opts.ORIENTATION_TOL) continue;
+
+    // Perpendicular distance check
+    const { perpDist, t, proj, segLen } = projectPointToSegment(openingOrigin, start, end);
+    if (perpDist > opts.PERP_DIST_MAX) continue;
+
+    // Projection bounds check: opening center must project within wall ± tolerance
+    const halfOpeningWidth = openingWidth / 2;
+    const projStart = proj - halfOpeningWidth;
+    const projEnd = proj + halfOpeningWidth;
+    if (projStart < -opts.SEGMENT_TOL || projEnd > segLen + opts.SEGMENT_TOL) continue;
+
+    // Coverage: how centered is the opening on the wall
+    const projectionCoverage = 1 - Math.abs(proj / segLen - 0.5) * 2; // 1=centered, 0=edge
+
+    // Score: lower is better
+    const score = perpDist * 1.0
+      + (1.0 - Math.max(0, projectionCoverage)) * 0.5
+      + (openingWidth / wallLength) * 0.3;
+
+    scores.push({
+      wall,
+      wallKey: wall.element_key || wall.id,
+      score,
+      perpDist
+    });
+  }
+
+  if (scores.length === 0) {
+    return { matched: false, rejectReason: 'no_candidate_walls_passed_rejection' };
+  }
+
+  scores.sort((a, b) => a.score - b.score);
+
+  // Ambiguity check
+  if (scores.length >= 2) {
+    const ratio = scores[0].score / scores[1].score;
+    if (ratio > opts.AMBIGUITY_RATIO) {
+      return { matched: false, rejectReason: 'ambiguous_match' };
+    }
+  }
+
+  return { matched: true, wallKey: scores[0].wallKey, score: scores[0].score };
+}
+
+/**
+ * Salvage pass: snap opening to nearest wall centerline and retry matching.
+ */
+function _salvageOpening(opening, walls, opts) {
+  const openingOrigin = getOrigin(opening);
+  const openingContainer = opening.container || 'level-1';
+
+  let bestWall = null;
+  let bestPerpDist = Infinity;
+  let bestClosest = null;
+  let bestProj = null;
+  let bestSegLen = null;
+
+  for (const wall of walls) {
+    if ((wall.container || 'level-1') !== openingContainer) continue;
+    const { start, end } = getWallEndpoints(wall);
+    const { perpDist, closest, proj, segLen } = projectPointToSegment(openingOrigin, start, end);
+
+    if (perpDist > opts.SALVAGE_PERP_MAX) continue;
+
+    // Safety bound: projected point must be within segment bounds ± tolerance
+    if (proj < -opts.SALVAGE_SEGMENT_TOL || proj > segLen + opts.SALVAGE_SEGMENT_TOL) continue;
+
+    if (perpDist < bestPerpDist) {
+      bestPerpDist = perpDist;
+      bestWall = wall;
+      bestClosest = closest;
+      bestProj = proj;
+      bestSegLen = segLen;
+    }
+  }
+
+  if (!bestWall || !bestClosest) {
+    return { matched: false, rejectReason: 'salvage_no_nearby_wall' };
+  }
+
+  // Snap opening center to wall centerline
+  const snappedOrigin = [bestClosest[0], bestClosest[1], openingOrigin[2]]; // keep Z
+
+  // Retry scoring with snapped position
+  const tempOpening = JSON.parse(JSON.stringify(opening));
+  setOrigin(tempOpening, snappedOrigin);
+
+  const result = _scoreOpeningAgainstWalls(tempOpening, walls, {
+    PERP_DIST_MAX: opts.PERP_DIST_MAX,
+    SEGMENT_TOL: opts.SEGMENT_TOL,
+    ORIENTATION_TOL: opts.ORIENTATION_TOL,
+    WIDTH_RATIO_MAX: opts.WIDTH_RATIO_MAX,
+    AMBIGUITY_RATIO: opts.AMBIGUITY_RATIO
+  });
+
+  if (result.matched) {
+    return { ...result, snappedOrigin };
+  }
+  return { matched: false, rejectReason: 'salvage_retry_failed' };
+}
+
+/**
+ * Remove all openings (for LINEAR structures).
+ */
+function _skipAllOpenings(css, openings, reason) {
+  css.metadata = css.metadata || {};
+  css.metadata.skippedOpenings = css.metadata.skippedOpenings || [];
+
+  const ids = new Set();
+  for (const o of openings) {
+    const oid = o.id || o.element_key;
+    ids.add(oid);
+    css.metadata.skippedOpenings.push({
+      id: oid,
+      type: (o.type || '').toUpperCase(),
+      skipReason: reason
+    });
+  }
+  css.elements = css.elements.filter(e => !ids.has(e.id || e.element_key));
+  console.log(`Skipped all ${openings.length} openings: ${reason}`);
+}
+
+/**
+ * Window alignment heuristic: snap WINDOW sill heights (Z positions) within tolerance.
+ * DOORS are excluded — they sit at floor level and should not be aligned with windows.
+ */
+function _alignWindowSillHeights(css) {
+  const ALIGN_TOL = 0.15; // meters
+
+  // Group windows by host wall
+  const windowsByWall = {};
+  for (const elem of css.elements) {
+    const t = (elem.type || elem.semantic_type || '').toUpperCase();
+    if (t !== 'WINDOW') continue;
+    const wallKey = elem.metadata?.hostWallKey;
+    if (!wallKey) continue;
+    if (!windowsByWall[wallKey]) windowsByWall[wallKey] = [];
+    windowsByWall[wallKey].push(elem);
+  }
+
+  for (const [wallKey, windows] of Object.entries(windowsByWall)) {
+    if (windows.length < 2) continue;
+
+    // Get Z values
+    const zValues = windows.map(w => (w.placement?.origin?.z ?? 0));
+    const avgZ = zValues.reduce((a, b) => a + b, 0) / zValues.length;
+
+    // Snap all to average if within tolerance
+    for (let i = 0; i < windows.length; i++) {
+      if (Math.abs(zValues[i] - avgZ) <= ALIGN_TOL) {
+        if (windows[i].placement?.origin) {
+          windows[i].placement.origin.z = avgZ;
+        }
+      }
+    }
+  }
+}
+
+
+// ============================================================================
+// OPENING RELATIONSHIPS — VALIDATED VOIDS CREATION (v3.2 Task 2)
+// ============================================================================
+
+function createOpeningRelationships(css) {
+  if (!css.elements || css.elements.length === 0) return;
+
+  const structureClass = (css.metadata?.structureClass || 'BUILDING').toUpperCase();
+  css.metadata = css.metadata || {};
+  css.metadata.skippedOpenings = css.metadata.skippedOpenings || [];
+
+  // Build a map of walls by key for quick lookup
+  const wallMap = {};
+  for (const elem of css.elements) {
+    const t = (elem.type || elem.semantic_type || '').toUpperCase();
+    if (t === 'WALL') {
+      wallMap[elem.element_key || elem.id] = elem;
+    }
+  }
+
+  // Get storey heights for validation
+  const storeyHeights = {};
+  for (const level of (css.levelsOrSegments || [])) {
+    storeyHeights[level.id] = level.height_m || 3;
+  }
+
+  const toRemove = new Set();
+  let created = 0;
+  let skipped = 0;
+
+  const openings = css.elements.filter(e => {
+    const t = (e.type || e.semantic_type || '').toUpperCase();
+    return (t === 'DOOR' || t === 'WINDOW') && e.metadata?.hostWallKey;
+  });
+
+  for (const opening of openings) {
+    const wallKey = opening.metadata.hostWallKey;
+    const hostWall = wallMap[wallKey];
+
+    // Host wall must still exist
+    if (!hostWall) {
+      _skipOpeningVoids(css, opening, toRemove, structureClass, 'host_wall_missing');
+      skipped++;
+      continue;
+    }
+
+    const openingWidth = getOpeningWidth(opening);
+    const openingHeight = getOpeningHeight(opening);
+    const wallLength = getWallHorizontalLength(hostWall);
+    const storeyHeight = storeyHeights[opening.container || 'level-1'] || 3;
+
+    // Validation: opening width < min(10m, wallLength * 0.7)
+    if (openingWidth >= Math.min(10, wallLength * 0.7)) {
+      _skipOpeningVoids(css, opening, toRemove, structureClass, 'opening_too_wide_for_wall');
+      skipped++;
+      continue;
+    }
+
+    // Validation: opening width < 80% of usable wall span (wall minus 0.6m margins)
+    const usableSpan = wallLength - 0.6;
+    if (usableSpan > 0 && openingWidth >= usableSpan * 0.8) {
+      _skipOpeningVoids(css, opening, toRemove, structureClass, 'opening_exceeds_usable_span');
+      skipped++;
+      continue;
+    }
+
+    // Validation: opening height + sill height <= storey height
+    const sillHeight = (opening.placement?.origin?.z ?? 0) -
+      ((css.levelsOrSegments || []).find(l => l.id === opening.container)?.elevation_m ?? 0);
+    if (openingHeight + Math.max(0, sillHeight) > storeyHeight + 0.2) {
+      _skipOpeningVoids(css, opening, toRemove, structureClass, 'opening_exceeds_storey_height');
+      skipped++;
+      continue;
+    }
+
+    // Validation: opening not within 0.15m of wall endpoint
+    const { start, end } = getWallEndpoints(hostWall);
+    const openingOrigin = getOrigin(opening);
+    const { proj, segLen } = projectPointToSegment(openingOrigin, start, end);
+    const halfWidth = openingWidth / 2;
+    if (proj - halfWidth < 0.15 || proj + halfWidth > segLen - 0.15) {
+      // Only skip if wall is long enough that this matters
+      if (wallLength > openingWidth + 0.6) {
+        _skipOpeningVoids(css, opening, toRemove, structureClass, 'opening_too_close_to_wall_edge');
+        skipped++;
+        continue;
       }
     }
 
-    if (bestWall && bestDist <= HOST_DISTANCE_TOL) {
-      if (!candidate.metadata) candidate.metadata = {};
-      candidate.metadata.hostWallKey = bestWall.element_key || bestWall.id;
-      matched++;
-    }
-    // If no wall within threshold, keep as-is (PROXY guardrail)
+    // All checks passed — create VOIDS relationship
+    if (!opening.relationships) opening.relationships = [];
+    opening.relationships.push({ type: 'VOIDS', target: hostWall.id || hostWall.element_key });
+    if (!opening.metadata) opening.metadata = {};
+    opening.metadata.openingVoidsCreated = true;
+    created++;
   }
 
-  if (matched > 0) {
-    console.log(`Matched ${matched} openings to host walls`);
+  // Remove skipped openings
+  if (toRemove.size > 0) {
+    css.elements = css.elements.filter(e => !toRemove.has(e.id || e.element_key));
   }
+
+  console.log(`VOIDS relationships: ${created} created, ${skipped} skipped`);
+}
+
+/**
+ * Skip an opening during VOIDS creation. For BUILDING/FACILITY: remove from elements.
+ */
+function _skipOpeningVoids(css, opening, toRemove, structureClass, reason) {
+  const oid = opening.id || opening.element_key;
+  if (structureClass === 'BUILDING' || structureClass === 'FACILITY') {
+    toRemove.add(oid);
+  }
+  css.metadata.skippedOpenings.push({
+    id: oid,
+    type: (opening.type || '').toUpperCase(),
+    skipReason: reason,
+    phase: 'voids_creation'
+  });
 }
 
 
@@ -631,5 +1134,45 @@ function inferSlabs(css) {
 
   if (upgraded > 0) {
     console.log(`Assigned slabType to ${upgraded} slab elements`);
+  }
+}
+
+
+// ============================================================================
+// ENVELOPE FALLBACK (v3.2)
+// ============================================================================
+
+function checkEnvelopeFallback(css) {
+  if (!css.metadata) return;
+
+  const skippedOpenings = css.metadata.skippedOpenings || [];
+  const totalOpeningsOriginal = skippedOpenings.length + css.elements.filter(e => {
+    const t = (e.type || e.semantic_type || '').toUpperCase();
+    return t === 'DOOR' || t === 'WINDOW';
+  }).length;
+
+  // Calculate opening removal ratio
+  const openingsRemovedRatio = totalOpeningsOriginal > 0
+    ? skippedOpenings.length / totalOpeningsOriginal
+    : 0;
+
+  // Count remaining structural elements (walls, slabs, rooms)
+  const structuralTypes = new Set(['WALL', 'SLAB', 'SPACE', 'COLUMN']);
+  const structuralRemaining = css.elements.filter(e => {
+    const t = (e.type || e.semantic_type || '').toUpperCase();
+    return structuralTypes.has(t);
+  }).length;
+
+  // v3.2: Trigger ONLY when BOTH conditions are true
+  if (openingsRemovedRatio >= 0.5 && structuralRemaining < 4) {
+    console.log(`Envelope fallback triggered: ${(openingsRemovedRatio * 100).toFixed(0)}% openings removed, ${structuralRemaining} structural elements remaining`);
+
+    // Keep only walls and slabs, remove everything else
+    css.elements = css.elements.filter(e => {
+      const t = (e.type || e.semantic_type || '').toUpperCase();
+      return t === 'WALL' || t === 'SLAB';
+    });
+
+    css.metadata.envelopeFallback = true;
   }
 }
