@@ -137,13 +137,16 @@ The backend folder contains the most recent code or information that is is ident
 ## Project Status
 
 ### COMPLETED ✅
-See `completed.md` for full implementation history.
+See `COMPLETED.md` for full implementation history — all phases through end-to-end working pipeline are done.
 
-### Reach Goals
-1. Human-in-the-loop approval after generation so add fixes
+### Remaining / Reach Goals
+1. Human-in-the-loop approval after generation so user can add fixes
 2. Edit/retry failed renders
 3. Multi-level buildings with ramps and stairs
-4. MEP systems visualization
+4. MEP systems visualization (HVAC, plumbing, electrical)
 5. Complex curved geometries for tunnels
+6. Image/blueprint file support (.png, .jpg) via Bedrock vision
+7. Real-time collaboration / multi-user support
+8. Render versioning / history
 
 **References**: See DEPLOYMENT_GUIDE_IFC4.md and backend/schemas/builting-css-spec.md
