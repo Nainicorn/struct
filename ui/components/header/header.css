@@ -164,3 +164,25 @@ body[data-collapsed="true"] .__header-logo-text {
         padding: 7px;
     }
 }
+
+@media (max-width: 600px) {
+    .__header-left {
+        width: auto;
+        min-width: 0;
+        padding: 10px 12px;
+        border-right: none;
+    }
+
+    .__header-logo-text {
+        display: none;
+    }
+
+    .__header-center {
+        padding: 0 8px;
+        font-size: var(--font-size-sm);
+    }
+
+    .__header-right {
+        padding: 0 8px;
+    }
+}

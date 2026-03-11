@@ -5,6 +5,7 @@
     overflow: hidden;
     height: 100%;
     padding: 0;
+    position: relative;
 }
 
 .__details.__details-visible {
@@ -189,4 +190,54 @@
 .__details-files::-webkit-scrollbar-thumb:hover,
 .__details-description::-webkit-scrollbar-thumb:hover {
     background: var(--border-strong);
+}
+
+/* Close button for overlay mode */
+.__details-close {
+    display: none;
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    padding: 6px;
+    color: var(--text-secondary);
+    z-index: 5;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition);
+}
+
+.__details-close:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.__details-close svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Details backdrop for overlay mode */
+.__details-backdrop {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+}
+
+@media (max-width: 1100px) {
+    .__details-close {
+        display: flex;
+    }
+
+    .__details.__details-visible ~ .__details-backdrop {
+        display: block;
+    }
 }

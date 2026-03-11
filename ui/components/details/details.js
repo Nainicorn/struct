@@ -32,6 +32,18 @@ const details = {
             this.hide();
         });
 
+        // Close button (overlay mode)
+        const closeBtn = this.element.querySelector('.__details-close');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => this.hide());
+        }
+
+        // Backdrop click closes details
+        const backdrop = document.querySelector('.__details-backdrop');
+        if (backdrop) {
+            backdrop.addEventListener('click', () => this.hide());
+        }
+
         // Delete button
         const deleteBtn = this.element.querySelector('.__details-delete');
         if (deleteBtn) {
@@ -62,6 +74,12 @@ const details = {
 
         // Show the details panel
         this.element.classList.add('__details-visible');
+
+        // Show backdrop on smaller screens
+        const backdrop = document.querySelector('.__details-backdrop');
+        if (backdrop && window.innerWidth <= 1100) {
+            backdrop.style.display = 'block';
+        }
     },
 
     /**
@@ -70,6 +88,12 @@ const details = {
     hide() {
         this.element.classList.remove('__details-visible');
         this.currentRender = null;
+
+        // Hide backdrop
+        const backdrop = document.querySelector('.__details-backdrop');
+        if (backdrop) {
+            backdrop.style.display = 'none';
+        }
         // Clear all content when hiding
         const titleEl = this.element.querySelector('.__details-title');
         const descEl = this.element.querySelector('.__details-description');

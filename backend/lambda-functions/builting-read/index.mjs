@@ -2,9 +2,10 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 
-const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
+const dynamoClient = new DynamoDBClient({});
 const dynamo = DynamoDBDocumentClient.from(dynamoClient);
-const s3 = new S3Client({ region: 'us-east-1' });
+const s3 = new S3Client({});
+const RENDERS_TABLE = process.env.RENDERS_TABLE || 'builting-renders';
 
 export const handler = async (event) => {
   console.log('ReadMetadata input:', event);
@@ -14,7 +15,7 @@ export const handler = async (event) => {
     // Get render record from DynamoDB
     const result = await dynamo.send(
       new GetCommand({
-        TableName: 'builting-renders',
+        TableName: RENDERS_TABLE,
         Key: { user_id: userId, render_id: renderId }
       })
     );

@@ -1,15 +1,10 @@
 import aws from './aws.js';
-import { userStore } from './userStore.js';
 
 const uploadService = {
   async getPresignedUrls(fileNames, description = '') {
-    const user = userStore.getUser();
-    const userId = user?.id;
-    if (!userId) throw new Error('User not authenticated');
-
     return await aws.call('/api/uploads/presigned', {
       method: 'POST',
-      body: JSON.stringify({ fileNames, userId, description })
+      body: JSON.stringify({ fileNames, description })
     });
   },
 
@@ -33,11 +28,7 @@ const uploadService = {
   },
 
   async finalizeRender(renderId) {
-    const user = userStore.getUser();
-    const userId = user?.id;
-    if (!userId) throw new Error('User not authenticated');
-
-    return await aws.call(`/api/renders/${renderId}/finalize?userId=${encodeURIComponent(userId)}`, {
+    return await aws.call(`/api/renders/${renderId}/finalize`, {
       method: 'POST'
     });
   }

@@ -22,8 +22,8 @@ The backend folder contains the most recent code or information that is is ident
 ## Core Flow
 
 - User logins
-    - DynamoDB has test user listed in the "builting-users" table
-    - user is authorized via cookies in frontend and through API gateway "builting-api" and Lambda logic in "builting-main"
+    - DynamoDB has test user listed in the "builting-users" table (password is scrypt-hashed)
+    - user is authorized via HMAC-signed tokens (userId.timestamp.hmac) sent as Authorization Bearer header; centralized auth gate in builting-main
 
 - User has access to their home page which contains header, renderbox, sidebar, etc.
     - User can click logout button in the header and be redirected back to the login screen
@@ -52,8 +52,8 @@ The backend folder contains the most recent code or information that is is ident
    - framework
       - messages.js: Message/event handling system
    - services
-      - authService: Login/signup and session management (login, signup, isAuthenticated, logout)
-      - aws: HTTP wrapper for authenticated API calls to API Gateway with cookie credentials
+      - authService: Login/signup and session management; stores token in cookie, user in userStore
+      - aws: HTTP wrapper for authenticated API calls to API Gateway with Bearer token auth
       - cookieService: Low-level cookie operations (set, get, delete) for session persistence
       - rendersService: Fetch user's renders, get render details, download IFC, delete renders
       - uploadService: Request presigned S3 URLs and upload files/descriptions directly to S3
@@ -66,32 +66,27 @@ The backend folder contains the most recent code or information that is is ident
 
     - dynamoDB builting-users table holds each users information
       - id (String), created_at, email, name, password
-      - for testing -> id: user-1, email: nkoujala@gmail.com, name: Sreenaina, password: Bujji1125$
+      - for testing -> id: user-1, email: nkoujala@gmail.com, name: Sreenaina, password: scrypt-hashed (plaintext: Bujji1125$)
 
-    - lambda functions (in execution order)
-      * all lambda functions use builting-execution role
-      * builting-orchestrator-trigger has ENV variable state-machine ARN
-      * builting-main has ENV variable STATE_MACHINE_ARN
-      - builting-main (node.js20 and arm64): API gateway router for auth, user data, renders, presigned URLs, and finalize endpoint
-      - builting-orchestrator-trigger (node.js20 and arm64): SNS trigger on S3 file upload; checks finalized flag, deduplicates and starts Step Function
-      - builting-read-metadata (node.js20 and arm64): retrieves render from DynamoDB and lists uploaded files from S3
-      - builting-bedrock-ifc (node.js20 and arm64): downloads files from S3, extracts building specs as CSS v1.0 via Bedrock + VentSim/DXF/XLSX/DOCX parsers + multi-pass Bedrock extraction + enrichment; esbuild-bundled (5.7MB)
-      - builting-css-pipeline (node.js20 and arm64): consolidated Lambda that runs ValidateCSS → RepairCSS → NormalizeGeometry → MergeWalls → InferOpenings → InferSlabs
-      - builting-json-to-ifc (python3.11 container): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, mesh fallback (IfcTriangulatedFaceSet), viewer compatibility scoring
-      - builting-store-ifc (node.js20 and arm64): updates DynamoDB with IFC path, elementCounts, outputMode, cssHash
+    - lambda functions (pipeline order: router → read → extract → transform → generate → store)
+      * all lambda functions use builting-role (single shared role with 5 custom least-privilege policies: builting-logs, builting-dynamodb, builting-s3, builting-stepfunctions, builting-bedrock)
+      * builting-router has ENV variables: STATE_MACHINE_ARN, SESSION_SECRET, ALLOWED_ORIGINS
+      - builting-router (node.js20 and arm64): API gateway router for auth, user data, renders, presigned URLs, and finalize endpoint (starts Step Function directly)
+      - builting-read (node.js20 and arm64): retrieves render from DynamoDB and lists uploaded files from S3
+      - builting-extract (node.js20 and arm64): downloads files from S3, extracts building specs as CSS v1.0 via Bedrock + VentSim/DXF/XLSX/DOCX parsers + multi-pass Bedrock extraction + enrichment; esbuild-bundled (5.7MB)
+      - builting-transform (node.js20 and arm64): consolidated Lambda that runs ValidateCSS → RepairCSS → NormalizeGeometry → MergeWalls → InferOpenings → InferSlabs
+      - builting-generate (python3.11 container): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, mesh fallback (IfcTriangulatedFaceSet), viewer compatibility scoring
+      - builting-store (node.js20 and arm64): updates DynamoDB with IFC path, elementCounts, outputMode, cssHash
 
     - Step Function
-      - builting-render-state-machine
-
-    - SNS topic
-      - builting-render-triggers
+      - builting-state-machine
 
     - IAM role
-      - builting-lambda-execution-role
-         - AmazonBedrockFullAccess, AmazonDynamoDBFullAccess, AmazonS3FullAccess, CloudWatchLogsFullAccess
-   
+      - builting-role (single role for all Lambdas)
+         - Custom policies: builting-logs, builting-dynamodb, builting-s3, builting-stepfunctions, builting-bedrock
+
    - ECR
-      - builting-json-to-ifc
+      - builting-generate
 
    - API gateway
       - builting-api
@@ -112,6 +107,9 @@ The backend folder contains the most recent code or information that is is ident
                   /download
                      GET
                      OPTIONS
+                  /finalize
+                     POST
+                     OPTIONS
             /uploads
                /presigned
                   OPTIONS
@@ -123,12 +121,12 @@ The backend folder contains the most recent code or information that is is ident
                   OPTIONS
    
    - Cloudwatch log groups
-      - builting-main
-      - builting-bedrock-ifc
-      - builting-read-metadata
-      - builting-css-pipeline
-      - builting-store-ifc
-      - builting-json-to-ifc
+      - /aws/lambda/builting-router
+      - /aws/lambda/builting-read
+      - /aws/lambda/builting-extract
+      - /aws/lambda/builting-transform
+      - /aws/lambda/builting-generate
+      - /aws/lambda/builting-store
 
    - S3 buckets
       - builting-data (raw data user uploads for each user render)
@@ -147,16 +145,19 @@ See `completed.md` for full implementation history.
 - CSS Pipeline Overhaul Phase 1+4 (2026-02-28): CSS v1.0 schema, upload finalization, confidence-based IFC generation, builting-css-pipeline Lambda, simplified Step Function
 - VentSim Geometry Bug Fixes (2026-02-28): fixed extrusion direction, refDirection, coordinate normalization, header parsing → tunnel now renders as correct flat network ✅
 - IFC Placement/Storey/Validator Overhaul (2026-03-02): fixed placement chain (Building→Site), storey elevation logic, conditional Z subtraction with `placementZIsAbsolute` flag, axis/refDirection sanitization, IfcWall (not StandardCase), validator excludes spatial containers, improved bbox with profile bounds, 8 CSS v1.0 regression tests ✅
+- Backend Hardening Phase 1 (2026-03-10): IAM consolidation (builting-role), scrypt password hashing, HMAC-signed tokens, centralized auth gate, Bearer token auth (cross-origin), upload validation (extension allowlist, path traversal checks), self-only user access ✅
+- Backend Hardening Phase 2 (2026-03-10): render status model (uploading→processing→completed/failed), finalize idempotency via DynamoDB conditional update, STATE_MACHINE_ARN fail-fast ✅
+- AWS Cleanup (2026-03-10): removed builting-orchestrator-trigger Lambda + SNS topic, renamed all Lambdas (router/read/extract/transform/generate/store), renamed state machine to builting-state-machine, renamed ECR repo to builting-generate, updated API Gateway integration, all zips rebuilt ✅
+- Backend Hardening Phase 3 (2026-03-10): env var portability — removed hardcoded regions, replaced bucket/table names with `process.env.X || 'default'`, API Gateway URL to config constant, all zips rebuilt ✅
 
-### TO-DO: Manual AWS Setup Required
-1. **Update `builting-bedrock-ifc`** → upload `builting-bedrock-ifc.zip` (1.6MB, esbuild-bundled)
-2. **Update `builting-css-pipeline`** → upload `builting-css-pipeline.zip` (6.2KB)
-3. **Rebuild & push Docker image** for `builting-json-to-ifc` (mesh fallback + viewer validation)
-4. **Update `builting-store-ifc`** → `builting-store-ifc.zip` (from previous session)
-5. **Update `builting-main`** → `builting-main.zip` (from previous session)
-6. **Update `builting-orchestrator-trigger`** → `builting-orchestrator-trigger.zip` (from previous session)
-7. **Update Step Function** `builting-render-state-machine` with `backend/step-function/current_json.json`
-8. Test end-to-end flow
+### TO-DO: Phase 4 — AWS Console Setup (March 19 deadline)
+
+1. Upload Lambda zips to AWS console (builting-router, builting-read, builting-extract, builting-store, builting-transform)
+2. Deploy new `builting-generate` image: Lambda console → Deploy new image → select `latest`
+3. Set Lambda timeouts (30s router/read/store, 60s transform, 300s extract/generate)
+4. Set API Gateway throttle (100/50 req/s)
+5. Verify S3 block public access + encryption
+6. Test end-to-end flow
 
 ### Reach Goals
 1. Human-in-the-loop approval after generation so add fixes
@@ -165,4 +166,4 @@ See `completed.md` for full implementation history.
 4. MEP systems visualization
 5. Complex curved geometries for tunnels
 
-**References**: See DEPLOYMENT_GUIDE_IFC4.md and backend/schemas/css-v1.0.md
+**References**: See DEPLOYMENT_GUIDE_IFC4.md and backend/schemas/builting-css-spec.md

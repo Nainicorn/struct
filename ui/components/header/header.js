@@ -80,6 +80,7 @@ const header = {
         const $body = document.body;
         const isCollapsed = $body.getAttribute('data-collapsed') === 'true';
         $body.setAttribute('data-collapsed', isCollapsed ? 'false' : 'true');
+        document.dispatchEvent(new CustomEvent('sidebarToggled'));
     },
 
     _handleLogout() {

@@ -4,17 +4,18 @@ import { GetObjectCommand, S3Client, ListObjectsV2Command, DeleteObjectCommand }
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
+const dynamoClient = new DynamoDBClient({});
 const dynamo = DynamoDBDocumentClient.from(dynamoClient);
-const s3 = new S3Client({ region: 'us-east-1' });
-const sfn = new SFNClient({ region: 'us-east-1' });
+const s3 = new S3Client({});
+const sfn = new SFNClient({});
 
-const TableName = 'builting-renders';
+const TableName = process.env.RENDERS_TABLE || 'builting-renders';
+const DATA_BUCKET = process.env.DATA_BUCKET || 'builting-data';
+const IFC_BUCKET = process.env.IFC_BUCKET || 'builting-ifc';
 
 const renders = {
   handle: async (event) => {
-    const userId = event.queryStringParameters?.userId;
-    if (!userId) return { error: 'Auth required', statusCode: 401 };
+    const userId = event._authenticatedUserId;
 
     const method = event.requestContext?.http?.method || event.httpMethod || 'GET';
     const path = event.path || event.rawPath || '';
@@ -59,10 +60,10 @@ const renders = {
     const item = {
       user_id: userId,
       render_id: renderId,
-      status: 'pending',
+      status: 'uploading',
       created_at: Math.floor(Date.now() / 1000),
       source_files: fileNames,
-      s3_path: `s3://builting-data/uploads/${userId}/${renderId}`,
+      s3_path: `s3://${DATA_BUCKET}/uploads/${userId}/${renderId}`,
       description: description || ''
     };
 
@@ -119,8 +120,8 @@ const renders = {
     }
 
     // Fetch file from S3 and return as base64
-    const key = `${render.ifc_s3_path.replace('s3://builting-ifc/', '')}`;
-    const response = await s3.send(new GetObjectCommand({ Bucket: 'builting-ifc', Key: key }));
+    const key = `${render.ifc_s3_path.replace(`s3://${IFC_BUCKET}/`, '')}`;
+    const response = await s3.send(new GetObjectCommand({ Bucket: IFC_BUCKET, Key: key }));
 
     const buffer = await response.Body.transformToByteArray();
     const base64 = Buffer.from(buffer).toString('base64');
@@ -135,20 +136,27 @@ const renders = {
   finalizeRender: async (userId, renderId) => {
     console.log('Finalizing render:', { userId, renderId });
 
+    // Fail fast if STATE_MACHINE_ARN is not configured
+    const stateMachineArn = process.env.STATE_MACHINE_ARN;
+    if (!stateMachineArn) {
+      console.error('STATE_MACHINE_ARN not set');
+      return { error: 'Pipeline not configured', statusCode: 500 };
+    }
+
     // Check if render exists
     const render = await renders.getRender(userId, renderId);
     if (render.error) return render;
 
-    // Idempotent: if already finalized, return success
-    if (render.upload_finalized) {
-      console.log(`Render ${renderId} already finalized`);
-      return { message: 'Render already finalized', renderId };
+    // Idempotent: if already past uploading, return deterministic response
+    if (render.status !== 'uploading') {
+      console.log(`Render ${renderId} already finalized (status: ${render.status})`);
+      return { message: 'Render already finalized', renderId, status: render.status };
     }
 
     // Reject if zero files uploaded — list S3 objects under this render
     const prefix = `uploads/${userId}/${renderId}/`;
     const listResult = await s3.send(new ListObjectsV2Command({
-      Bucket: 'builting-data',
+      Bucket: DATA_BUCKET,
       Prefix: prefix
     }));
 
@@ -157,36 +165,43 @@ const renders = {
       return { error: 'No files uploaded. Upload at least one file before finalizing.', statusCode: 400 };
     }
 
-    // Store file manifest (truth set) and set finalized flag
+    // Store file manifest and transition status uploading → processing (conditional)
     const fileManifest = files.map(f => ({
       key: f.Key,
       name: f.Key.split('/').pop(),
       size: f.Size
     }));
 
-    await dynamo.send(new UpdateCommand({
-      TableName,
-      Key: { user_id: userId, render_id: renderId },
-      UpdateExpression: 'SET upload_finalized = :true, fileManifest = :manifest, orchestration_started = :true',
-      ExpressionAttributeValues: {
-        ':true': true,
-        ':manifest': fileManifest
+    try {
+      await dynamo.send(new UpdateCommand({
+        TableName,
+        Key: { user_id: userId, render_id: renderId },
+        UpdateExpression: 'SET #status = :processing, upload_finalized = :true, fileManifest = :manifest',
+        ConditionExpression: '#status = :uploading',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':processing': 'processing',
+          ':uploading': 'uploading',
+          ':true': true,
+          ':manifest': fileManifest
+        }
+      }));
+    } catch (err) {
+      if (err.name === 'ConditionalCheckFailedException') {
+        console.log(`Render ${renderId} status changed concurrently, already finalized`);
+        return { message: 'Render already finalized', renderId };
       }
-    }));
+      throw err;
+    }
     console.log(`Render ${renderId} finalized with ${fileManifest.length} files`);
 
-    // Start Step Function directly
-    const stateMachineArn = process.env.STATE_MACHINE_ARN;
-    if (stateMachineArn) {
-      const executionResult = await sfn.send(new StartExecutionCommand({
-        stateMachineArn,
-        input: JSON.stringify({ userId, renderId, bucket: 'builting-data' }),
-        name: `render-${renderId}-${Date.now()}`
-      }));
-      console.log(`Step Function started: ${executionResult.executionArn}`);
-    } else {
-      console.warn('STATE_MACHINE_ARN not set, Step Function not started');
-    }
+    // Start Step Function
+    const executionResult = await sfn.send(new StartExecutionCommand({
+      stateMachineArn,
+      input: JSON.stringify({ userId, renderId, bucket: DATA_BUCKET }),
+      name: `render-${renderId}-${Date.now()}`
+    }));
+    console.log(`Step Function started: ${executionResult.executionArn}`);
 
     return { message: 'Render finalized and pipeline started', renderId, fileCount: fileManifest.length };
   },
@@ -203,15 +218,15 @@ const renders = {
 
       // Delete source files from builting-data bucket
       const sourceFolder = `uploads/${userId}/${renderId}/`;
-      await deleteS3Folder('builting-data', sourceFolder);
+      await deleteS3Folder(DATA_BUCKET, sourceFolder);
       console.log('Deleted source files from S3');
 
       // Delete IFC file from builting-ifc bucket (if exists)
       if (render.ifc_s3_path) {
-        const ifcKey = render.ifc_s3_path.replace('s3://builting-ifc/', '');
+        const ifcKey = render.ifc_s3_path.replace(`s3://${IFC_BUCKET}/`, '');
         await s3.send(
           new DeleteObjectCommand({
-            Bucket: 'builting-ifc',
+            Bucket: IFC_BUCKET,
             Key: ifcKey
           })
         );

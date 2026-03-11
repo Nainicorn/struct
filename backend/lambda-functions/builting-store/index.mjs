@@ -1,8 +1,10 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 
-const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
+const dynamoClient = new DynamoDBClient({});
 const dynamo = DynamoDBDocumentClient.from(dynamoClient);
+const RENDERS_TABLE = process.env.RENDERS_TABLE || 'builting-renders';
+const IFC_BUCKET = process.env.IFC_BUCKET || 'builting-ifc';
 
 export const handler = async (event) => {
   console.log('StoreIFC input:', JSON.stringify(event, null, 2));
@@ -18,7 +20,7 @@ export const handler = async (event) => {
 
       await dynamo.send(
         new UpdateCommand({
-          TableName: 'builting-renders',
+          TableName: RENDERS_TABLE,
           Key: { user_id: userId, render_id: renderId },
           UpdateExpression: 'SET #status = :status, error_message = :err',
           ExpressionAttributeNames: { '#status': 'status' },
@@ -31,7 +33,7 @@ export const handler = async (event) => {
 
     // IFC is already saved to S3 by the IFC generator Lambda.
     // This Lambda updates DynamoDB with the path and metadata.
-    const ifc_s3_path = ifcS3Path || `s3://builting-ifc/${userId}/${renderId}/model.ifc`;
+    const ifc_s3_path = ifcS3Path || `s3://${IFC_BUCKET}/${userId}/${renderId}/model.ifc`;
 
     console.log(`Recording IFC path: ${ifc_s3_path}`);
 
@@ -70,7 +72,7 @@ export const handler = async (event) => {
 
     await dynamo.send(
       new UpdateCommand({
-        TableName: 'builting-renders',
+        TableName: RENDERS_TABLE,
         Key: { user_id: userId, render_id: renderId },
         UpdateExpression: updateExpr,
         ExpressionAttributeNames: exprNames,

@@ -1,41 +1,24 @@
 // Users Service - Fetch user data
 import aws from './aws.js';
-import cookieService from './cookieService.js';
+import { userStore } from './userStore.js';
 
 const usersService = {
-    // Get current user from cookie and fetch full user data
+    // Get current user — check userStore/localStorage first, then validate via backend
     async getCurrentUser() {
-        const userCookie = cookieService.get('builting-user');
-        if (!userCookie) {
-            throw new Error('No user logged in');
-        }
+        // Try in-memory or localStorage first
+        const cached = userStore.getUser();
+        if (cached?.id) return cached;
 
+        // No cached user — validate session via backend cookie
         try {
-            const user = JSON.parse(userCookie);
-            // Optionally fetch full user data from backend using stored identifier
-            const userData = await aws.call(`/api/users/${user.id || user.email}`, {
-                method: 'GET'
-            });
-            return userData;
-        } catch (error) {
-            // If detailed fetch fails, return what we have from cookie
-            try {
-                return JSON.parse(userCookie);
-            } catch {
-                throw new Error('Failed to parse user data');
+            const user = await aws.call('/api/auth', { method: 'GET' });
+            if (user?.id) {
+                userStore.setUser(user);
+                return user;
             }
-        }
-    },
-
-    // Get all users (for admin/sidebar purposes)
-    async getAll() {
-        try {
-            const response = await aws.call('/api/users', {
-                method: 'GET'
-            });
-            return response.users || [];
+            throw new Error('Not authenticated');
         } catch (error) {
-            throw new Error(error.message || 'Failed to fetch users');
+            throw new Error('Not authenticated');
         }
     },
 

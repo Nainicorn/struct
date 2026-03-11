@@ -1,10 +1,10 @@
 {
-  "Comment": "CSS Pipeline: ReadMetadata → Extract (saves CSS to S3) → CSSPipeline (reads/writes CSS via S3) → GenerateIFC (reads CSS from S3) → StoreIFC. Catch-all error handler writes 'failed' status to DynamoDB.",
+  "Comment": "Pipeline: Read → Extract → Transform → Generate → Store. Catch-all error handler writes 'failed' status to DynamoDB.",
   "StartAt": "ReadRenderMetadata",
   "States": {
     "ReadRenderMetadata": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-read-metadata",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-read",
       "ResultPath": "$.metadata",
       "Next": "ExtractBuildingSpec",
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
@@ -13,7 +13,7 @@
 
     "ExtractBuildingSpec": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-bedrock-ifc",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-extract",
       "Parameters": {
         "renderId.$": "$.renderId",
         "userId.$": "$.userId",
@@ -29,7 +29,7 @@
 
     "CSSPipeline": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-css-pipeline",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-transform",
       "Parameters": {
         "cssS3Key.$": "$.specResult.cssS3Key",
         "userId.$": "$.userId",
@@ -44,7 +44,7 @@
 
     "GenerateIFC": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-json-to-ifc",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-generate",
       "Parameters": {
         "cssS3Key.$": "$.pipelineResult.cssS3Key",
         "bucket.$": "$.bucket",
@@ -59,7 +59,7 @@
 
     "StoreIFC": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store-ifc",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store",
       "Parameters": {
         "renderId.$": "$.renderId",
         "userId.$": "$.userId",
@@ -76,7 +76,7 @@
 
     "HandleFailure": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store-ifc",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store",
       "Parameters": {
         "failureMode": true,
         "renderId.$": "$.renderId",

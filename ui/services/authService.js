@@ -1,6 +1,7 @@
 // Authentication Service - Handle login and validation
 import aws from './aws.js';
 import cookieService from './cookieService.js';
+import { userStore } from './userStore.js';
 
 const authenticateService = {
     // Login with credentials and set cookie
@@ -11,9 +12,9 @@ const authenticateService = {
                 body: JSON.stringify({ action: 'login', email, password })
             });
 
-            if (response && response.user) {
-                // Set "builting-user" cookie with user data or token
-                cookieService.set('builting-user', JSON.stringify(response.user), 60 * 24); // 24 hours
+            if (response && response.user && response.token) {
+                cookieService.set('builting-user', response.token, 60 * 24); // 24 hours
+                userStore.setUser(response.user);
                 return response.user;
             } else {
                 throw new Error('Invalid response from server');
@@ -30,9 +31,9 @@ const authenticateService = {
                 body: JSON.stringify({ action: 'signup', email, password, name })
             });
 
-            if (response && response.user) {
-                // Set "builting-user" cookie with user data or token
-                cookieService.set('builting-user', JSON.stringify(response.user), 60 * 24); // 24 hours
+            if (response && response.user && response.token) {
+                cookieService.set('builting-user', response.token, 60 * 24); // 24 hours
+                userStore.setUser(response.user);
                 return response.user;
             } else {
                 throw new Error('Invalid response from server');
@@ -50,6 +51,7 @@ const authenticateService = {
     // Logout - clear cookie and redirect
     logout() {
         cookieService.delete('builting-user');
+        userStore.clear();
         window.location.href = '/';
     }
 };

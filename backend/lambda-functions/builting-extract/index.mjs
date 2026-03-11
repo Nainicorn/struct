@@ -6,8 +6,8 @@ import { extractXlsxText } from './parsers/xlsxParser.mjs';
 import { extractDocxText } from './parsers/docxParser.mjs';
 import { parseDxfToCSS } from './parsers/dxfParser.mjs';
 
-const bedrock = new BedrockRuntimeClient({ region: 'us-east-1' });
-const s3 = new S3Client({ region: 'us-east-1' });
+const bedrock = new BedrockRuntimeClient({});
+const s3 = new S3Client({});
 
 // ============================================================================
 // UTILITY: Save CSS to S3 (avoids Step Function 256KB state limit)

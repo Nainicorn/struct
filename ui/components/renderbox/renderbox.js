@@ -477,17 +477,24 @@ const renderbox = {
             // Show loading state
             this._showLoadingState('Uploading files...');
 
-            // Get presigned URLs (now includes description parameter)
-            const fileNames = this.stagedFiles.map(f => f.name);
+            // Build file list — if text-only, create a .txt file from the description
+            const filesToUpload = [...this.stagedFiles];
+            if (filesToUpload.length === 0 && description) {
+                const descBlob = new Blob([description], { type: 'text/plain' });
+                const descFile = new File([descBlob], 'input.txt', { type: 'text/plain' });
+                filesToUpload.push(descFile);
+            }
+
+            const fileNames = filesToUpload.map(f => f.name);
             const { uploadUrls, renderId, descriptionUrl } =
                 await uploadService.getPresignedUrls(fileNames, description);
 
             // Upload files
-            for (const file of this.stagedFiles) {
+            for (const file of filesToUpload) {
                 await uploadService.uploadToS3(uploadUrls[file.name], file);
             }
 
-            // Upload description.txt if provided
+            // Upload description.txt if provided (separate from input files)
             if (description && descriptionUrl) {
                 await uploadService.uploadDescription(descriptionUrl, description);
             }

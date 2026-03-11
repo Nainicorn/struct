@@ -24,6 +24,8 @@ except Exception as e:
     raise RuntimeError(f"IfcOpenShell not available in runtime: {e}")
 
 s3_client = boto3.client('s3')
+DATA_BUCKET = os.environ.get('DATA_BUCKET', 'builting-data')
+IFC_BUCKET = os.environ.get('IFC_BUCKET', 'builting-ifc')
 
 
 # ============================================================================
@@ -883,7 +885,7 @@ def check_cache(css_hash):
     """Check if a cached IFC exists for this CSS hash."""
     cache_key = f'cache/{css_hash}/model.ifc'
     try:
-        response = s3_client.get_object(Bucket='builting-ifc', Key=cache_key)
+        response = s3_client.get_object(Bucket=IFC_BUCKET, Key=cache_key)
         ifc_content = response['Body'].read().decode('utf-8')
         print(f"Cache HIT for hash {css_hash[:12]}...")
         return ifc_content
@@ -895,7 +897,7 @@ def store_cache(css_hash, ifc_content):
     """Store generated IFC in cache."""
     cache_key = f'cache/{css_hash}/model.ifc'
     try:
-        s3_client.put_object(Bucket='builting-ifc', Key=cache_key, Body=ifc_content.encode('utf-8'), ContentType='text/plain')
+        s3_client.put_object(Bucket=IFC_BUCKET, Key=cache_key, Body=ifc_content.encode('utf-8'), ContentType='text/plain')
         print(f"Cached IFC at {cache_key}")
     except Exception as e:
         print(f"Warning: Failed to cache IFC: {e}")
@@ -1205,7 +1207,7 @@ def validate_ifc(ifc_content, user_id, render_id):
     }
     try:
         report_key = f'uploads/{user_id}/{render_id}/reports/validation_report.json'
-        s3_client.put_object(Bucket='builting-data', Key=report_key,
+        s3_client.put_object(Bucket=DATA_BUCKET, Key=report_key,
                              Body=json.dumps(report, indent=2).encode('utf-8'),
                              ContentType='application/json')
         print(f"Validation report stored: {report_key}")
@@ -1228,7 +1230,7 @@ def handler(event, context):
 
     # Load CSS from S3 (avoids Step Function 256KB state limit)
     css_s3_key = event.get('cssS3Key')
-    data_bucket = event.get('bucket', 'builting-data')
+    data_bucket = event.get('bucket', DATA_BUCKET)
     css = event.get('css')  # fallback for direct invocation
 
     if css_s3_key and not css:
@@ -1279,7 +1281,7 @@ def handler(event, context):
         print(f'PROXY_ONLY regeneration: valid={ifc_valid}')
 
     # Save IFC to render path in S3
-    bucket = 'builting-ifc'
+    bucket = IFC_BUCKET
     s3_key = f'{user_id}/{render_id}/model.ifc'
 
     try:

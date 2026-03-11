@@ -6,32 +6,66 @@ import renderbox from '../renderbox/renderbox';
 import details from '../details/details';
 
 const layout = {
-    // Initialize the layout component
+    _userCollapsed: false,
+    _autoCollapsed: false,
+
     async init() {
         this._render();
         await this._loadData();
         this._bindListeners();
     },
 
-    // Render HTML using Handlebars template
     _render() {
         const $body = document.body;
         let html = template({ main: true });
         $body.innerHTML = html;
     },
 
-    // Load data and initialize child components
     async _loadData() {
-        // Initialize all child components
         await header.init();
         await sidebar.init();
         await renderbox.init();
         await details.init();
     },
 
-    // Bind listeners if needed
     _bindListeners() {
-        // Any global layout listeners would go here
+        const $backdrop = document.querySelector('.__sidebar-backdrop');
+        if ($backdrop) {
+            $backdrop.addEventListener('click', () => {
+                this._userCollapsed = true;
+                document.body.setAttribute('data-collapsed', 'true');
+            });
+        }
+
+        // Listen for user-initiated toggle from header
+        document.addEventListener('sidebarToggled', () => {
+            const isCollapsed = document.body.getAttribute('data-collapsed') === 'true';
+            this._userCollapsed = isCollapsed;
+            this._autoCollapsed = false;
+        });
+
+        this._syncCollapsedState();
+
+        let resizeTimer;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => this._syncCollapsedState(), 100);
+        });
+    },
+
+    _syncCollapsedState() {
+        const isNarrow = window.innerWidth <= 900;
+
+        if (isNarrow && !this._autoCollapsed) {
+            this._autoCollapsed = true;
+            document.body.setAttribute('data-collapsed', 'true');
+        } else if (!isNarrow && this._autoCollapsed) {
+            this._autoCollapsed = false;
+            // Restore to user preference — only reopen if user didn't manually collapse
+            if (!this._userCollapsed) {
+                document.body.setAttribute('data-collapsed', 'false');
+            }
+        }
     }
 };
 

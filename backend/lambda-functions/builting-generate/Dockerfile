@@ -4,7 +4,9 @@ RUN yum -y update && \
     yum -y install tar gzip bzip2 ca-certificates && \
     yum clean all
 
-RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-aarch64/latest | \
+ARG TARGETARCH
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "64") && \
+    curl -Ls "https://micro.mamba.pm/api/micromamba/linux-${ARCH}/latest" | \
     tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
 
 ENV MAMBA_ROOT_PREFIX=/opt/conda

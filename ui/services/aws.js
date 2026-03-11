@@ -1,20 +1,29 @@
 // AWS Service - Route to correct API endpoint
+import cookieService from './cookieService.js';
+
+const API_BASE_URL = "https://0mc6awox4i.execute-api.us-east-1.amazonaws.com/dev";
+
 const aws = {
-  // Return the base API URL depending on environment
   getBaseUrl() {
-    // Always use API Gateway until custom domain is set up
-    return "https://0mc6awox4i.execute-api.us-east-1.amazonaws.com/dev";
+    return API_BASE_URL;
   },
 
   // Make authenticated API calls
   async call(endpoint, options = {}) {
     const url = `${this.getBaseUrl()}${endpoint}`;
+    const headers = {
+      "Content-Type": "application/json",
+      ...options.headers,
+    };
+
+    // Send auth token via Authorization header (cross-origin cookies won't work)
+    const token = cookieService.get('builting-user');
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
     const response = await fetch(url, {
-      credentials: 'include', // Send cookies with cross-origin requests
-      headers: {
-        "Content-Type": "application/json",
-        ...options.headers,
-      },
+      headers,
       ...options,
     });
 

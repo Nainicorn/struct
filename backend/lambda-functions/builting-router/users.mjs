@@ -1,20 +1,21 @@
 import { dynamo, GetCommand } from './db.mjs';
 
-const TableName = 'builting-users';
+const TableName = process.env.USERS_TABLE || 'builting-users';
 
 const users = {
   handle: async (event) => {
-    // Handle both REST API (httpMethod) and HTTP API (requestContext.http.method) formats
     const method = event.requestContext?.http?.method || event.httpMethod || '';
 
     if (method === 'GET') {
-      const userId = event.pathParameters?.id;
+      const requestedId = event.pathParameters?.id;
+      if (!requestedId) return { error: 'Missing user id', statusCode: 400 };
 
-      if (!userId) {
-        return { error: 'Missing user id', statusCode: 400 };
+      // Users can only fetch their own record
+      if (requestedId !== event._authenticatedUserId) {
+        return { error: 'Not authenticated', statusCode: 401 };
       }
 
-      return await users.getUser(userId);
+      return await users.getUser(requestedId);
     }
 
     return { error: 'Invalid method', statusCode: 400 };
