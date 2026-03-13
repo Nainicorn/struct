@@ -9,9 +9,64 @@ import { parseDxfToCSS } from './parsers/dxfParser.mjs';
 const bedrock = new BedrockRuntimeClient({});
 const s3 = new S3Client({});
 
+// Build fingerprint — logged at cold start, embedded in CSS metadata
+const EXTRACT_VERSION = process.env.EXTRACT_VERSION || 'dev';
+const BUILD_TIMESTAMP = process.env.BUILD_TIMESTAMP || null;
+console.log(`builting-extract version=${EXTRACT_VERSION} built=${BUILD_TIMESTAMP || 'n/a'}`);
+
 // ============================================================================
 // UTILITY: Save CSS to S3 (avoids Step Function 256KB state limit)
 // ============================================================================
+
+function buildTracingReport(css, processedFiles) {
+  const byFile = {};
+  const bySource = { LLM: 0, VSM: 0, DEFAULT: 0, DXF: 0 };
+  const byRole = { NARRATIVE: 0, SCHEDULE: 0, SIMULATION: 0, INFERRED: 0, DEFAULT: 0 };
+  const confidence = { high: 0, medium: 0, low: 0 };
+
+  for (const el of css.elements || []) {
+    const src = el.source || 'DEFAULT';
+    const role = el.sourceRole || 'DEFAULT';
+    const conf = el.confidence ?? 0.5;
+    const sf = el.sourceFile || null;
+
+    bySource[src] = (bySource[src] || 0) + 1;
+    byRole[role] = (byRole[role] || 0) + 1;
+    if (conf >= 0.85) confidence.high++;
+    else if (conf >= 0.65) confidence.medium++;
+    else confidence.low++;
+
+    if (sf) {
+      if (!byFile[sf]) byFile[sf] = { count: 0, types: {} };
+      byFile[sf].count++;
+      byFile[sf].types[el.type] = (byFile[sf].types[el.type] || 0) + 1;
+    }
+  }
+
+  for (const pf of (processedFiles || [])) {
+    if (pf.name && byFile[pf.name]) byFile[pf.name].sourceRole = pf.sourceRole || 'UNKNOWN';
+  }
+
+  // v6: Extended file-level attribution
+  const parsedFiles = (processedFiles || []).map(f => ({
+    name: f.name,
+    role: f.sourceRole || 'UNKNOWN',
+    size: f.content?.length || 0,
+    type: f.type || 'text'
+  }));
+  const geometryContributors = [...new Set((css.elements || []).filter(e => e.sourceFile).map(e => e.sourceFile))];
+  const metadataContributors = (processedFiles || []).filter(f => f.enrichedFields).map(f => f.name);
+  const ignoredFiles = (processedFiles || []).filter(f => !f.content || f.content.length < 50).map(f => f.name);
+
+  return {
+    byFile, bySource, byRole, confidence,
+    totalElements: (css.elements || []).length,
+    parsedFiles,
+    geometryContributors,
+    metadataContributors,
+    ignoredFiles
+  };
+}
 
 async function saveCSSToS3(bucket, userId, renderId, css) {
   const key = `uploads/${userId}/${renderId}/css/css_raw.json`;
@@ -76,6 +131,11 @@ async function downloadFile(bucket, key) {
       };
     } else if (ext === 'dxf') {
       return { content: await response.Body.transformToString(), type: 'text', contentType: 'text/dxf' };
+    } else if (['png', 'jpg', 'jpeg', 'tiff', 'tif'].includes(ext)) {
+      // v6: Image file support — return raw buffer for Bedrock vision
+      const buffer = Buffer.from(await response.Body.transformToByteArray());
+      const mediaTypeMap = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', tiff: 'image/tiff', tif: 'image/tiff' };
+      return { content: null, type: 'image', buffer, mediaType: mediaTypeMap[ext] || 'image/png' };
     } else {
       return { content: null, type: 'unsupported', reason: `Unsupported format: ${ext}` };
     }
@@ -214,16 +274,36 @@ function parseVentSimToCSS(content, sourceFileName) {
       endChainage_m: Math.max(maxX - minX, maxY - minY, 1)
     }];
 
+    // ── Branch classification ──
+    // Classify branches into structural (TUNNEL_SEGMENT) vs airway (DUCT) based
+    // on cross-sectional area. Larger branches form the structural envelope;
+    // smaller ones are ventilation airways with thinner, semi-transparent look.
+    const areas = branches.map(b => b.area).filter(a => a > 0).sort((a, b) => a - b);
+    const medianArea = areas.length > 0 ? areas[Math.floor(areas.length / 2)] : 1;
+    const structuralThreshold = medianArea * 0.6; // branches >= 60% of median = structural
+    const avgStructW = (() => {
+      const structs = branches.filter(b => b.area >= structuralThreshold);
+      return structs.length > 0 ? structs.reduce((s, b) => s + b.width, 0) / structs.length : 4;
+    })();
+    const avgStructH = (() => {
+      const structs = branches.filter(b => b.area >= structuralThreshold);
+      return structs.length > 0 ? structs.reduce((s, b) => s + b.height, 0) / structs.length : 3;
+    })();
+
+    console.log(`Branch classification: median area=${medianArea.toFixed(2)}, threshold=${structuralThreshold.toFixed(2)}, avg structural W=${avgStructW.toFixed(1)} H=${avgStructH.toFixed(1)}`);
+
     // Build CSS elements from branches
     const elements = [];
     const elementCounts = {};
+    const structuralBranches = [];
+    let zeroLengthCount = 0;
 
     for (const branch of branches) {
       const dx = branch.x2 - branch.x1;
       const dy = branch.y2 - branch.y1;
       const dz = branch.z2 - branch.z1;
       const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (length < 0.01) continue;
+      if (length < 0.01) { zeroLengthCount++; continue; }
 
       // Normalize direction
       const dirX = dx / length;
@@ -232,6 +312,12 @@ function parseVentSimToCSS(content, sourceFileName) {
 
       const isRound = branch.shape_type === 1;
       const linerMaterial = branch.liner_type === 1 ? 'concrete' : 'blasted_rock';
+
+      // Classify: structural tunnel segment vs airway duct
+      const isStructural = branch.area >= structuralThreshold;
+      const type = isStructural ? 'TUNNEL_SEGMENT' : 'DUCT';
+
+      if (isStructural) structuralBranches.push(branch);
 
       // refDirection must not be parallel to the tunnel axis
       const absZ = Math.abs(dirZ);
@@ -245,16 +331,21 @@ function parseVentSimToCSS(content, sourceFileName) {
         refDirection: refDirVec
       };
 
+      // Airway ducts: use reduced cross-section (70% of original) for visual hierarchy
+      const scaleFactor = isStructural ? 1.0 : 0.7;
+      const effectiveW = branch.width * scaleFactor;
+      const effectiveH = branch.height * scaleFactor;
+
       // geometry.direction is in element-LOCAL space — local Z is already aligned
       // to the tunnel axis by the element placement above, so always extrude in (0,0,1)
       const geometry = isRound ? {
         method: 'EXTRUSION',
-        profile: { type: 'CIRCLE', radius: branch.width / 2 },
+        profile: { type: 'CIRCLE', radius: (effectiveW / 2) },
         direction: { x: 0, y: 0, z: 1 },
         depth: length
       } : {
         method: 'EXTRUSION',
-        profile: { type: 'RECTANGLE', width: branch.width, height: branch.height },
+        profile: { type: 'RECTANGLE', width: effectiveW, height: effectiveH },
         direction: { x: 0, y: 0, z: 1 },
         depth: length
       };
@@ -262,14 +353,18 @@ function parseVentSimToCSS(content, sourceFileName) {
       const id = elemId(geometry, placement);
       const branchName = branch.name || `Branch_${branch.unique_no}`;
       const element_key = `ventsim_branch_${branch.unique_no}`;
-      const type = 'TUNNEL_SEGMENT';
       elementCounts[type] = (elementCounts[type] || 0) + 1;
+
+      // Visual hierarchy: structural = opaque concrete, airways = semi-transparent lighter
+      const material = isStructural
+        ? { name: linerMaterial, color: linerMaterial === 'concrete' ? [0.75, 0.75, 0.75] : [0.55, 0.45, 0.35], transparency: 0 }
+        : { name: 'airway', color: [0.6, 0.7, 0.85], transparency: 0.35 };
 
       elements.push({
         id,
         element_key,
         type,
-        semanticType: 'IfcBuildingElementProxy',
+        semanticType: isStructural ? 'IfcBuildingElementProxy' : 'IfcDuctSegment',
         name: branchName,
         placement,
         geometry,
@@ -283,37 +378,72 @@ function parseVentSimToCSS(content, sourceFileName) {
           liner_type: linerMaterial,
           shape: isRound ? 'round' : 'rectangular',
           fan_type: branch.fan_type,
-          fan_numbers: branch.fan_numbers
+          fan_numbers: branch.fan_numbers,
+          branchClass: isStructural ? 'STRUCTURAL' : 'AIRWAY'
         },
-        material: {
-          name: linerMaterial,
-          color: linerMaterial === 'concrete' ? [0.75, 0.75, 0.75] : [0.55, 0.45, 0.35],
-          transparency: 0
-        },
-        confidence: 0.95,
+        material,
+        confidence: isStructural ? 0.95 : 0.85,
         source: 'VSM'
       });
     }
 
-    // Add fan equipment elements
+    console.log(`Classified: ${structuralBranches.length} structural, ${branches.length - structuralBranches.length} airways`);
+
+    // Add fan equipment elements — placed at the midpoint of their associated branch.
+    // VentSim: fan_type = fan curve ID (matches fan_id), fan_numbers = count of fans on branch.
+    const fanMatchResults = [];
     for (let i = 0; i < fans.length; i++) {
       const fan = fans[i];
-      // Place fans near the center of the normalized network
-      const cx = (maxX - minX) / 2 + (i * 5);
-      const cy = (maxY - minY) / 2;
-      const cz = (maxZ - minZ) / 2;
+      const hostBranch = branches.find(b => b.fan_type === fan.fan_id);
+      let cx, cy, cz, dirX = 0, dirY = 0, dirZ = 1;
+      let matchStatus = 'unmatched';
+      if (hostBranch) {
+        matchStatus = 'matched';
+        // Midpoint of host branch, normalized to network origin
+        cx = ((hostBranch.x1 + hostBranch.x2) / 2) - minX;
+        cy = ((hostBranch.y1 + hostBranch.y2) / 2) - minY;
+        cz = ((hostBranch.z1 + hostBranch.z2) / 2) - minZ;
+        // Align fan disk perpendicular to branch direction
+        const bLen = Math.sqrt((hostBranch.x2 - hostBranch.x1) ** 2 + (hostBranch.y2 - hostBranch.y1) ** 2 + (hostBranch.z2 - hostBranch.z1) ** 2);
+        if (bLen > 0.01) {
+          dirX = (hostBranch.x2 - hostBranch.x1) / bLen;
+          dirY = (hostBranch.y2 - hostBranch.y1) / bLen;
+          dirZ = (hostBranch.z2 - hostBranch.z1) / bLen;
+        }
+        console.log(`  Fan "${fan.name}" (id=${fan.fan_id}) → branch #${hostBranch.unique_no} "${hostBranch.name}" dir=(${dirX.toFixed(4)}, ${dirY.toFixed(4)}, ${dirZ.toFixed(4)}) at (${cx.toFixed(1)},${cy.toFixed(1)},${cz.toFixed(1)})`);
+      } else {
+        // Fallback: place at ground level near network center
+        cx = (maxX - minX) / 2 + (i * 5);
+        cy = (maxY - minY) / 2;
+        cz = 0;
+        console.warn(`  Fan "${fan.name}" (id=${fan.fan_id}) → NO matching branch (fallback placement)`);
+      }
 
+      // Fan axis aligned to branch direction so the disk sits inside the tunnel
+      const absZ = Math.abs(dirZ);
+      const refDir = absZ < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 };
       const placement = {
         origin: { x: cx, y: cy, z: cz },
-        axis: { x: 0, y: 0, z: 1 },
-        refDirection: { x: 1, y: 0, z: 0 }
+        axis: { x: dirX, y: dirY, z: dirZ },
+        refDirection: refDir
       };
+      // Fan disk: thin cylinder (depth = 20% of diameter) oriented along branch
+      const fanThickness = Math.max(0.15, fan.diameter * 0.2);
       const geometry = {
         method: 'EXTRUSION',
         profile: { type: 'CIRCLE', radius: fan.diameter / 2 },
         direction: { x: 0, y: 0, z: 1 },
-        depth: fan.diameter
+        depth: fanThickness
       };
+
+      // Post-creation axis validation: compare assigned axis to computed host direction
+      const horizontalMag = Math.sqrt(dirX * dirX + dirY * dirY);
+      if (hostBranch && horizontalMag > 0.5) {
+        const assignedZ = Math.abs(placement.axis.z);
+        if (assignedZ > 0.9) {
+          console.warn(`  ⚠ Fan "${fan.name}" assigned axis z=${assignedZ.toFixed(3)} but host branch #${hostBranch.unique_no} direction is mostly horizontal (horiz=${horizontalMag.toFixed(3)}). Possible orientation bug.`);
+        }
+      }
 
       const id = elemId(geometry, placement);
       const element_key = `ventsim_fan_${fan.fan_id || i}`;
@@ -331,7 +461,12 @@ function parseVentSimToCSS(content, sourceFileName) {
         relationships: [],
         properties: {
           fan_id: fan.fan_id,
-          diameter_m: fan.diameter
+          diameter_m: fan.diameter,
+          hostSegmentId: hostBranch ? `ventsim_branch_${hostBranch.unique_no}` : null,
+          hostBranchUniqueNo: hostBranch?.unique_no ?? null,
+          hostDirectionX: dirX,
+          hostDirectionY: dirY,
+          hostDirectionZ: dirZ
         },
         material: {
           name: 'steel',
@@ -341,15 +476,219 @@ function parseVentSimToCSS(content, sourceFileName) {
         confidence: 0.9,
         source: 'VSM'
       });
+
+      fanMatchResults.push({
+        fanId: fan.fan_id,
+        fanName: fan.name,
+        matchStatus,
+        hostBranchUniqueNo: hostBranch?.unique_no ?? null,
+        computedDir: { x: dirX, y: dirY, z: dirZ },
+        assignedAxis: { x: placement.axis.x, y: placement.axis.y, z: placement.axis.z }
+      });
     }
 
     // Named spaces are tracked in metadata but NOT rendered as separate geometry
-    // (they were previously 10x5x5m hardcoded boxes that appeared as random blocks).
-    // The tunnel branches themselves already represent named areas via their names.
     const spaceCount = Object.keys(namedSpaces).length;
+
+    // Portal buildings — detect terminal nodes (appear exactly once across all endpoints)
+    // and place a small gatehouse building at ground-level edge terminals
+    {
+      const epCount = new Map();
+      for (const b of branches) {
+        const k1 = `${b.x1.toFixed(1)},${b.y1.toFixed(1)},${b.z1.toFixed(1)}`;
+        const k2 = `${b.x2.toFixed(1)},${b.y2.toFixed(1)},${b.z2.toFixed(1)}`;
+        epCount.set(k1, (epCount.get(k1) || 0) + 1);
+        epCount.set(k2, (epCount.get(k2) || 0) + 1);
+      }
+
+      const netW = maxX - minX;
+      const netD = maxY - minY;
+      const edgeTol = Math.max(netW, netD) * 0.18; // within 18% of network edge = portal zone
+
+      for (const b of branches) {
+        for (const [px, py, pz] of [[b.x1, b.y1, b.z1], [b.x2, b.y2, b.z2]]) {
+          const key = `${px.toFixed(1)},${py.toFixed(1)},${pz.toFixed(1)}`;
+          if (epCount.get(key) !== 1) continue;       // not a terminal
+          if (pz - minZ > 2) continue;               // elevated = shaft endpoint, skip
+
+          const nx = px - minX;
+          const ny = py - minY;
+          const nz = pz - minZ;
+
+          const nearEdge = nx < edgeTol || nx > netW - edgeTol ||
+                           ny < edgeTol || ny > netD - edgeTol;
+          if (!nearEdge) continue;
+
+          // Portal proportional to tunnel dimensions (1.5× width, 1× depth, 1.2× height)
+          const bW = Math.max(4, avgStructW * 1.5);
+          const bD = Math.max(3, avgStructH);
+          const bH = Math.max(3, avgStructH * 1.2);
+
+          // Building box — centered on terminal point
+          const bldPlacement = {
+            origin: { x: nx - bW / 2, y: ny - bD / 2, z: nz },
+            axis: { x: 0, y: 0, z: 1 },
+            refDirection: { x: 1, y: 0, z: 0 }
+          };
+          const bldGeometry = {
+            method: 'EXTRUSION',
+            profile: { type: 'RECTANGLE', width: bW, height: bD },
+            direction: { x: 0, y: 0, z: 1 },
+            depth: bH
+          };
+          const bldId = elemId(bldGeometry, bldPlacement);
+          elementCounts['WALL'] = (elementCounts['WALL'] || 0) + 1;
+          elements.push({
+            id: bldId,
+            element_key: `portal_building_${bldId.slice(0, 8)}`,
+            type: 'WALL',
+            semanticType: 'IfcBuildingElementProxy',
+            name: 'Portal Building',
+            placement: bldPlacement,
+            geometry: bldGeometry,
+            container: 'seg-tunnel-main',
+            relationships: [],
+            properties: { segmentType: 'PORTAL_BUILDING' },
+            material: { name: 'concrete', color: [0.93, 0.93, 0.93], transparency: 0 },
+            confidence: 0.88,
+            source: 'VSM'
+          });
+
+          // Door on the face toward tunnel interior
+          const dW = 1.0, dH = 2.2, dThick = 0.08;
+          // Door offset — place on the interior-facing wall
+          const facingY = ny < edgeTol ? 1 : -1; // south terminal faces north, north faces south
+          const dPlacement = {
+            origin: { x: nx - dW / 2, y: ny + facingY * (bD / 2), z: nz },
+            axis: { x: 0, y: 0, z: 1 },
+            refDirection: { x: 1, y: 0, z: 0 }
+          };
+          // Profile in XY plane: width × thickness, extruded upward by door height
+          const dGeometry = {
+            method: 'EXTRUSION',
+            profile: { type: 'RECTANGLE', width: dW, height: dThick },
+            direction: { x: 0, y: 0, z: 1 },
+            depth: dH  // 2.2m tall door extruded in Z
+          };
+          const dId = elemId(dGeometry, dPlacement);
+          elementCounts['DOOR'] = (elementCounts['DOOR'] || 0) + 1;
+          elements.push({
+            id: dId,
+            element_key: `portal_door_${dId.slice(0, 8)}`,
+            type: 'DOOR',
+            semanticType: 'IfcDoor',
+            name: 'Portal Door',
+            placement: dPlacement,
+            geometry: dGeometry,
+            container: 'seg-tunnel-main',
+            relationships: [],
+            properties: {},
+            material: { name: 'wood', color: [0.62, 0.42, 0.18], transparency: 0 },
+            confidence: 0.82,
+            source: 'VSM'
+          });
+        }
+      }
+    }
+
+    // ── Interior system placeholders (cable trays + lighting) ──
+    // Add along structural branches only, for interior realism.
+    // Only add to branches longer than 5m to avoid cluttering short stubs.
+    {
+      let interiorCount = 0;
+      for (const branch of structuralBranches) {
+        const dx = branch.x2 - branch.x1;
+        const dy = branch.y2 - branch.y1;
+        const dz = branch.z2 - branch.z1;
+        const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (length < 5) continue;
+
+        const dirX = dx / length;
+        const dirY = dy / length;
+        const dirZ = dz / length;
+        const absZ = Math.abs(dirZ);
+        const refDirVec = absZ < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 };
+
+        // Cable tray: thin strip along ceiling-right of tunnel
+        const ctW = 0.3, ctH = 0.1;
+        const ctOffset = branch.width * 0.35; // offset to right side
+        const ctPlacement = {
+          origin: {
+            x: (branch.x1 - minX) + refDirVec.x * ctOffset,
+            y: (branch.y1 - minY) + refDirVec.y * ctOffset,
+            z: (branch.z1 - minZ) + (branch.height * 0.85)
+          },
+          axis: { x: dirX, y: dirY, z: dirZ },
+          refDirection: refDirVec
+        };
+        const ctGeometry = {
+          method: 'EXTRUSION',
+          profile: { type: 'RECTANGLE', width: ctW, height: ctH },
+          direction: { x: 0, y: 0, z: 1 },
+          depth: length
+        };
+        const ctId = elemId(ctGeometry, ctPlacement);
+        elementCounts['EQUIPMENT'] = (elementCounts['EQUIPMENT'] || 0) + 1;
+        elements.push({
+          id: ctId,
+          element_key: `cable_tray_${branch.unique_no}`,
+          type: 'EQUIPMENT',
+          semanticType: 'IfcCableCarrierSegment',
+          name: `Cable Tray - ${branch.name || branch.unique_no}`,
+          placement: ctPlacement,
+          geometry: ctGeometry,
+          container: 'seg-tunnel-main',
+          relationships: [],
+          properties: { systemType: 'CABLE_TRAY', branchRef: branch.unique_no },
+          material: { name: 'steel', color: [0.45, 0.45, 0.48], transparency: 0.2 },
+          confidence: 0.7,
+          source: 'VSM'
+        });
+
+        // Lighting strip: narrow line along ceiling center
+        const ltW = 0.15, ltH = 0.05;
+        const ltPlacement = {
+          origin: {
+            x: branch.x1 - minX,
+            y: branch.y1 - minY,
+            z: (branch.z1 - minZ) + (branch.height * 0.95)
+          },
+          axis: { x: dirX, y: dirY, z: dirZ },
+          refDirection: refDirVec
+        };
+        const ltGeometry = {
+          method: 'EXTRUSION',
+          profile: { type: 'RECTANGLE', width: ltW, height: ltH },
+          direction: { x: 0, y: 0, z: 1 },
+          depth: length
+        };
+        const ltId = elemId(ltGeometry, ltPlacement);
+        elementCounts['EQUIPMENT'] = (elementCounts['EQUIPMENT'] || 0) + 1;
+        elements.push({
+          id: ltId,
+          element_key: `lighting_${branch.unique_no}`,
+          type: 'EQUIPMENT',
+          semanticType: 'IfcLightFixture',
+          name: `Lighting - ${branch.name || branch.unique_no}`,
+          placement: ltPlacement,
+          geometry: ltGeometry,
+          container: 'seg-tunnel-main',
+          relationships: [],
+          properties: { systemType: 'LIGHTING', branchRef: branch.unique_no },
+          material: { name: 'luminaire', color: [0.95, 0.95, 0.8], transparency: 0.15 },
+          confidence: 0.65,
+          source: 'VSM'
+        });
+
+        interiorCount += 2;
+      }
+      console.log(`Added ${interiorCount} interior system elements (cable trays + lighting)`);
+    }
 
     const branchCount = branches.length;
     const fanCount = fans.length;
+    const structCount = structuralBranches.length;
+    const airwayCount = branchCount - structCount;
 
     const css = {
       cssVersion: '1.0',
@@ -357,7 +696,7 @@ function parseVentSimToCSS(content, sourceFileName) {
       facility: {
         name: 'Tunnel Network',
         type: 'tunnel',
-        description: `Tunnel ventilation network with ${branchCount} branches, ${fanCount} fans, and ${spaceCount} named spaces. Network spans ${(maxX - minX).toFixed(1)}m x ${(maxY - minY).toFixed(1)}m with ${(maxZ - minZ).toFixed(1)}m elevation variation.`,
+        description: `Tunnel network: ${structCount} structural segments, ${airwayCount} airways, ${fanCount} fans, ${spaceCount} named spaces. Network spans ${(maxX - minX).toFixed(1)}m x ${(maxY - minY).toFixed(1)}m with ${(maxZ - minZ).toFixed(1)}m elevation variation.`,
         units: 'M',
         crs: null,
         // Real-world offset recorded here; all element coords are normalized to 0-origin
@@ -381,9 +720,47 @@ function parseVentSimToCSS(content, sourceFileName) {
           min: { x: 0, y: 0, z: 0 },
           max: { x: maxX - minX, y: maxY - minY, z: maxZ - minZ }
         },
-        repairLog: []
+        repairLog: [],
+        extractBuild: {
+          version: EXTRACT_VERSION,
+          builtAt: BUILD_TIMESTAMP
+        },
+        tunnelExtractionAudit: {
+          rawBranchCount: branches.length,
+          rawBranchIds: branches.map(b => b.unique_no),
+          emittedSegmentCount: (elementCounts['TUNNEL_SEGMENT'] || 0) + (elementCounts['DUCT'] || 0),
+          emittedSegmentIds: elements.filter(e => e.type === 'TUNNEL_SEGMENT' || e.type === 'DUCT').map(e => e.properties?.unique_no),
+          skippedZeroLengthCount: zeroLengthCount,
+          fanMatchedCount: fanMatchResults.filter(f => f.matchStatus === 'matched').length,
+          fanUnmatchedCount: fanMatchResults.filter(f => f.matchStatus === 'unmatched').length,
+          fanMatchReport: fanMatchResults,
+          namedBranches: branches.filter(b => b.name && !b.name.startsWith('Branch_')).map(b => ({
+            uniqueNo: b.unique_no,
+            name: b.name
+          })),
+          dimensionVariations: {
+            uniqueWidths: [...new Set(branches.map(b => b.width))].sort((a, b) => a - b),
+            uniqueHeights: [...new Set(branches.map(b => b.height))].sort((a, b) => a - b)
+          }
+        }
       }
     };
+
+    // v6+ PHASE C+4: Tag detailed evidence on all VentSim elements
+    for (const el of css.elements) {
+      if (!el.metadata) el.metadata = {};
+      el.metadata.evidence = {
+        sourceFiles: [sourceFileName],
+        basis: 'VENTSIM_GEOMETRY',
+        confidence: el.confidence || 0.95,
+        sourceType: 'SIMULATION',
+        // Element-level evidence details
+        sourceExcerpt: el.properties?.branchName ? `Branch: ${el.properties.branchName}` : el.name,
+        dataFormat: 'VENTSIM_TXT',
+        coordinateSource: 'DIRECT_3D',
+        lineRange: el.metadata?.ventSimLineRange || null
+      };
+    }
 
     return css;
   } catch (err) {
@@ -396,15 +773,442 @@ function parseVentSimToCSS(content, sourceFileName) {
 // BEDROCK RESPONSE → CSS CONVERTER
 // ============================================================================
 
+// ============================================================================
+// TUNNEL / UNDERGROUND FACILITY — BEDROCK PROMPT BUILDER
+// ============================================================================
+
+function buildTunnelPass2Prompt(domainContext, fileContent, descriptionContent) {
+  return `${domainContext}
+You are an expert in interpreting underground facility and tunnel engineering documents.
+Extract structured tunnel/underground facility data and return it as a JSON object. ALL DIMENSIONS IN METRES.
+
+SOURCE PRIORITY:
+- PRIMARY section: authoritative source for topology, dimensions, portals, shafts, zones, and overall layout
+- SECONDARY section: equipment sizing and MEP metadata only — do NOT use to reshape the tunnel envelope
+- TERTIARY section: airflow semantics only — do NOT derive structural geometry from simulation exports
+
+Return ONLY valid JSON (no markdown, no explanations):
+
+{
+  "buildingName": "string",
+  "buildingType": "TUNNEL | UNDERGROUND_FACILITY | MIXED_UNDERGROUND",
+  "topology": {
+    "layout_type": "LINEAR | BRANCHED",
+    "length_m": number,
+    "width_m": number,
+    "height_m": number,
+    "portal_count": number,
+    "portals": [{ "name": "string", "side": "WEST|EAST|NORTH|SOUTH", "elevation_m": number, "width_m": number, "height_m": number }],
+    "shafts": [{ "name": "string", "role": "EXHAUST|INTAKE|UTILITY|ACCESS", "chainage_m": number, "lateral_offset_m": number, "width_m": number, "depth_m": number, "height_above_tunnel_m": number }]
+  },
+  "segments": [{
+    "name": "string",
+    "type": "MAIN_TUNNEL|PORTAL_ZONE|VEHICLE_BAY|COMMAND_ROOM|GENERATOR_ROOM|COMMS_ROOM|SUPPORT_ROOM|MECH_ROOM|SHAFT_BASE|STORAGE|CROSSCUT",
+    "chainage_start_m": number,
+    "chainage_end_m": number,
+    "lateral_offset_m": number,
+    "elevation_offset_m": number,
+    "width_m": number,
+    "height_m": number,
+    "profile_type": "RECTANGULAR|ARCHED"
+  }],
+  "geology": { "rock_type": "granite|limestone|sandstone|other", "lining": "CONCRETE_LINED|BLASTED_ROCK|SHOTCRETE|UNLINED" },
+  "ventilation": { "intake_portal": "WEST|EAST|NORTH|SOUTH", "exhaust_method": "SHAFT|PORTAL|MIXED", "shaft_name": "string" },
+  "equipment": [{ "name": "string", "type": "GENERATOR|PUMP|FAN|COMPRESSOR|TRANSFORMER|BATTERY|OTHER", "segment_name": "string (name of segment this equipment belongs in)", "chainage_m": number, "lateral_m": number, "length_m": number, "width_m": number, "height_m": number }],
+  "materials": { "lining": "string", "floor": "string" }
+}
+
+Rules:
+- Use PRIMARY documents as the sole source for tunnel topology, envelope, and zone layout
+- Order segments by chainage_start_m (entry portal → exit portal direction)
+- lateral_offset_m: 0 = inline with tunnel axis; positive/negative = opposite lateral sides (no compass direction assumed)
+- chainage_start_m / chainage_end_m define span of each segment along the primary axis
+- Portal elevation differences: record as elevation_m on each portal (tunnel grade is not geometrically modelled yet)
+- If a room is inline (lateral_offset_m = 0) and similar width to main tunnel, it is a widened section
+- Use ARCHED profile for drive-through tunnel sections when evidence suggests it; RECTANGULAR for rooms
+- Return empty arrays [] when no data
+
+Building Description:
+${descriptionContent || '(No description provided)'}
+
+${fileContent}`;
+}
+
+// ============================================================================
+// TUNNEL / UNDERGROUND FACILITY — CSS GEOMETRY GENERATOR
+// ============================================================================
+
+function buildTunnelCSS(spec, sourceFiles) {
+  const topo = spec.topology || {};
+  const tunnelLength = Math.max(10, Math.min(5000, topo.length_m || spec.dimensions?.length_m || 300));
+  const tunnelWidth = Math.max(3, Math.min(30, topo.width_m || spec.dimensions?.width_m || 8));
+  const tunnelHeight = Math.max(2, Math.min(20, topo.height_m || spec.dimensions?.height_m || 6));
+  const lining = (spec.geology?.lining || 'CONCRETE_LINED').toUpperCase();
+
+  const materialMap = {
+    BLASTED_ROCK: { name: 'blasted_rock', color: [0.48, 0.43, 0.38] },
+    CONCRETE_LINED: { name: 'concrete', color: [0.62, 0.62, 0.65] },
+    SHOTCRETE: { name: 'shotcrete', color: [0.55, 0.55, 0.52] },
+    UNLINED: { name: 'blasted_rock', color: [0.45, 0.40, 0.35] },
+  };
+  const mainMat = materialMap[lining] || materialMap.CONCRETE_LINED;
+
+  const segmentTypeMat = {
+    COMMAND_ROOM: { name: 'plasterboard', color: [0.88, 0.88, 0.86] },
+    COMMS_ROOM: { name: 'plasterboard', color: [0.88, 0.88, 0.86] },
+    SUPPORT_ROOM: { name: 'plasterboard', color: [0.88, 0.88, 0.86] },
+    GENERATOR_ROOM: { name: 'concrete', color: [0.58, 0.58, 0.60] },
+    MECH_ROOM: { name: 'concrete', color: [0.58, 0.58, 0.60] },
+    VEHICLE_BAY: { name: 'concrete', color: [0.68, 0.68, 0.70] },
+  };
+
+  const elements = [];
+  const elementCounts = {};
+
+  function addEl(el) {
+    elementCounts[el.type] = (elementCounts[el.type] || 0) + 1;
+    elements.push(el);
+  }
+
+  // Helper: slug for segment IDs
+  function slug(name) {
+    return 'seg-' + (name || 'unnamed').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 32);
+  }
+
+  // Build levelsOrSegments
+  const levelsOrSegments = [
+    { id: 'seg-west-portal', type: 'SEGMENT', name: 'West Portal', startChainage_m: -5, endChainage_m: 0, height_m: tunnelHeight },
+    { id: 'seg-tunnel-main', type: 'SEGMENT', name: 'Main Tunnel', startChainage_m: 0, endChainage_m: tunnelLength, height_m: tunnelHeight },
+    { id: 'seg-east-portal', type: 'SEGMENT', name: 'East Portal', startChainage_m: tunnelLength, endChainage_m: tunnelLength + 5, height_m: tunnelHeight },
+  ];
+
+  const segments = spec.segments || [];
+  const segmentMap = {};
+  for (const seg of segments) {
+    const segId = slug(seg.name);
+    segmentMap[seg.name] = { ...seg, id: segId };
+    levelsOrSegments.push({
+      id: segId, type: 'SEGMENT', name: seg.name,
+      startChainage_m: seg.chainage_start_m || 0,
+      endChainage_m: seg.chainage_end_m || ((seg.chainage_start_m || 0) + 10),
+      height_m: seg.height_m || tunnelHeight
+    });
+  }
+
+  // 1. MAIN TUNNEL TUBE
+  addEl({
+    id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: tunnelWidth, height: tunnelHeight }, depth: tunnelLength },
+              { origin: { x: 0, y: 0, z: 0 } }),
+    element_key: 'tunnel_main_tube',
+    type: 'TUNNEL_SEGMENT', semanticType: 'IfcWall',
+    name: 'Main Tunnel',
+    placement: { origin: { x: 0, y: 0, z: 0 }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 } },
+    geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: tunnelHeight, height: tunnelWidth }, direction: { x: 1, y: 0, z: 0 }, depth: tunnelLength },
+    container: 'seg-tunnel-main', relationships: [],
+    properties: { segmentType: 'MAIN_TUNNEL', lining, chainage_start_m: 0, chainage_end_m: tunnelLength },
+    material: mainMat, confidence: 0.95, source: 'LLM', sourceRole: 'NARRATIVE', explicitOrInferred: 'EXPLICIT'
+  });
+
+  // 2. PORTALS
+  const portals = topo.portals || [];
+  const westPortal = portals.find(p => p.side === 'WEST') || { side: 'WEST', elevation_m: 0 };
+  const eastPortal = portals.find(p => p.side === 'EAST') || { side: 'EAST', elevation_m: 0 };
+  // Portal proportional to tunnel: 1.3× width, 1.25× height (not fixed +3/+2)
+  const portalW = Math.max(tunnelWidth * 1.1, westPortal.width_m || tunnelWidth * 1.3);
+  const portalH = Math.max(tunnelHeight * 1.1, westPortal.height_m || tunnelHeight * 1.25);
+
+  addEl({
+    id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: portalH, height: portalW }, depth: 5 },
+              { origin: { x: -5, y: -(portalW - tunnelWidth) / 2, z: westPortal.elevation_m || 0 } }),
+    element_key: 'tunnel_west_portal',
+    type: 'TUNNEL_SEGMENT', semanticType: 'IfcWall',
+    name: westPortal.name || 'West Portal',
+    placement: { origin: { x: -5, y: -(portalW - tunnelWidth) / 2, z: westPortal.elevation_m || 0 } },
+    geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: portalH, height: portalW }, direction: { x: 1, y: 0, z: 0 }, depth: 5 },
+    container: 'seg-west-portal', relationships: [],
+    properties: { segmentType: 'PORTAL', side: 'WEST', elevation_m: westPortal.elevation_m || 0 },
+    material: { name: 'concrete', color: [0.55, 0.55, 0.58] }, confidence: 0.90, source: 'LLM', explicitOrInferred: 'EXPLICIT'
+  });
+
+  addEl({
+    id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: portalH, height: portalW }, depth: 5 },
+              { origin: { x: tunnelLength, y: -(portalW - tunnelWidth) / 2, z: eastPortal.elevation_m || 0 } }),
+    element_key: 'tunnel_east_portal',
+    type: 'TUNNEL_SEGMENT', semanticType: 'IfcWall',
+    name: eastPortal.name || 'East Portal',
+    placement: { origin: { x: tunnelLength, y: -(portalW - tunnelWidth) / 2, z: eastPortal.elevation_m || 0 } },
+    geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: portalH, height: portalW }, direction: { x: 1, y: 0, z: 0 }, depth: 5 },
+    container: 'seg-east-portal', relationships: [],
+    properties: { segmentType: 'PORTAL', side: 'EAST', elevation_m: eastPortal.elevation_m || 0 },
+    material: { name: 'concrete', color: [0.55, 0.55, 0.58] }, confidence: 0.90, source: 'LLM', explicitOrInferred: 'EXPLICIT'
+  });
+
+  // 3. SEGMENTS (ordered by chainage_start_m)
+  // Lateral-offset chambers overlap the tunnel wall by 1m for a connected look.
+  const sortedSegs = [...segments].sort((a, b) => (a.chainage_start_m || 0) - (b.chainage_start_m || 0));
+  for (const seg of sortedSegs) {
+    const cStart = seg.chainage_start_m ?? 0;
+    const cEnd = seg.chainage_end_m ?? (cStart + 10);
+    const segLen = Math.max(0.5, cEnd - cStart);
+    const segWid = seg.width_m || tunnelWidth;
+    const segH = seg.height_m || tunnelHeight;
+    let latOff = seg.lateral_offset_m ?? 0;
+    const elevOff = seg.elevation_offset_m ?? 0;
+    const segMat = segmentTypeMat[seg.type] || mainMat;
+    const segId = segmentMap[seg.name]?.id || slug(seg.name);
+    const isArched = (seg.profile_type || 'RECTANGULAR').toUpperCase() === 'ARCHED';
+    const isLateral = Math.abs(latOff) > 0;
+
+    // Chamber transition: pull lateral chambers 1m into tunnel wall for overlap
+    if (isLateral) {
+      const overlapInset = 1.0;
+      latOff = latOff > 0
+        ? Math.max(0, latOff - overlapInset)  // positive side: pull toward center
+        : Math.min(0, latOff + overlapInset);  // negative side: pull toward center
+    }
+
+    // Rectangular base (always)
+    const wallH = isArched ? segH * 0.60 : segH;
+    addEl({
+      id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wallH, height: segWid }, depth: segLen },
+                { origin: { x: cStart, y: latOff, z: elevOff } }),
+      element_key: `tunnel_seg_${segId}`,
+      type: 'TUNNEL_SEGMENT', semanticType: 'IfcWall',
+      name: seg.name,
+      placement: { origin: { x: cStart, y: latOff, z: elevOff } },
+      geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wallH, height: segWid }, direction: { x: 1, y: 0, z: 0 }, depth: segLen },
+      container: segId, relationships: [],
+      properties: { segmentType: seg.type || 'TUNNEL_SEGMENT', chainage_start_m: cStart, chainage_end_m: cEnd, lining, profileType: seg.profile_type || 'RECTANGULAR' },
+      material: segMat, confidence: 0.85, source: 'LLM', explicitOrInferred: 'INFERRED'
+    });
+
+    // Arch cap (additive, rectangular fallback safe in generate)
+    if (isArched) {
+      const archH = segH * 0.40;
+      addEl({
+        id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: archH, height: segWid }, depth: segLen },
+                  { origin: { x: cStart, y: latOff, z: elevOff + wallH } }),
+        element_key: `tunnel_seg_${segId}_arch`,
+        type: 'TUNNEL_SEGMENT', semanticType: 'IfcWall',
+        name: `${seg.name} Arch`,
+        placement: { origin: { x: cStart, y: latOff, z: elevOff + wallH } },
+        geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: archH, height: segWid }, direction: { x: 1, y: 0, z: 0 }, depth: segLen },
+        container: segId, relationships: [],
+        properties: { segmentType: 'ARCH_CAP', chainage_start_m: cStart, chainage_end_m: cEnd },
+        material: segMat, confidence: 0.75, source: 'LLM', explicitOrInferred: 'INFERRED'
+      });
+    }
+
+    // Chamber transition element: short connector between tunnel wall and lateral chamber
+    if (isLateral) {
+      const transW = Math.min(segWid, tunnelWidth) * 0.8;  // 80% of narrower dimension
+      const transH = Math.min(segH, tunnelHeight) * 0.85;
+      const transLen = 1.5;  // 1.5m transition depth
+      const transY = latOff > 0 ? latOff - transLen : latOff + segWid;
+      addEl({
+        id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: transH, height: transW }, depth: transLen },
+                  { origin: { x: cStart + segLen * 0.3, y: transY, z: elevOff } }),
+        element_key: `tunnel_transition_${segId}`,
+        type: 'TUNNEL_SEGMENT', semanticType: 'IfcWall',
+        name: `${seg.name} Transition`,
+        placement: { origin: { x: cStart + segLen * 0.3, y: transY, z: elevOff } },
+        geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: transH, height: transW }, direction: { x: 0, y: latOff > 0 ? 1 : -1, z: 0 }, depth: transLen },
+        container: segId, relationships: [],
+        properties: { segmentType: 'CHAMBER_TRANSITION' },
+        material: mainMat, confidence: 0.7, source: 'LLM', explicitOrInferred: 'INFERRED'
+      });
+    }
+  }
+
+  // 4. SHAFTS — base connects directly to tunnel ceiling
+  for (const shaft of (topo.shafts || [])) {
+    const sx = Math.max(0, Math.min(shaft.chainage_m ?? tunnelLength / 2, tunnelLength));
+    const sy = shaft.lateral_offset_m ?? 0;
+    const sw = shaft.width_m || 2;
+    const sd = shaft.depth_m || 2;
+    const sh = shaft.height_above_tunnel_m || 20;
+    // Find nearest segment by chainage for container assignment + local ceiling height
+    const nearSeg = sortedSegs.reduce((best, s) => {
+      const d = Math.abs(((s.chainage_start_m || 0) + (s.chainage_end_m || 0)) / 2 - sx);
+      return (!best || d < best.d) ? { seg: s, d } : best;
+    }, null);
+    const shaftContainer = nearSeg ? (segmentMap[nearSeg.seg.name]?.id || 'seg-tunnel-main') : 'seg-tunnel-main';
+    // Shaft base at local ceiling height (segment elevation + height, or main tunnel height)
+    const localCeiling = nearSeg
+      ? (nearSeg.seg.elevation_offset_m || 0) + (nearSeg.seg.height_m || tunnelHeight)
+      : tunnelHeight;
+
+    // Shaft column
+    addEl({
+      id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sw, height: sd }, depth: sh },
+                { origin: { x: sx, y: sy, z: localCeiling } }),
+      element_key: `tunnel_shaft_${shaft.name?.replace(/\s+/g, '_') || 'shaft'}`,
+      type: 'TUNNEL_SEGMENT', semanticType: 'IfcColumn',
+      name: shaft.name || 'Ventilation Shaft',
+      placement: { origin: { x: sx, y: sy, z: localCeiling } },
+      geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sw, height: sd }, direction: { x: 0, y: 0, z: 1 }, depth: sh },
+      container: shaftContainer, relationships: [],
+      properties: { segmentType: 'SHAFT', role: shaft.role || 'UTILITY' },
+      material: { name: 'concrete', color: [0.60, 0.60, 0.62] }, confidence: 0.85, source: 'LLM', explicitOrInferred: 'EXPLICIT'
+    });
+
+    // Shaft base collar — short wider ring at tunnel ceiling for visual connection
+    const collarW = sw * 1.4, collarD = sd * 1.4, collarH = 0.4;
+    addEl({
+      id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: collarW, height: collarD }, depth: collarH },
+                { origin: { x: sx - (collarW - sw) / 2, y: sy - (collarD - sd) / 2, z: localCeiling - collarH / 2 } }),
+      element_key: `tunnel_shaft_collar_${shaft.name?.replace(/\s+/g, '_') || 'shaft'}`,
+      type: 'TUNNEL_SEGMENT', semanticType: 'IfcPlate',
+      name: `${shaft.name || 'Shaft'} Collar`,
+      placement: { origin: { x: sx - (collarW - sw) / 2, y: sy - (collarD - sd) / 2, z: localCeiling - collarH / 2 } },
+      geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: collarW, height: collarD }, direction: { x: 0, y: 0, z: 1 }, depth: collarH },
+      container: shaftContainer, relationships: [],
+      properties: { segmentType: 'SHAFT_COLLAR' },
+      material: { name: 'concrete', color: [0.55, 0.55, 0.58] }, confidence: 0.8, source: 'LLM', explicitOrInferred: 'INFERRED'
+    });
+  }
+
+  // 5. EQUIPMENT — anchor to segments
+  for (const equip of (spec.equipment || [])) {
+    const eLen = equip.length_m || 1.5;
+    const eWid = equip.width_m || 1.0;
+    const eH = equip.height_m || 1.5;
+
+    // Try to anchor to named segment
+    const anchoredSeg = equip.segment_name ? segmentMap[equip.segment_name] : null;
+    let ex, ey, ez, container, anchorConf;
+
+    if (anchoredSeg) {
+      const cStart = anchoredSeg.chainage_start_m || 0;
+      const cEnd = anchoredSeg.chainage_end_m || cStart + 10;
+      const latOff = anchoredSeg.lateral_offset_m ?? 0;
+      const segWid = anchoredSeg.width_m || tunnelWidth;
+      ex = Math.max(cStart + 0.5, Math.min(equip.chainage_m ?? ((cStart + cEnd) / 2), cEnd - eLen - 0.5));
+      ey = Math.max(latOff + 0.5, Math.min(equip.lateral_m ?? (latOff + segWid / 2 - eWid / 2), latOff + segWid - eWid - 0.5));
+      ez = anchoredSeg.elevation_offset_m ?? 0;
+      container = anchoredSeg.id;
+      anchorConf = 0.80;
+    } else {
+      ex = Math.max(1, Math.min(equip.chainage_m ?? (tunnelLength / 2), tunnelLength - eLen - 1));
+      ey = Math.max(0.5, Math.min(tunnelWidth / 2 - eWid / 2, tunnelWidth - eWid - 0.5));
+      ez = 0;
+      container = 'seg-tunnel-main';
+      anchorConf = 0.55;
+    }
+
+    const equipTypeMap = {
+      'FAN': 'IfcFan', 'GENERATOR': 'IfcElectricGenerator', 'PUMP': 'IfcPump',
+      'COMPRESSOR': 'IfcCompressor', 'TRANSFORMER': 'IfcTransformer', 'BOILER': 'IfcBoiler'
+    };
+
+    addEl({
+      id: elemId({ method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: eLen, height: eWid }, depth: eH },
+                { origin: { x: ex, y: ey, z: ez } }),
+      element_key: `tunnel_equip_${(equip.name || equip.type || 'equip').replace(/\s+/g, '_')}`,
+      type: 'EQUIPMENT', semanticType: equipTypeMap[equip.type] || 'IfcBuildingElementProxy',
+      name: equip.name || equip.type || 'Equipment',
+      placement: { origin: { x: ex, y: ey, z: ez } },
+      geometry: { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: eLen, height: eWid }, direction: { x: 0, y: 0, z: 1 }, depth: eH },
+      container, relationships: [],
+      properties: { equipmentType: equip.type || 'OTHER', equipmentAnchorConfidence: anchorConf, segment_name: equip.segment_name || null },
+      material: { name: 'steel', color: [0.5, 0.5, 0.55], transparency: 0 },
+      confidence: 0.80, source: 'LLM', explicitOrInferred: anchoredSeg ? 'EXPLICIT' : 'INFERRED'
+    });
+  }
+
+  const bboxMaxX = tunnelLength + 5;
+  const bboxMaxY = tunnelWidth + Math.max(0, ...(topo.shafts || []).map(s => Math.abs(s.lateral_offset_m || 0) + 2));
+  const bboxMaxZ = tunnelHeight + Math.max(0, ...(topo.shafts || []).map(s => s.height_above_tunnel_m || 0));
+
+  const facilityDesc = `${spec.buildingName || 'Underground Facility'} — ${topo.layout_type || 'LINEAR'} tunnel, ${tunnelLength}m × ${tunnelWidth}m × ${tunnelHeight}m, ${lining.replace('_', ' ').toLowerCase()}`;
+  const elevNote = (westPortal.elevation_m || eastPortal.elevation_m)
+    ? ` Portal elevations: W=${westPortal.elevation_m ?? 0}m, E=${eastPortal.elevation_m ?? 0}m (tunnel grade not geometrically modelled in Phase 1).`
+    : '';
+
+  return {
+    cssVersion: '1.0',
+    domain: 'TUNNEL',
+    facility: {
+      name: spec.buildingName || 'Underground Facility',
+      type: (spec.buildingType || 'tunnel').toLowerCase(),
+      description: facilityDesc + elevNote,
+      units: 'M', crs: null,
+      origin: { x: 0, y: 0, z: 0 },
+      axes: 'RIGHT_HANDED_Z_UP'
+    },
+    levelsOrSegments,
+    elements,
+    metadata: {
+      sourceFiles,
+      outputMode: 'HYBRID',
+      validationStatus: 'PENDING',
+      unitNormalizationApplied: true,
+      cssHash: null,
+      elementCounts,
+      structureClass: 'LINEAR',
+      topologyConfidence: spec.topologyConfidence || 0.85,
+      bbox: { min: { x: -5, y: 0, z: 0 }, max: { x: bboxMaxX, y: bboxMaxY, z: bboxMaxZ } },
+      repairLog: []
+    }
+  };
+}
+
+// ============================================================================
+// GABLE ROOF MESH GENERATOR
+// ============================================================================
+
+function buildGableRoofMesh(L, W, pitchDeg, overhang, ridgeAlongX, offsetX = 0, offsetY = 0) {
+  const pitch = Math.max(5, Math.min(60, pitchDeg));
+  const oh = Math.max(0, Math.min(2.0, overhang));
+  const tanP = Math.tan(pitch * Math.PI / 180);
+
+  let coords, ridgeH;
+
+  if (ridgeAlongX) {
+    ridgeH = (W / 2) * tanP;
+    coords = [
+      [-oh, -oh, 0],
+      [L + oh, -oh, 0],
+      [L + oh, W + oh, 0],
+      [-oh, W + oh, 0],
+      [-oh, W / 2, ridgeH],
+      [L + oh, W / 2, ridgeH],
+    ];
+  } else {
+    ridgeH = (L / 2) * tanP;
+    coords = [
+      [-oh, -oh, 0],
+      [L + oh, -oh, 0],
+      [L + oh, W + oh, 0],
+      [-oh, W + oh, 0],
+      [L / 2, -oh, ridgeH],
+      [L / 2, W + oh, ridgeH],
+    ];
+  }
+
+  const vertices = coords.map(c => ({ x: c[0] + offsetX, y: c[1] + offsetY, z: c[2] }));
+
+  const faces = [
+    [0, 1, 5], [0, 5, 4],
+    [3, 4, 5], [3, 5, 2],
+    [0, 4, 3],
+    [1, 2, 5],
+    [0, 3, 2], [0, 2, 1],
+  ];
+
+  return { vertices, faces };
+}
+
 function buildingSpecToCSS(spec, sourceFiles) {
   const dims = spec.dimensions || {};
-  const length = dims.length_m || 20;
-  const width = dims.width_m || 10;
-  const height = dims.height_m || 3;
-  const wallThickness = dims.wall_thickness_m || 0.3;
+  // v6: Clamp absurd LLM-generated values to safe ranges
+  const length = Math.max(3, Math.min(200, dims.length_m || 20));
+  const width = Math.max(3, Math.min(200, dims.width_m || 10));
+  const height = Math.max(2.4, Math.min(8, dims.height_m || 3));
+  const wallThickness = Math.max(0.1, Math.min(1.0, dims.wall_thickness_m || 0.3));
   const floorLevel = spec.elevations?.floor_level_m || 0;
-  let numFloors = spec.structure?.num_floors || 1;
-  let floorToFloor = spec.structure?.floor_to_floor_height_m || height;
+  let numFloors = Math.max(1, Math.min(50, spec.structure?.num_floors || 1));
+  let floorToFloor = Math.max(2.4, Math.min(8, spec.structure?.floor_to_floor_height_m || height));
 
   // v3.2: Structure classification
   const buildingType = (spec.buildingType || 'BUILDING').toUpperCase();
@@ -447,6 +1251,29 @@ function buildingSpecToCSS(spec, sourceFiles) {
 
   function addElement(el) {
     elementCounts[el.type] = (elementCounts[el.type] || 0) + 1;
+    // v6+ PHASE C+4: Auto-tag detailed evidence on every element
+    if (!el.metadata) el.metadata = {};
+    if (!el.metadata.evidence) {
+      const basis = el.source === 'VSM' ? 'VENTSIM_GEOMETRY'
+        : el.source === 'DXF' ? 'DXF_GEOMETRY'
+        : el.source === 'VISION' ? 'VISION_EXTRACTION'
+        : el.source === 'facade_fallback' ? 'HEURISTIC_FALLBACK'
+        : 'LLM_EXTRACTION';
+      el.metadata.evidence = {
+        sourceFiles: el.sourceFile ? [el.sourceFile] : sourceFiles.filter(f => f.parseStatus === 'success').map(f => f.name),
+        basis,
+        confidence: el.confidence || 0.7,
+        sourceType: el.source === 'VISION' ? 'IMAGE' : el.source === 'DXF' ? 'CAD' : 'TEXT',
+        // Element-level evidence fields
+        sourceExcerpt: el.metadata?.sourceExcerpt || null,
+        pageNumber: el.metadata?.pageNumber || null,
+        paragraphIndex: el.metadata?.paragraphIndex || null,
+        sheetName: el.metadata?.sheetName || null,
+        dxfLayer: el.metadata?.dxfLayer || null,
+        dxfHandle: el.metadata?.dxfHandle || null,
+        coordinateSource: basis === 'DXF_GEOMETRY' ? 'DIRECT_2D' : basis === 'VENTSIM_GEOMETRY' ? 'DIRECT_3D' : basis === 'VISION_EXTRACTION' ? 'ESTIMATED' : 'LLM_GENERATED'
+      };
+    }
     elements.push(el);
   }
 
@@ -507,12 +1334,31 @@ function buildingSpecToCSS(spec, sourceFiles) {
 
     if (f === numFloors - 1) {
       const roofZ = baseZ + floorToFloor;
-      addElement(makeElement('SLAB', 'IfcSlab', 'Roof Slab',
-        { origin: { x: length / 2, y: width / 2, z: roofZ } },
-        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
-        levelId, { slabType: 'ROOF' },
-        { name: spec.materials?.roof || 'metal', color: [0.4, 0.4, 0.45], transparency: 0 }
-      ));
+      const roofType = (spec.roof?.type || 'FLAT').toUpperCase();
+
+      if (roofType === 'GABLE') {
+        const pitchDeg = spec.roof?.pitch_degrees || 25;
+        const overhang = spec.roof?.overhang_m || 0.3;
+        const ridgeAlongX = spec.roof?.ridge_orientation
+          ? spec.roof.ridge_orientation === 'ALONG_LENGTH'
+          : length >= width;
+
+        const { vertices, faces } = buildGableRoofMesh(length, width, pitchDeg, overhang, ridgeAlongX);
+
+        addElement(makeElement('SLAB', 'IfcSlab', 'Roof',
+          { origin: { x: 0, y: 0, z: roofZ } },
+          { method: 'MESH', vertices, faces },
+          levelId, { slabType: 'ROOF' },
+          { name: spec.materials?.roof || 'metal', color: [0.35, 0.35, 0.4], transparency: 0 }
+        ));
+      } else {
+        addElement(makeElement('SLAB', 'IfcSlab', 'Roof Slab',
+          { origin: { x: length / 2, y: width / 2, z: roofZ } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
+          levelId, { slabType: 'ROOF' },
+          { name: spec.materials?.roof || 'metal', color: [0.4, 0.4, 0.45], transparency: 0 }
+        ));
+      }
     }
   }
 
@@ -573,6 +1419,44 @@ function buildingSpecToCSS(spec, sourceFiles) {
 
   // ---- ROOMS (as SPACE elements) — v3.2: skip-oriented validation ----
   if (spec.rooms && structureClass !== 'LINEAR') {
+    // Auto-layout fallback: detect overlapping room positions and arrange in rows
+    if (spec.rooms.length > 1) {
+      const positionCounts = {};
+      for (const room of spec.rooms) {
+        const key = `${Math.round((room.x_position_m || 0) * 2) / 2},${Math.round((room.y_position_m || 0) * 2) / 2}`;
+        positionCounts[key] = (positionCounts[key] || 0) + 1;
+      }
+      const maxOverlap = Math.max(...Object.values(positionCounts));
+      const needsAutoLayout = maxOverlap > spec.rooms.length * 0.5 || maxOverlap >= 3;
+
+      if (needsAutoLayout) {
+        // Sort rooms largest-area-first for better packing
+        const sorted = [...spec.rooms].sort((a, b) =>
+          ((b.length_m || 5) * (b.width_m || 4)) - ((a.length_m || 5) * (a.width_m || 4))
+        );
+        const gap = wallThickness;
+        const maxX = length - wallThickness;
+        const maxY = width - wallThickness;
+        let cx = wallThickness, cy = wallThickness, rowH = 0;
+
+        for (const room of sorted) {
+          const rLen = room.length_m || 5;
+          const rWid = room.width_m || 4;
+          if (cx + rLen > maxX) {
+            cx = wallThickness;
+            cy += rowH + gap;
+            rowH = 0;
+          }
+          if (cy + rWid > maxY) break; // no more space
+          room.x_position_m = cx;
+          room.y_position_m = cy;
+          cx += rLen + gap;
+          rowH = Math.max(rowH, rWid);
+        }
+        console.log(`Auto-layout applied to ${sorted.length} rooms (${maxOverlap} were overlapping)`);
+      }
+    }
+
     const maxInterior = { len: length - 2 * wallThickness, wid: width - 2 * wallThickness };
     const maxCorrection = Math.min(2.0, width * 0.15);
 
@@ -655,16 +1539,24 @@ function buildingSpecToCSS(spec, sourceFiles) {
       const levelId = `level-${floor}`;
       const baseZ = floorLevel + ((floor - 1) * floorToFloor);
 
-      let ox, oy;
+      let ox, oy, refDir;
       if (wallInfo.axis === 'x') {
         ox = offset;
-        oy = wallInfo.base_y;
+        // Center opening within wall thickness instead of placing at wall surface
+        oy = (side === 'SOUTH') ? wallThickness / 2 : wallInfo.base_y - wallThickness / 2;
+        refDir = { x: 1, y: 0, z: 0 }; // door width along X (wall runs along X)
       } else {
-        ox = wallInfo.base_x;
+        // Center opening within wall thickness
+        ox = (side === 'WEST') ? wallThickness / 2 : wallInfo.base_x - wallThickness / 2;
         oy = offset;
+        refDir = { x: 0, y: 1, z: 0 }; // door width along Y (wall runs along Y)
       }
 
-      const placement = { origin: { x: ox, y: oy, z: baseZ + sillHeight } };
+      const placement = {
+        origin: { x: ox, y: oy, z: baseZ + sillHeight },
+        axis: { x: 0, y: 0, z: 1 },
+        refDirection: refDir
+      };
       const geometry = {
         method: 'EXTRUSION',
         profile: { type: 'RECTANGLE', width: oWidth, height: wallThickness },
@@ -685,6 +1577,34 @@ function buildingSpecToCSS(spec, sourceFiles) {
 
   // ---- EQUIPMENT — v3.2: per-floor, skip for LINEAR (unless fans) ----
   if (spec.equipment) {
+    // Auto-layout fallback: detect overlapping equipment positions
+    if (spec.equipment.length > 1) {
+      const eqPosCounts = {};
+      for (const eq of spec.equipment) {
+        const key = `${Math.round((eq.x_position_m || 0) * 2) / 2},${Math.round((eq.y_position_m || 0) * 2) / 2}`;
+        eqPosCounts[key] = (eqPosCounts[key] || 0) + 1;
+      }
+      const eqMaxOverlap = Math.max(...Object.values(eqPosCounts));
+      if (eqMaxOverlap >= 2) {
+        const eqGap = 0.3;
+        let ecx = wallThickness, ecy = wallThickness, eRowH = 0;
+        for (const eq of spec.equipment) {
+          const eLen = eq.length_m || 1.5;
+          const eWid = eq.width_m || 1.0;
+          if (ecx + eLen > length - wallThickness) {
+            ecx = wallThickness;
+            ecy += eRowH + eqGap;
+            eRowH = 0;
+          }
+          eq.x_position_m = ecx;
+          eq.y_position_m = ecy;
+          ecx += eLen + eqGap;
+          eRowH = Math.max(eRowH, eWid);
+        }
+        console.log(`Equipment auto-layout applied (${eqMaxOverlap} were overlapping)`);
+      }
+    }
+
     const equipTypeMap = {
       'GENERATOR': 'IfcElectricGenerator', 'PUMP': 'IfcPump', 'FAN': 'IfcFan',
       'COMPRESSOR': 'IfcCompressor', 'TRANSFORMER': 'IfcTransformer', 'BOILER': 'IfcBoiler',
@@ -695,8 +1615,34 @@ function buildingSpecToCSS(spec, sourceFiles) {
       const eLen = equip.length_m || 1.5;
       const eWid = equip.width_m || 1.0;
       const eHeight = equip.height_m || 1.5;
-      const ex = equip.x_position_m || 0;
-      const ey = equip.y_position_m || 0;
+
+      // Phase F: Try to anchor equipment to a named section for tighter spatial bounds
+      let ex = equip.x_position_m ?? wallThickness;
+      let ey = equip.y_position_m ?? wallThickness;
+      let anchorConfidence = 0.75;
+
+      if (equip.segment_name && Array.isArray(spec.sections)) {
+        const matchedSection = spec.sections.find(s =>
+          s.name && s.name.toLowerCase() === equip.segment_name.toLowerCase()
+        );
+        if (matchedSection) {
+          const sX = matchedSection.x_offset_m ?? 0;
+          const sY = matchedSection.y_offset_m ?? 0;
+          const sLen = matchedSection.length_m || 5;
+          const sWid = matchedSection.width_m || 5;
+          ex = Math.max(sX + wallThickness, Math.min(ex, sX + sLen - wallThickness - eLen));
+          ey = Math.max(sY + wallThickness, Math.min(ey, sY + sWid - wallThickness - eWid));
+          anchorConfidence = 0.80;
+        } else {
+          console.warn(`Equipment segment_name "${equip.segment_name}" not found in sections; using footprint clamp.`);
+          ex = Math.max(wallThickness, Math.min(ex, length - wallThickness - eLen));
+          ey = Math.max(wallThickness, Math.min(ey, width - wallThickness - eWid));
+        }
+      } else {
+        // Existing footprint-clamp behavior
+        ex = Math.max(wallThickness, Math.min(ex, length - wallThickness - eLen));
+        ey = Math.max(wallThickness, Math.min(ey, width - wallThickness - eWid));
+      }
 
       const floor = normalizeFloor(equip.floor);
       const levelId = `level-${floor}`;
@@ -709,13 +1655,256 @@ function buildingSpecToCSS(spec, sourceFiles) {
         levelId,
         { equipmentType: equip.type || 'OTHER' },
         { name: 'steel', color: [0.5, 0.5, 0.55], transparency: 0 },
-        0.65
+        anchorConfidence
       ));
     }
   }
 
+  // ---- SECTIONS (attached volumes: garage, wing, annex, mezzanine, courtyard, etc.) ----
+  // Main building bounding box for shared-wall detection
+  const mainBBox = { minX: 0, maxX: length, minY: 0, maxY: width };
+
+  for (const section of spec.sections || []) {
+    const sLen = section.length_m || 5;
+    const sWid = section.width_m || 5;
+    const sHeight = section.height_m || floorToFloor;
+    const sFloors = Math.max(1, Math.min(10, section.num_floors || 1));
+    const sX = section.x_offset_m ?? 0;
+    const sY = section.y_offset_m ?? 0;
+    const sFloorH = sHeight / sFloors;
+    const sName = section.name || section.type || 'Section';
+    const sType = (section.type || 'WING').toUpperCase();
+    const sWt = wallThickness;
+
+    // MEZZANINE: partial floor inside main building (no exterior walls, just slab + railing)
+    if (sType === 'MEZZANINE') {
+      const mezzZ = floorLevel + (section.floor_level_m || floorToFloor);
+      const mLevelId = `level-${Math.min(2, numFloors)}`;
+      // Mezzanine floor slab (partial footprint)
+      addElement(makeElement('SLAB', 'IfcSlab', `${sName} Mezzanine Floor`,
+        { origin: { x: sX + sLen / 2, y: sY + sWid / 2, z: mezzZ } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sLen, height: sWid }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
+        mLevelId, { slabType: 'FLOOR', isMezzanine: true },
+        { name: spec.materials?.floor || 'concrete', color: [0.6, 0.6, 0.6], transparency: 0 }
+      ));
+      // Mezzanine edge railing (open side — typically the side facing the main volume)
+      const railHeight = 1.1;
+      // Add railing on the open edge (longest edge facing main space)
+      const openSide = sLen >= sWid ? 'SOUTH' : 'WEST';
+      if (openSide === 'SOUTH') {
+        addElement(makeElement('PROXY', 'IfcRailing', `${sName} Railing`,
+          { origin: { x: sX + sLen / 2, y: sY, z: mezzZ + 0.15 } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sLen, height: 0.05 }, direction: { x: 0, y: 0, z: 1 }, depth: railHeight },
+          mLevelId, { objectType: 'RAILING' },
+          { name: 'steel', color: [0.4, 0.4, 0.45], transparency: 0 }, 0.7
+        ));
+      } else {
+        addElement(makeElement('PROXY', 'IfcRailing', `${sName} Railing`,
+          { origin: { x: sX, y: sY + sWid / 2, z: mezzZ + 0.15 } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: 0.05, height: sWid }, direction: { x: 0, y: 0, z: 1 }, depth: railHeight },
+          mLevelId, { objectType: 'RAILING' },
+          { name: 'steel', color: [0.4, 0.4, 0.45], transparency: 0 }, 0.7
+        ));
+      }
+      continue;
+    }
+
+    // CANOPY: open-sided roof structure (no walls, just columns + roof)
+    if (sType === 'CANOPY') {
+      const canopyZ = floorLevel;
+      const canopyH = sHeight || 3.0;
+      const cLevelId = 'level-1';
+      // 4 corner columns
+      const colSize = 0.3;
+      for (const [cx, cy] of [[sX + colSize/2, sY + colSize/2], [sX + sLen - colSize/2, sY + colSize/2],
+                                [sX + colSize/2, sY + sWid - colSize/2], [sX + sLen - colSize/2, sY + sWid - colSize/2]]) {
+        addElement(makeElement('COLUMN', 'IfcColumn', `${sName} Column`,
+          { origin: { x: cx, y: cy, z: canopyZ } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: colSize, height: colSize }, direction: { x: 0, y: 0, z: 1 }, depth: canopyH },
+          cLevelId, {},
+          { name: 'steel', color: [0.5, 0.5, 0.55], transparency: 0 }, 0.7
+        ));
+      }
+      // Canopy roof
+      addElement(makeElement('SLAB', 'IfcSlab', `${sName} Roof`,
+        { origin: { x: sX + sLen / 2, y: sY + sWid / 2, z: canopyZ + canopyH } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sLen + 0.6, height: sWid + 0.6 }, direction: { x: 0, y: 0, z: 1 }, depth: 0.1 },
+        cLevelId, { slabType: 'ROOF' },
+        { name: 'metal', color: [0.4, 0.4, 0.45], transparency: 0 }, 0.7
+      ));
+      continue;
+    }
+
+    // Shared-wall detection: if section edge aligns with main building edge, skip that wall
+    const SHARED_TOL = 0.5;
+    const sMinX = sX, sMaxX = sX + sLen, sMinY = sY, sMaxY = sY + sWid;
+    const sharedSouth = Math.abs(sMinY - mainBBox.maxY) < SHARED_TOL || Math.abs(sMinY - mainBBox.minY) < SHARED_TOL;
+    const sharedNorth = Math.abs(sMaxY - mainBBox.minY) < SHARED_TOL || Math.abs(sMaxY - mainBBox.maxY) < SHARED_TOL;
+    const sharedWest = Math.abs(sMinX - mainBBox.maxX) < SHARED_TOL || Math.abs(sMinX - mainBBox.minX) < SHARED_TOL;
+    const sharedEast = Math.abs(sMaxX - mainBBox.minX) < SHARED_TOL || Math.abs(sMaxX - mainBBox.maxX) < SHARED_TOL;
+
+    for (let sf = 0; sf < sFloors; sf++) {
+      const sBaseZ = floorLevel + sf * sFloorH;
+      const sLevelId = `level-${Math.min(sf + 1, numFloors)}`;
+
+      // Walls — skip shared walls to avoid double geometry
+      if (!sharedSouth) {
+        addElement(makeElement('WALL', 'IfcWallStandardCase', `${sName} South Wall F${sf + 1}`,
+          { origin: { x: sX + sLen / 2, y: sY + sWt / 2, z: sBaseZ } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sLen, height: sWt }, direction: { x: 0, y: 0, z: 1 }, depth: sFloorH },
+          sLevelId, { isExternal: true, wallSide: 'SOUTH' },
+          { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
+        ));
+      }
+      if (!sharedNorth) {
+        addElement(makeElement('WALL', 'IfcWallStandardCase', `${sName} North Wall F${sf + 1}`,
+          { origin: { x: sX + sLen / 2, y: sY + sWid - sWt / 2, z: sBaseZ } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sLen, height: sWt }, direction: { x: 0, y: 0, z: 1 }, depth: sFloorH },
+          sLevelId, { isExternal: true, wallSide: 'NORTH' },
+          { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
+        ));
+      }
+      if (!sharedWest) {
+        addElement(makeElement('WALL', 'IfcWallStandardCase', `${sName} West Wall F${sf + 1}`,
+          { origin: { x: sX + sWt / 2, y: sY + sWid / 2, z: sBaseZ } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sWt, height: sWid }, direction: { x: 0, y: 0, z: 1 }, depth: sFloorH },
+          sLevelId, { isExternal: true, wallSide: 'WEST' },
+          { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
+        ));
+      }
+      if (!sharedEast) {
+        addElement(makeElement('WALL', 'IfcWallStandardCase', `${sName} East Wall F${sf + 1}`,
+          { origin: { x: sX + sLen - sWt / 2, y: sY + sWid / 2, z: sBaseZ } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sWt, height: sWid }, direction: { x: 0, y: 0, z: 1 }, depth: sFloorH },
+          sLevelId, { isExternal: true, wallSide: 'EAST' },
+          { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
+        ));
+      }
+
+      // Floor slab
+      addElement(makeElement('SLAB', 'IfcSlab', `${sName} Floor F${sf + 1}`,
+        { origin: { x: sX + sLen / 2, y: sY + sWid / 2, z: sBaseZ } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sLen, height: sWid }, direction: { x: 0, y: 0, z: 1 }, depth: 0.2 },
+        sLevelId, { slabType: 'FLOOR' },
+        { name: spec.materials?.floor || 'concrete', color: [0.6, 0.6, 0.6], transparency: 0 }
+      ));
+
+      // Roof on last section floor
+      if (sf === sFloors - 1) {
+        const sRoofType = (section.roof_type || 'FLAT').toUpperCase();
+        const sRoofZ = sBaseZ + sFloorH;
+        if (sRoofType === 'GABLE') {
+          const ridgeAlongX = sLen >= sWid;
+          const { vertices, faces } = buildGableRoofMesh(sLen, sWid,
+            section.roof_pitch_degrees || 25, 0.3, ridgeAlongX, sX, sY);
+          addElement(makeElement('SLAB', 'IfcSlab', `${sName} Roof`,
+            { origin: { x: 0, y: 0, z: sRoofZ } },
+            { method: 'MESH', vertices, faces },
+            sLevelId, { slabType: 'ROOF' },
+            { name: 'metal', color: [0.35, 0.35, 0.4], transparency: 0 }
+          ));
+        } else {
+          addElement(makeElement('SLAB', 'IfcSlab', `${sName} Roof`,
+            { origin: { x: sX + sLen / 2, y: sY + sWid / 2, z: sRoofZ } },
+            { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: sLen, height: sWid }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
+            sLevelId, { slabType: 'ROOF' },
+            { name: 'metal', color: [0.4, 0.4, 0.45], transparency: 0 }
+          ));
+        }
+      }
+    }
+  }
+
+  // ---- VERTICAL FEATURES (chimneys, exhaust stacks, vents, etc.) ----
+  const roofElevation = floorLevel + (numFloors * floorToFloor);
+
+  for (const feat of spec.vertical_features || []) {
+    const fw = feat.width_m || 0.8;
+    const fd = feat.depth_m || 0.6;
+    const fAbove = feat.height_above_roof_m || 1.0;
+    const fx = Math.max(0, Math.min(feat.x_position_m ?? length / 2, length));
+    const fy = Math.max(0, Math.min(feat.y_position_m ?? width / 2, width));
+
+    const materialMap = {
+      CHIMNEY: { name: 'brick', color: [0.6, 0.3, 0.2] },
+      EXHAUST_STACK: { name: 'steel', color: [0.5, 0.5, 0.55] },
+      VENT: { name: 'steel', color: [0.45, 0.45, 0.5] },
+      PARAPET: { name: 'concrete', color: [0.7, 0.7, 0.7] },
+      ANTENNA_MOUNT: { name: 'steel', color: [0.4, 0.4, 0.45] },
+    };
+    const mat = materialMap[feat.type] || materialMap.VENT;
+
+    addElement(makeElement('PROXY', 'IfcBuildingElementProxy', feat.name || feat.type || 'Vertical Feature',
+      { origin: { x: fx, y: fy, z: roofElevation } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: fw, height: fd }, direction: { x: 0, y: 0, z: 1 }, depth: fAbove },
+      `level-${numFloors}`, { objectType: feat.type || 'VERTICAL_FEATURE' },
+      mat, 0.6
+    ));
+  }
+
   // Build bbox
   const totalHeight = floorLevel + (numFloors * floorToFloor) + 0.15;
+
+  // v6: Envelope fallback — if building extraction is too fragmented, downgrade to skeleton
+  const wallCount = elements.filter(e => e.type === 'WALL').length;
+  const slabCount = elements.filter(e => e.type === 'SLAB').length;
+  let envelopeFallbackApplied = false;
+
+  if (wallCount < 4 || slabCount < 2) {
+    console.warn(`v6 Envelope fallback: only ${wallCount} walls, ${slabCount} slabs — rebuilding as envelope-only`);
+    envelopeFallbackApplied = true;
+    // Clear all elements and rebuild minimal envelope
+    elements.length = 0;
+    const wt = wallThickness;
+    const baseZ = floorLevel;
+
+    // 4 exterior walls
+    addElement(makeElement('WALL', 'IfcWallStandardCase', 'South Wall',
+      { origin: { x: length / 2, y: wt / 2, z: baseZ } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+      'level-1', { isExternal: true, wallSide: 'SOUTH' },
+      { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
+    ));
+    addElement(makeElement('WALL', 'IfcWallStandardCase', 'North Wall',
+      { origin: { x: length / 2, y: width - wt / 2, z: baseZ } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+      'level-1', { isExternal: true, wallSide: 'NORTH' },
+      { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
+    ));
+    addElement(makeElement('WALL', 'IfcWallStandardCase', 'West Wall',
+      { origin: { x: wt / 2, y: width / 2, z: baseZ } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wt, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+      'level-1', { isExternal: true, wallSide: 'WEST' },
+      { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
+    ));
+    addElement(makeElement('WALL', 'IfcWallStandardCase', 'East Wall',
+      { origin: { x: length - wt / 2, y: width / 2, z: baseZ } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wt, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+      'level-1', { isExternal: true, wallSide: 'EAST' },
+      { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
+    ));
+    // Floor slab
+    addElement(makeElement('SLAB', 'IfcSlab', 'Floor Slab',
+      { origin: { x: length / 2, y: width / 2, z: baseZ } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.2 },
+      'level-1', { slabType: 'FLOOR' },
+      { name: 'concrete', color: [0.6, 0.6, 0.6], transparency: 0 }
+    ));
+    // Roof slab
+    addElement(makeElement('SLAB', 'IfcSlab', 'Roof Slab',
+      { origin: { x: length / 2, y: width / 2, z: baseZ + floorToFloor } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
+      'level-1', { slabType: 'ROOF' },
+      { name: 'metal', color: [0.4, 0.4, 0.45], transparency: 0 }
+    ));
+    // One door
+    addElement(makeElement('DOOR', 'IfcDoor', 'Main Entrance',
+      { origin: { x: length / 2, y: wt / 2, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: 0.9, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: 2.1 },
+      'level-1', { wallSide: 'SOUTH', sillHeight: 0 },
+      { name: 'wood', color: [0.55, 0.35, 0.2], transparency: 0 }, 0.6
+    ));
+  }
 
   const css = {
     cssVersion: '1.0',
@@ -739,6 +1928,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
       cssHash: null,
       elementCounts,
       structureClass,
+      envelopeFallbackApplied,
       skippedRooms: skippedRooms.length > 0 ? skippedRooms : undefined,
       skippedOpenings: skippedOpenings.length > 0 ? skippedOpenings : undefined,
       bbox: {
@@ -769,6 +1959,133 @@ const ENRICHMENT_GEOMETRY_FIELDS = new Set([
 const MAX_CHARS_PER_FILE = 50_000;
 const MAX_TOTAL_SUPPLEMENTARY = 120_000;
 const MULTI_PASS = process.env.MULTI_PASS !== 'false';
+
+// ============================================================================
+// SOURCE CLASSIFICATION + PRIORITY-WEIGHTED PROMPT BUILDER
+// ============================================================================
+
+/**
+ * Classify a processed file by its likely role in the document set.
+ * Conservative: defaults to NARRATIVE to avoid suppressing architectural data.
+ */
+function classifySourceFile(file) {
+  const name = (file.name || '').toLowerCase();
+  const content = (file.content || '').slice(0, 3000);
+
+  // 1. VentSim simulation dump
+  if (isVentSim(file.content || '')) return 'SIMULATION';
+  if (/ventsim|_vts|airway|network_export/i.test(name)) return 'SIMULATION';
+
+  // 2. DXF/DWG drawing
+  if (name.endsWith('.dxf') || name.endsWith('.dwg')) return 'DRAWING';
+
+  // 3. Equipment / MEP schedule — requires BOTH filename and content signals
+  if (/equipment.list|mep.schedule|asset.inventory/i.test(name) &&
+      /TAG\s+DESCRIPTION\s+(MANUFACTURER|TYPE|CAPACITY)/i.test(content)) return 'SCHEDULE';
+
+  // 4. Tabular-dominant content with schedule filename hint
+  if (/schedule|equipment/i.test(name)) {
+    const lines = content.split('\n').filter(l => l.trim().length > 0);
+    const tabbedLines = lines.filter(l => l.includes('\t') || l.split(',').length >= 3);
+    const prosyLines = lines.filter(l => l.split(' ').length > 6 && !l.includes('\t'));
+    if (lines.length > 5 && tabbedLines.length / lines.length > 0.7 && prosyLines.length < lines.length * 0.3) {
+      return 'SCHEDULE';
+    }
+  }
+
+  // 5. Explicit narrative / spec filename
+  if (/specification|design.brief|facility.description|building.overview/i.test(name)) return 'NARRATIVE';
+
+  // 6. Technical narrative: mostly prose + dimensional keywords
+  const allLines = content.split('\n').filter(l => l.trim().length > 0);
+  const proseLines = allLines.filter(l => l.split(' ').length > 6);
+  if (allLines.length > 5 && proseLines.length / allLines.length > 0.5 &&
+      /\b(feet|metres?|meters?|width|length|height|floor|wall|room|tunnel|shaft|portal)\b/i.test(content)) {
+    return 'TECHNICAL_NARRATIVE';
+  }
+
+  // 8. Default: NARRATIVE (conservative)
+  return 'NARRATIVE';
+}
+
+/**
+ * Build a priority-sectioned file content string for Bedrock prompts.
+ * PRIMARY (narrative) → SECONDARY (schedules) → TERTIARY (simulation, 2k chars only).
+ */
+function buildPriorityFileContent(files, refinementText = null) {
+  const MAX_PRIMARY = 50000;
+  const MAX_SECONDARY = 12000;
+  const MAX_TERTIARY = 2000;
+  const parts = [];
+  let totalChars = 0;
+  const MAX_TOTAL = 150000;
+
+  // Refinement/correction context — highest priority
+  if (refinementText) {
+    parts.push([
+      '=== CORRECTION / REFINEMENT (HIGHEST PRIORITY) ===',
+      'An engineer reviewed the previously generated model and provided the following correction.',
+      'Apply this before all other context. Override conflicting values from source documents where the correction is explicit.',
+      '',
+      refinementText.trim(),
+      '==='
+    ].join('\n'));
+  }
+
+  const primary = files.filter(f => f.sourceRole === 'NARRATIVE' || f.sourceRole === 'TECHNICAL_NARRATIVE');
+  const secondary = files.filter(f => f.sourceRole === 'SCHEDULE');
+  const tertiary = files.filter(f => f.sourceRole === 'SIMULATION' || f.sourceRole === 'DRAWING');
+
+  if (primary.length > 0) {
+    const section = ['=== PRIMARY — Architectural / Facility Description ===',
+      'IMPORTANT: Use these documents as the authoritative source for structure type, envelope,',
+      'footprint, massing, overall dimensions, levels, roof form, portals, shafts, rooms, and major zones.',
+      'Do NOT let secondary or tertiary documents reshape these.', ''];
+    for (const f of primary) {
+      if (totalChars >= MAX_TOTAL) break;
+      const cap = Math.min(MAX_PRIMARY, MAX_TOTAL - totalChars);
+      const c = (f.content || '').slice(0, cap);
+      section.push(`File: ${f.name}\n${c}`);
+      totalChars += c.length;
+    }
+    parts.push(section.join('\n'));
+  }
+
+  if (secondary.length > 0) {
+    const section = ['=== SECONDARY — Equipment / MEP Schedules ===',
+      'NOTE: Use for equipment sizing, system selection, and MEP metadata only.',
+      'Do NOT let equipment table dimensions reshape the building/tunnel envelope.', ''];
+    for (const f of secondary) {
+      if (totalChars >= MAX_TOTAL) break;
+      const cap = Math.min(MAX_SECONDARY, MAX_TOTAL - totalChars);
+      const c = (f.content || '').slice(0, cap);
+      section.push(`File: ${f.name}\n${c}`);
+      totalChars += c.length;
+    }
+    parts.push(section.join('\n'));
+  }
+
+  if (tertiary.length > 0) {
+    const section = ['=== TERTIARY — Simulation / Network Exports ===',
+      'NOTE: Use for airflow network semantics and fan/duct context only.',
+      'Do NOT derive structural geometry from these.', ''];
+    for (const f of tertiary) {
+      if (totalChars >= MAX_TOTAL) break;
+      const cap = Math.min(MAX_TERTIARY, MAX_TOTAL - totalChars);
+      const c = (f.content || '').slice(0, cap);
+      section.push(`File: ${f.name}\n${c}`);
+      totalChars += c.length;
+    }
+    parts.push(section.join('\n'));
+  }
+
+  // Fallback: if nothing classified, use all files flat
+  if (parts.length === 0) {
+    return files.map(f => `File: ${f.name}\n${(f.content || '').slice(0, 30000)}`).join('\n\n---\n\n');
+  }
+
+  return parts.join('\n\n---\n\n');
+}
 
 /**
  * Build supplementary text from non-primary files with round-robin truncation.
@@ -966,12 +2283,701 @@ Rules:
 }
 
 // ============================================================================
+// v6: RESTRICTED SAFE SOURCE FUSION — document-derived element creation
+// ============================================================================
+
+const FUSION_ALLOWLIST = new Set([
+  'PIPE', 'PUMP', 'TANK', 'HYDRANT', 'VALVE', 'SENSOR', 'CAMERA',
+  'CONTROL_PANEL', 'FIRE_SUPPRESSION', 'COMMUNICATIONS', 'SECURITY'
+]);
+
+const FUSION_PLACEMENT_TEMPLATES = {
+  PIPE:             { lateralFraction: 0.3, verticalFraction: 0.8, defaultLength: 2.0, defaultDiameter: 0.2 },
+  PUMP:             { lateralFraction: 0.2, verticalFraction: 0.0, defaultLength: 1.0, defaultWidth: 0.6, defaultHeight: 0.8 },
+  TANK:             { lateralFraction: 0.4, verticalFraction: 0.0, defaultLength: 1.5, defaultWidth: 1.0, defaultHeight: 1.5 },
+  HYDRANT:          { lateralFraction: 0.1, verticalFraction: 0.0, defaultLength: 0.3, defaultWidth: 0.3, defaultHeight: 0.8 },
+  VALVE:            { lateralFraction: 0.15, verticalFraction: 0.5, defaultLength: 0.2, defaultWidth: 0.2, defaultHeight: 0.2 },
+  SENSOR:           { lateralFraction: 0.5, verticalFraction: 0.9, defaultLength: 0.15, defaultWidth: 0.15, defaultHeight: 0.1 },
+  CAMERA:           { lateralFraction: 0.5, verticalFraction: 0.95, defaultLength: 0.2, defaultWidth: 0.15, defaultHeight: 0.15 },
+  CONTROL_PANEL:    { lateralFraction: 0.05, verticalFraction: 0.5, defaultLength: 0.6, defaultWidth: 0.2, defaultHeight: 0.8 },
+  FIRE_SUPPRESSION: { lateralFraction: 0.5, verticalFraction: 0.95, defaultLength: 0.15, defaultWidth: 0.15, defaultHeight: 0.1 },
+  COMMUNICATIONS:   { lateralFraction: 0.45, verticalFraction: 0.9, defaultLength: 0.3, defaultWidth: 0.1, defaultHeight: 0.3 },
+  SECURITY:         { lateralFraction: 0.4, verticalFraction: 0.85, defaultLength: 0.25, defaultWidth: 0.15, defaultHeight: 0.2 }
+};
+
+/**
+ * Extract fusible equipment findings from supplementary document text.
+ * Returns array of { name, type, confidence, segmentName, sourceFile, ... }
+ */
+async function extractDocumentFindings(suppText, sourceFileNames) {
+  if (!suppText || suppText.length < 50) return [];
+
+  const prompt = `Analyze this document text and identify any specific infrastructure equipment or devices mentioned.
+Only return items that are explicitly named/described — do not infer or guess.
+
+Allowed types: PIPE, PUMP, TANK, HYDRANT, VALVE, SENSOR, CAMERA, CONTROL_PANEL, FIRE_SUPPRESSION, COMMUNICATIONS, SECURITY
+
+For each item found, return:
+- name: specific name from the document
+- type: one of the allowed types above
+- confidence: 0.0-1.0 how explicit the mention is
+- segmentName: which area/zone/segment it's in (if mentioned)
+- specs: any specifications (dimensions, ratings, etc.)
+
+Return a JSON array. If no equipment found, return [].
+
+Document text:
+${suppText.slice(0, 20000)}`;
+
+  try {
+    const response = await bedrock.send(new InvokeModelCommand({
+      modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      contentType: 'application/json',
+      accept: 'application/json',
+      body: JSON.stringify({
+        anthropic_version: 'bedrock-2023-05-31',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    }));
+
+    const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+    const text = responseBody.content?.[0]?.text || '';
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+
+    const findings = JSON.parse(jsonMatch[0]);
+    // Tag with source files
+    return findings.map(f => ({ ...f, sourceFiles: sourceFileNames }));
+  } catch (err) {
+    console.warn('Document findings extraction failed:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Attempt restricted safe source fusion — add non-structural elements from document findings.
+ * Rules:
+ * 1. Only types in FUSION_ALLOWLIST
+ * 2. Must have valid segment/space anchor in existing CSS
+ * 3. Must pass duplicate check
+ * 4. Confidence >= 0.6
+ * 5. Never structural (WALL, SLAB, ROOF, TUNNEL_SEGMENT)
+ * 6. Deterministic placement templates only — no randomness
+ */
+function attemptSafeSourceFusion(css, documentFindings, sourceFiles) {
+  if (!css.elements || !documentFindings || documentFindings.length === 0) return;
+
+  const existingNames = new Set(css.elements.map(e => `${e.name}:${e.type}:${e.container}`));
+  const spaces = css.elements.filter(e => (e.type || '').toUpperCase() === 'SPACE');
+  const segments = (css.levelsOrSegments || []);
+
+  let fusedCount = 0;
+  let rejectedCount = 0;
+  const fusionLog = [];
+
+  for (let i = 0; i < documentFindings.length; i++) {
+    const finding = documentFindings[i];
+    const findingType = (finding.type || '').toUpperCase();
+
+    // Rule 1: Only allowlisted types
+    if (!FUSION_ALLOWLIST.has(findingType)) {
+      fusionLog.push({ name: finding.name, type: findingType, reason: 'not_in_allowlist' });
+      rejectedCount++;
+      continue;
+    }
+
+    // Rule 4: Confidence check
+    const confidence = finding.confidence || 0.5;
+    if (confidence < 0.6) {
+      fusionLog.push({ name: finding.name, type: findingType, reason: 'low_confidence', confidence });
+      rejectedCount++;
+      continue;
+    }
+
+    // Rule 2: Must anchor to existing segment or space
+    let anchorElem = null;
+    if (finding.segmentName) {
+      anchorElem = spaces.find(s => s.name && s.name.toLowerCase().includes(finding.segmentName.toLowerCase()));
+      if (!anchorElem) {
+        // Try matching by segment/level
+        const seg = segments.find(s => s.name && s.name.toLowerCase().includes(finding.segmentName.toLowerCase()));
+        if (seg) {
+          anchorElem = spaces.find(s => s.container === seg.id);
+        }
+      }
+    }
+    if (!anchorElem && finding.container) {
+      anchorElem = spaces.find(s => s.container === finding.container || s.id === finding.container);
+    }
+    if (!anchorElem && spaces.length > 0) {
+      // Fall back to first space if only one option
+      if (spaces.length === 1) anchorElem = spaces[0];
+    }
+    if (!anchorElem) {
+      fusionLog.push({ name: finding.name, type: findingType, reason: 'no_anchor' });
+      rejectedCount++;
+      continue;
+    }
+
+    // Rule 3: Duplicate check
+    const dupKey = `${finding.name}:${findingType}:${anchorElem.container}`;
+    if (existingNames.has(dupKey)) {
+      fusionLog.push({ name: finding.name, type: findingType, reason: 'duplicate' });
+      rejectedCount++;
+      continue;
+    }
+
+    // Deterministic placement from template
+    const template = FUSION_PLACEMENT_TEMPLATES[findingType] || FUSION_PLACEMENT_TEMPLATES.SENSOR;
+    const ao = anchorElem.placement?.origin || { x: 0, y: 0, z: 0 };
+    const ag = anchorElem.geometry || {};
+    const aw = ag.profile?.width || 5;
+    const ah = ag.profile?.height || 5;
+    const ad = ag.depth || 3;
+
+    // Index-based stagger along axis to avoid overlap
+    const staggerOffset = (i * 0.8) % (aw * 0.8);
+
+    // Map fusion types to proper IFC semantic classes
+    const FUSION_SEMANTIC_MAP = {
+      PIPE: 'IfcPipeSegment', PUMP: 'IfcPump', TANK: 'IfcTank',
+      HYDRANT: 'IfcFireSuppressionTerminal', VALVE: 'IfcValve',
+      SENSOR: 'IfcSensor', CAMERA: 'IfcCommunicationsAppliance',
+      CONTROL_PANEL: 'IfcElectricDistributionBoard',
+      FIRE_SUPPRESSION: 'IfcFireSuppressionTerminal',
+      COMMUNICATIONS: 'IfcCommunicationsAppliance',
+      SECURITY: 'IfcAlarm'
+    };
+    const fusionSemanticType = FUSION_SEMANTIC_MAP[findingType] || 'IfcBuildingElementProxy';
+
+    const newElem = {
+      id: elemId({ depth: template.defaultLength || 0.5 }, { origin: { x: ao.x + staggerOffset, y: ao.y + ah * template.lateralFraction, z: ao.z + ad * template.verticalFraction } }),
+      type: 'EQUIPMENT',
+      semanticType: fusionSemanticType,
+      name: finding.name || findingType,
+      placement: {
+        origin: {
+          x: ao.x + staggerOffset,
+          y: ao.y + ah * template.lateralFraction,
+          z: ao.z + ad * template.verticalFraction
+        }
+      },
+      geometry: {
+        method: 'EXTRUSION',
+        profile: { type: 'RECTANGLE', width: finding.width || template.defaultLength || 0.5, height: finding.depth || template.defaultWidth || 0.3 },
+        direction: { x: 0, y: 0, z: 1 },
+        depth: finding.height || template.defaultHeight || 0.5
+      },
+      container: anchorElem.container || 'level-1',
+      relationships: [],
+      properties: { equipmentType: findingType },
+      material: { name: 'steel', color: [0.5, 0.5, 0.55], transparency: 0 },
+      confidence: Math.min(confidence, 0.6),
+      source: 'DOCUMENT',
+      sourceFile: finding.sourceFile,
+      metadata: {
+        sourceDocument: true,
+        placementBasis: 'DOCUMENT_INFERRED_SEGMENT_ANCHORED',
+        nearestSegmentKey: anchorElem.element_key || anchorElem.id,
+        confidence,
+        sourceFiles: finding.sourceFiles || []
+      }
+    };
+
+    css.elements.push(newElem);
+    existingNames.add(dupKey);
+    fusedCount++;
+  }
+
+  if (fusedCount > 0 || rejectedCount > 0) {
+    console.log(`v6 Source fusion: ${fusedCount} elements created, ${rejectedCount} rejected`);
+    if (!css.metadata) css.metadata = {};
+    css.metadata.sourceFusion = { fusedCount, rejectedCount, log: fusionLog.slice(0, 20) };
+  }
+}
+
+// ============================================================================
+// v6+: VISION-BASED EXTRACTION (images + scanned PDFs)
+// Type-specific prompts for architectural/engineering drawings
+// ============================================================================
+
+// Step 1: Classify the image type
+const VISION_CLASSIFY_PROMPT = `Classify this architectural/engineering image into exactly ONE category.
+
+Categories:
+- FLOOR_PLAN: top-down room layouts showing walls, doors, rooms with labels
+- CROSS_SECTION: vertical cut-through showing tunnel/building profile, layers, heights
+- EQUIPMENT_LAYOUT: diagram showing equipment positions, piping, ductwork arrangement
+- SITE_PLAN: overview showing building footprint on land, roads, orientation
+- SPECIFICATION: text-heavy equipment schedule, data sheet, or spec table
+- ELEVATION: external view of building face showing heights and features
+- PHOTO: photograph of real building/site
+- UNKNOWN: cannot determine
+
+Return ONLY a JSON object:
+{
+  "imageType": "FLOOR_PLAN",
+  "confidence": 0.85,
+  "hasScale": true,
+  "scaleInfo": "1:100" or null,
+  "hasDimensions": true,
+  "hasGridSystem": false,
+  "extractedText": "any readable text labels, titles, dimensions"
+}`;
+
+// Type-specific extraction prompts
+const VISION_PROMPTS = {
+  FLOOR_PLAN: `You are analyzing an architectural FLOOR PLAN drawing.
+Extract the geometric layout visible in this drawing. ALL DIMENSIONS IN METRES.
+
+Extract:
+1. WALLS: perimeter and interior walls with start/end coordinates or lengths
+2. ROOMS: labeled spaces with approximate dimensions
+3. DOORS: locations on walls with width
+4. WINDOWS: locations on walls with width
+5. SCALE: if a scale bar or ratio is shown, use it to calibrate dimensions
+6. GRID: if a column grid is visible, extract grid spacing
+
+Return ONLY valid JSON:
+{
+  "imageType": "FLOOR_PLAN",
+  "confidence": 0.0-1.0,
+  "scale": { "detected": true, "ratio": "1:100", "pixelsPerMeter": null },
+  "overallDimensions": { "length_m": null, "width_m": null },
+  "walls": [
+    { "id": "W1", "type": "EXTERIOR|INTERIOR", "side": "NORTH|SOUTH|EAST|WEST|INTERIOR", "length_m": 0, "thickness_m": 0.3, "confidence": 0.8 }
+  ],
+  "rooms": [
+    { "name": "string", "usage": "OFFICE|STORAGE|MECHANICAL|WC|LOBBY|CORRIDOR|OTHER", "length_m": 0, "width_m": 0, "labeledArea_sqm": null, "confidence": 0.8 }
+  ],
+  "doors": [
+    { "hostWall": "W1 or NORTH/SOUTH/EAST/WEST", "width_m": 0.9, "type": "SINGLE|DOUBLE|SLIDING", "confidence": 0.7 }
+  ],
+  "windows": [
+    { "hostWall": "W1 or NORTH/SOUTH/EAST/WEST", "width_m": 1.2, "height_m": 1.5, "sillHeight_m": 0.9, "confidence": 0.7 }
+  ],
+  "grid": { "xSpacing_m": null, "ySpacing_m": null },
+  "annotations": ["any text labels not captured above"],
+  "extractedText": "all readable text"
+}
+Rules:
+- Only extract what you can clearly see. Set confidence per element.
+- If scale is not detectable, set scale.detected=false and estimate dimensions from labeled values only.
+- If no labeled dimensions exist and no scale, set overallDimensions to null.`,
+
+  CROSS_SECTION: `You are analyzing a CROSS-SECTION or PROFILE drawing of a tunnel or building.
+Extract the profile geometry. ALL DIMENSIONS IN METRES.
+
+Extract:
+1. PROFILE SHAPE: rectangular, horseshoe, circular, arch
+2. KEY DIMENSIONS: width, height, wall thickness, floor thickness, roof thickness
+3. LAYERS: if visible (lining, rock, insulation, etc.)
+4. EQUIPMENT: any equipment shown in the section (fans, ducts, cables)
+5. ZONES: labeled areas within the cross-section (traffic zone, escape path, service zone)
+
+Return ONLY valid JSON:
+{
+  "imageType": "CROSS_SECTION",
+  "confidence": 0.0-1.0,
+  "profileShape": "RECTANGULAR|HORSESHOE|CIRCULAR|ARCH|D_SHAPE|OTHER",
+  "dimensions": {
+    "outerWidth_m": null, "outerHeight_m": null,
+    "innerWidth_m": null, "innerHeight_m": null,
+    "wallThickness_m": null, "floorThickness_m": null, "roofThickness_m": null
+  },
+  "layers": [
+    { "name": "string", "material": "string", "thickness_m": 0, "confidence": 0.7 }
+  ],
+  "equipment": [
+    { "name": "string", "type": "FAN|DUCT|CABLE_TRAY|LIGHTING|PIPE|SENSOR|OTHER", "position": "CEILING|WALL_LEFT|WALL_RIGHT|FLOOR|CENTER", "confidence": 0.7 }
+  ],
+  "zones": [
+    { "name": "string", "width_m": null, "height_m": null }
+  ],
+  "annotations": ["any text labels"],
+  "extractedText": "all readable text"
+}
+Rules: Only extract clearly visible elements. Estimate dimensions only from labeled values or scale.`,
+
+  EQUIPMENT_LAYOUT: `You are analyzing an EQUIPMENT LAYOUT or PIPING/DUCTWORK DIAGRAM.
+Extract equipment positions and connections. ALL DIMENSIONS IN METRES.
+
+Return ONLY valid JSON:
+{
+  "imageType": "EQUIPMENT_LAYOUT",
+  "confidence": 0.0-1.0,
+  "equipment": [
+    { "name": "string", "type": "FAN|PUMP|GENERATOR|COMPRESSOR|TRANSFORMER|AHU|BOILER|CHILLER|TANK|VALVE|SENSOR|OTHER", "specs": "any visible specs", "relativePosition": "description of where it is", "dimensions": { "length_m": null, "width_m": null, "height_m": null }, "confidence": 0.7 }
+  ],
+  "connections": [
+    { "from": "equipment name", "to": "equipment name", "type": "DUCT|PIPE|CABLE|OTHER", "diameter_m": null }
+  ],
+  "systemType": "VENTILATION|HVAC|PLUMBING|ELECTRICAL|FIRE_PROTECTION|OTHER",
+  "annotations": ["any text labels"],
+  "extractedText": "all readable text"
+}
+Rules: Only extract equipment and connections you can clearly identify.`,
+
+  SITE_PLAN: `You are analyzing a SITE PLAN drawing.
+Extract the building footprint and site features. ALL DIMENSIONS IN METRES.
+
+Return ONLY valid JSON:
+{
+  "imageType": "SITE_PLAN",
+  "confidence": 0.0-1.0,
+  "buildings": [
+    { "name": "string", "footprint": { "length_m": null, "width_m": null }, "orientation_deg": null, "numFloors": null, "confidence": 0.7 }
+  ],
+  "siteFeatures": ["parking", "road", "landscaping"],
+  "overallSiteDimensions": { "length_m": null, "width_m": null },
+  "annotations": ["any text labels"],
+  "extractedText": "all readable text"
+}`,
+
+  ELEVATION: `You are analyzing a building ELEVATION drawing (external face view).
+Extract heights and features. ALL DIMENSIONS IN METRES.
+
+Return ONLY valid JSON:
+{
+  "imageType": "ELEVATION",
+  "confidence": 0.0-1.0,
+  "face": "NORTH|SOUTH|EAST|WEST|UNKNOWN",
+  "overallHeight_m": null,
+  "overallWidth_m": null,
+  "numFloors": null,
+  "floorToFloorHeight_m": null,
+  "windows": [{ "floor": 1, "count": 0, "width_m": null, "height_m": null }],
+  "doors": [{ "floor": 1, "width_m": null, "height_m": null }],
+  "roofType": "FLAT|GABLE|HIP|OTHER",
+  "roofPitch_deg": null,
+  "annotations": ["any text labels"],
+  "extractedText": "all readable text"
+}`,
+
+  // Fallback for SPECIFICATION, PHOTO, UNKNOWN
+  DEFAULT: `You are analyzing an architectural/engineering image or scanned document.
+Extract any building or infrastructure information visible.
+
+Return ONLY valid JSON:
+{
+  "imageType": "SPECIFICATION|PHOTO|UNKNOWN",
+  "confidence": 0.0-1.0,
+  "extractedText": "any readable text in the image",
+  "buildingInfo": {
+    "buildingType": "string or null",
+    "dimensions": { "length_m": null, "width_m": null, "height_m": null },
+    "rooms": [{ "name": "string", "length_m": 0, "width_m": 0 }],
+    "equipment": [{ "name": "string", "type": "string", "specs": "string" }],
+    "materials": ["string"],
+    "notes": "any additional relevant information"
+  }
+}
+Only include information you can clearly see — do not guess.`
+};
+
+// Confidence thresholds for vision-to-CSS conversion
+const VISION_GEOMETRY_CONFIDENCE = 0.6;
+const VISION_SCALE_REQUIRED_FOR_GEOMETRY = true;
+
+/**
+ * Convert structured vision extraction into CSS elements (confidence-gated).
+ * Only creates geometry when scale can be estimated AND element confidence >= threshold.
+ * Otherwise stores as visionFindings metadata only.
+ */
+function visionToCSS(visionResult, fileName) {
+  const elements = [];
+  const findings = [];
+  const imageType = visionResult.imageType;
+  const hasScale = visionResult.scale?.detected || false;
+  const hasDimensions = !!(visionResult.overallDimensions?.length_m || visionResult.dimensions?.innerWidth_m);
+
+  // Can we generate geometry? Need either detected scale or labeled dimensions
+  const canGenerateGeometry = hasScale || hasDimensions || !VISION_SCALE_REQUIRED_FOR_GEOMETRY;
+
+  if (imageType === 'FLOOR_PLAN') {
+    const overallL = visionResult.overallDimensions?.length_m;
+    const overallW = visionResult.overallDimensions?.width_m;
+
+    // Walls → CSS elements
+    for (const wall of (visionResult.walls || [])) {
+      if (!canGenerateGeometry || (wall.confidence || 0) < VISION_GEOMETRY_CONFIDENCE || !wall.length_m || wall.length_m <= 0) {
+        findings.push({ type: 'WALL', data: wall, reason: !canGenerateGeometry ? 'NO_SCALE' : 'LOW_CONFIDENCE', source: fileName });
+        continue;
+      }
+      elements.push({
+        type: 'WALL', semanticType: 'IfcWall',
+        name: wall.id || `Vision Wall`,
+        geometry: { profile: { width: wall.thickness_m || 0.3, height: wall.length_m }, depth: 3.0 },
+        placement: { origin: { x: 0, y: 0, z: 0 } },
+        metadata: { visionExtracted: true, wallSide: wall.side, wallType: wall.type, confidence: wall.confidence },
+        source: 'VISION', sourceFile: fileName, confidence: wall.confidence || 0.5
+      });
+    }
+
+    // Rooms → CSS SPACE elements
+    for (const room of (visionResult.rooms || [])) {
+      if (!canGenerateGeometry || (room.confidence || 0) < VISION_GEOMETRY_CONFIDENCE || !room.length_m || !room.width_m) {
+        findings.push({ type: 'SPACE', data: room, reason: !canGenerateGeometry ? 'NO_SCALE' : 'LOW_CONFIDENCE', source: fileName });
+        continue;
+      }
+      elements.push({
+        type: 'SPACE', semanticType: 'IfcSpace',
+        name: room.name || 'Room',
+        properties: { usage: room.usage || 'OTHER' },
+        geometry: { profile: { width: room.width_m, height: room.length_m }, depth: 3.0 },
+        placement: { origin: { x: 0, y: 0, z: 0 } },
+        metadata: { visionExtracted: true, labeledArea: room.labeledArea_sqm, confidence: room.confidence },
+        source: 'VISION', sourceFile: fileName, confidence: room.confidence || 0.5
+      });
+    }
+
+    // Doors → CSS DOOR elements
+    for (const door of (visionResult.doors || [])) {
+      if ((door.confidence || 0) < VISION_GEOMETRY_CONFIDENCE) {
+        findings.push({ type: 'DOOR', data: door, reason: 'LOW_CONFIDENCE', source: fileName });
+        continue;
+      }
+      elements.push({
+        type: 'DOOR', semanticType: 'IfcDoor',
+        name: `Door (${door.type || 'SINGLE'})`,
+        geometry: { profile: { width: door.width_m || 0.9, height: 2.1 }, depth: 0.1 },
+        placement: { origin: { x: 0, y: 0, z: 0 } },
+        metadata: { visionExtracted: true, hostWall: door.hostWall, doorType: door.type, confidence: door.confidence },
+        source: 'VISION', sourceFile: fileName, confidence: door.confidence || 0.5
+      });
+    }
+
+    // Windows → CSS WINDOW elements
+    for (const win of (visionResult.windows || [])) {
+      if ((win.confidence || 0) < VISION_GEOMETRY_CONFIDENCE) {
+        findings.push({ type: 'WINDOW', data: win, reason: 'LOW_CONFIDENCE', source: fileName });
+        continue;
+      }
+      elements.push({
+        type: 'WINDOW', semanticType: 'IfcWindow',
+        name: `Window`,
+        geometry: { profile: { width: win.width_m || 1.2, height: win.height_m || 1.5 }, depth: 0.15 },
+        placement: { origin: { x: 0, y: 0, z: win.sillHeight_m || 0.9 } },
+        metadata: { visionExtracted: true, hostWall: win.hostWall, confidence: win.confidence },
+        source: 'VISION', sourceFile: fileName, confidence: win.confidence || 0.5
+      });
+    }
+
+    // Store overall dimensions as building-level finding even if elements pass
+    if (overallL && overallW) {
+      findings.push({ type: 'BUILDING_ENVELOPE', data: { length_m: overallL, width_m: overallW }, reason: 'INFORMATIONAL', source: fileName });
+    }
+
+  } else if (imageType === 'CROSS_SECTION') {
+    // Cross-section → tunnel profile or building section info
+    const dims = visionResult.dimensions || {};
+    if (dims.innerWidth_m && dims.innerHeight_m) {
+      findings.push({
+        type: 'TUNNEL_PROFILE', data: {
+          profileShape: visionResult.profileShape,
+          innerWidth_m: dims.innerWidth_m, innerHeight_m: dims.innerHeight_m,
+          wallThickness_m: dims.wallThickness_m, layers: visionResult.layers
+        }, reason: 'INFORMATIONAL', source: fileName
+      });
+    }
+
+    // Map vision equipment type labels → IFC semantic types
+    const VISION_EQUIP_MAP = {
+      FAN: 'IfcFan', PUMP: 'IfcPump', DUCT: 'IfcDuctSegment', PIPE: 'IfcPipeSegment',
+      CABLE_TRAY: 'IfcCableCarrierSegment', LIGHTING: 'IfcLightFixture',
+      SENSOR: 'IfcSensor', GENERATOR: 'IfcElectricGenerator', COMPRESSOR: 'IfcCompressor',
+      TRANSFORMER: 'IfcTransformer', AHU: 'IfcUnitaryEquipment', BOILER: 'IfcBoiler',
+      CHILLER: 'IfcChiller', TANK: 'IfcTank', VALVE: 'IfcValve',
+    };
+
+    // Equipment in cross-section
+    for (const eq of (visionResult.equipment || [])) {
+      if ((eq.confidence || 0) < VISION_GEOMETRY_CONFIDENCE) {
+        findings.push({ type: 'EQUIPMENT', data: eq, reason: 'LOW_CONFIDENCE', source: fileName });
+        continue;
+      }
+      const eqSemantic = VISION_EQUIP_MAP[(eq.type || '').toUpperCase()] || 'IfcBuildingElementProxy';
+      elements.push({
+        type: 'EQUIPMENT',
+        name: eq.name || 'Equipment',
+        semanticType: eqSemantic,
+        geometry: { profile: { width: 1.0, height: 1.0 }, depth: 1.0 },
+        placement: { origin: { x: 0, y: 0, z: 0 } },
+        metadata: { visionExtracted: true, crossSectionPosition: eq.position, confidence: eq.confidence },
+        source: 'VISION', sourceFile: fileName, confidence: eq.confidence || 0.5
+      });
+    }
+
+  } else if (imageType === 'EQUIPMENT_LAYOUT') {
+    for (const eq of (visionResult.equipment || [])) {
+      const dims = eq.dimensions || {};
+      if ((eq.confidence || 0) < VISION_GEOMETRY_CONFIDENCE) {
+        findings.push({ type: 'EQUIPMENT', data: eq, reason: 'LOW_CONFIDENCE', source: fileName });
+        continue;
+      }
+      const eqSemantic = VISION_EQUIP_MAP[(eq.type || '').toUpperCase()] || 'IfcBuildingElementProxy';
+      elements.push({
+        type: 'EQUIPMENT',
+        name: eq.name || 'Equipment',
+        semanticType: eqSemantic,
+        geometry: { profile: { width: dims.width_m || 1.0, height: dims.length_m || 1.0 }, depth: dims.height_m || 1.0 },
+        placement: { origin: { x: 0, y: 0, z: 0 } },
+        metadata: { visionExtracted: true, specs: eq.specs, relativePosition: eq.relativePosition, confidence: eq.confidence },
+        source: 'VISION', sourceFile: fileName, confidence: eq.confidence || 0.5
+      });
+    }
+    if (visionResult.connections?.length > 0) {
+      findings.push({ type: 'SYSTEM_CONNECTIONS', data: { systemType: visionResult.systemType, connections: visionResult.connections }, reason: 'INFORMATIONAL', source: fileName });
+    }
+
+  } else if (imageType === 'ELEVATION') {
+    // Elevation → building envelope information (no direct geometry, but useful metadata)
+    findings.push({
+      type: 'ELEVATION_DATA', data: {
+        face: visionResult.face, height_m: visionResult.overallHeight_m, width_m: visionResult.overallWidth_m,
+        numFloors: visionResult.numFloors, floorHeight_m: visionResult.floorToFloorHeight_m,
+        roofType: visionResult.roofType, roofPitch: visionResult.roofPitch_deg,
+        windows: visionResult.windows, doors: visionResult.doors
+      }, reason: 'INFORMATIONAL', source: fileName
+    });
+
+  } else if (imageType === 'SITE_PLAN') {
+    for (const bldg of (visionResult.buildings || [])) {
+      findings.push({ type: 'SITE_BUILDING', data: bldg, reason: 'INFORMATIONAL', source: fileName });
+    }
+
+  } else {
+    // DEFAULT/SPECIFICATION/PHOTO — store building info as findings
+    if (visionResult.buildingInfo) {
+      findings.push({ type: 'BUILDING_INFO', data: visionResult.buildingInfo, reason: 'INFORMATIONAL', source: fileName });
+    }
+  }
+
+  console.log(`visionToCSS(${fileName}): ${elements.length} elements, ${findings.length} findings (type=${imageType}, scale=${hasScale})`);
+  return { elements, findings, imageType, extractedText: visionResult.extractedText || visionResult.annotations?.join('; ') || '' };
+}
+
+async function callBedrockVision(buffer, mediaType, prompt, bedrockClient, contentType = 'image') {
+  const base64 = buffer.toString('base64');
+  const sourceBlock = contentType === 'document'
+    ? { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64 } }
+    : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } };
+
+  const response = await bedrockClient.send(new InvokeModelCommand({
+    modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: JSON.stringify({
+      anthropic_version: 'bedrock-2023-05-31',
+      max_tokens: 8192,
+      messages: [{
+        role: 'user',
+        content: [sourceBlock, { type: 'text', text: prompt }]
+      }]
+    })
+  }));
+
+  const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+  const text = responseBody.content?.[0]?.text || '';
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+  return JSON.parse(jsonMatch[0]);
+}
+
+async function extractFromImage(imageBuffer, fileName, bedrockClient) {
+  try {
+    const ext = fileName.toLowerCase().split('.').pop();
+    const mediaTypeMap = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', tiff: 'image/png', tif: 'image/png' };
+    const mediaType = mediaTypeMap[ext] || 'image/png';
+
+    if (imageBuffer.length > 5 * 1024 * 1024) {
+      console.warn(`Image ${fileName} too large (${imageBuffer.length} bytes), skipping vision extraction`);
+      return null;
+    }
+
+    // Step 1: Classify the image type
+    const classification = await callBedrockVision(imageBuffer, mediaType, VISION_CLASSIFY_PROMPT, bedrockClient);
+    if (!classification) {
+      console.warn(`Vision classification for ${fileName}: no result`);
+      return null;
+    }
+
+    const imageType = classification.imageType || 'UNKNOWN';
+    console.log(`Vision classify ${fileName}: type=${imageType}, confidence=${classification.confidence}, scale=${classification.hasScale}`);
+
+    // Step 2: Use type-specific extraction prompt
+    const extractPrompt = VISION_PROMPTS[imageType] || VISION_PROMPTS.DEFAULT;
+    const result = await callBedrockVision(imageBuffer, mediaType, extractPrompt, bedrockClient);
+    if (!result) {
+      console.warn(`Vision extraction for ${fileName}: no result from type-specific prompt`);
+      // Return classification data at minimum
+      return { imageType, confidence: classification.confidence, extractedText: classification.extractedText || '', buildingInfo: null };
+    }
+
+    // Merge classification metadata into result
+    result.imageType = result.imageType || imageType;
+    if (classification.hasScale && !result.scale) {
+      result.scale = { detected: true, ratio: classification.scaleInfo };
+    }
+    if (classification.extractedText && !result.extractedText) {
+      result.extractedText = classification.extractedText;
+    }
+
+    console.log(`Vision extraction for ${fileName}: type=${result.imageType}, confidence=${result.confidence}`);
+    return result;
+  } catch (err) {
+    console.warn(`Vision extraction failed for ${fileName}:`, err.message);
+    return null;
+  }
+}
+
+async function extractFromScannedPDF(pdfBuffer, fileName, bedrockClient) {
+  try {
+    if (pdfBuffer.length > 5 * 1024 * 1024) {
+      console.warn(`Scanned PDF ${fileName} too large (${pdfBuffer.length} bytes), skipping`);
+      return null;
+    }
+
+    // Step 1: Classify
+    const classification = await callBedrockVision(pdfBuffer, 'application/pdf', VISION_CLASSIFY_PROMPT, bedrockClient, 'document');
+    if (!classification) return null;
+
+    const imageType = classification.imageType || 'UNKNOWN';
+    console.log(`Scanned PDF classify ${fileName}: type=${imageType}, confidence=${classification.confidence}`);
+
+    // Step 2: Type-specific extraction
+    const extractPrompt = VISION_PROMPTS[imageType] || VISION_PROMPTS.DEFAULT;
+    const result = await callBedrockVision(pdfBuffer, 'application/pdf', extractPrompt, bedrockClient, 'document');
+    if (!result) {
+      return { imageType, confidence: classification.confidence, extractedText: classification.extractedText || '', buildingInfo: null };
+    }
+
+    result.imageType = result.imageType || imageType;
+    if (classification.hasScale && !result.scale) {
+      result.scale = { detected: true, ratio: classification.scaleInfo };
+    }
+    if (classification.extractedText && !result.extractedText) {
+      result.extractedText = classification.extractedText;
+    }
+
+    console.log(`Scanned PDF extraction for ${fileName}: type=${result.imageType}, confidence=${result.confidence}`);
+    return result;
+  } catch (err) {
+    console.warn(`Scanned PDF extraction failed for ${fileName}:`, err.message);
+    return null;
+  }
+}
+
+// ============================================================================
 // MAIN HANDLER
 // ============================================================================
 
 export const handler = async (event) => {
   console.log('ExtractBuildingSpec input:', JSON.stringify(event, null, 2));
-  const { userId, renderId, bucket, files, description } = event;
+  const { userId, renderId, bucket, files, description, render } = event;
+  const refinementText = render?.refinement || null;
+  if (refinementText) console.log(`Refinement context present: "${refinementText.slice(0, 120)}..."`);
 
   try {
     // Track per-file parse status
@@ -999,8 +3005,50 @@ export const handler = async (event) => {
       const result = await downloadFile(bucket, file.key);
 
       if (result.type === 'text' && result.content) {
-        processedFiles.push({ name: file.name, content: result.content });
-        sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'unknown' });
+        // v6: Detect scanned PDFs (very little text extracted)
+        const ext = file.name.toLowerCase().split('.').pop();
+        if (ext === 'pdf' && result.content.trim().length < 50) {
+          console.log(`Scanned PDF detected: ${file.name} (only ${result.content.trim().length} chars extracted)`);
+          try {
+            const rawResult = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: file.key }));
+            const pdfBuffer = Buffer.from(await rawResult.Body.transformToByteArray());
+            const visionResult = await extractFromScannedPDF(pdfBuffer, file.name, bedrock);
+            if (visionResult && visionResult.confidence > 0.2) {
+              // Convert structured vision output to CSS elements + findings
+              const visionCSS = visionToCSS(visionResult, file.name);
+              const visionText = visionCSS.extractedText || visionResult.extractedText || JSON.stringify(visionResult.buildingInfo || {});
+              processedFiles.push({ name: file.name, content: visionText, sourceRole: 'VISION', type: 'scanned_pdf', visionData: visionResult, visionCSS });
+              sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'vision', sourceRole: 'VISION', imageType: visionResult.imageType });
+            } else {
+              processedFiles.push({ name: file.name, content: result.content });
+              sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'unknown' });
+            }
+          } catch (vErr) {
+            console.warn(`Scanned PDF fallback failed for ${file.name}:`, vErr.message);
+            processedFiles.push({ name: file.name, content: result.content });
+            sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'unknown' });
+          }
+        } else {
+          processedFiles.push({ name: file.name, content: result.content });
+          sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'unknown' });
+        }
+      } else if (result.type === 'image') {
+        // v6+: Image file — two-step classify + type-specific extraction
+        console.log(`Image file detected: ${file.name}`);
+        try {
+          const visionResult = await extractFromImage(result.buffer, file.name, bedrock);
+          if (visionResult && visionResult.confidence > 0.2) {
+            const visionCSS = visionToCSS(visionResult, file.name);
+            const visionText = visionCSS.extractedText || visionResult.extractedText || JSON.stringify(visionResult.buildingInfo || {});
+            processedFiles.push({ name: file.name, content: visionText, sourceRole: 'VISION', type: 'image', visionData: visionResult, visionCSS });
+            sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'vision', sourceRole: 'VISION', imageType: visionResult.imageType });
+          } else {
+            sourceFiles.push({ name: file.name, parseStatus: 'low_confidence', role: 'vision', reason: 'Vision extraction confidence too low' });
+          }
+        } catch (vErr) {
+          console.warn(`Vision extraction failed for ${file.name}:`, vErr.message);
+          sourceFiles.push({ name: file.name, parseStatus: 'failed', role: 'vision', reason: vErr.message });
+        }
       } else if (result.type === 'unsupported') {
         sourceFiles.push({ name: file.name, parseStatus: 'unsupported', role: 'unknown', reason: result.reason });
       } else {
@@ -1010,33 +3058,69 @@ export const handler = async (event) => {
 
     console.log(`Processed ${processedFiles.length} files, ${sourceFiles.filter(f => f.parseStatus !== 'success').length} failed/unsupported`);
 
+    // Classify all processed files by role (Phase A)
+    for (const pf of processedFiles) {
+      pf.sourceRole = classifySourceFile(pf);
+      const sf = sourceFiles.find(f => f.name === pf.name);
+      if (sf) sf.sourceRole = pf.sourceRole;
+      console.log(`File classification: ${pf.name} → ${pf.sourceRole}`);
+    }
+
     // Check for VentSim file
     const ventSimFile = processedFiles.find(f => isVentSim(f.content));
     if (ventSimFile) {
       console.log('Detected VentSim format in file:', ventSimFile.name);
-      // Update source file role
       const sf = sourceFiles.find(f => f.name === ventSimFile.name);
-      if (sf) sf.role = 'geometry';
+      if (sf) { sf.role = 'geometry'; sf.sourceRole = 'SIMULATION'; }
 
       let css = parseVentSimToCSS(ventSimFile.content, ventSimFile.name);
 
       if (css) {
         css.metadata.sourceFiles = sourceFiles;
 
-        // Enrichment: use supplementary files to add metadata to CSS elements
+        // VentSim geometry is always primary — it has precise 3D coordinates.
+        // Narrative files enrich metadata (equipment names/specs) via enrichCSS below.
         const otherFiles = processedFiles.filter(f => f !== ventSimFile);
         if (otherFiles.length > 0) {
           const { text: suppText, truncatedFiles } = buildSupplementaryText(otherFiles);
           if (css.metadata?.diagnostics) css.metadata.diagnostics.truncatedFiles = truncatedFiles;
           css = await enrichCSS(css, suppText);
+
+          // v6: Restricted safe source fusion — extract fusible equipment from docs
+          const docFindings = await extractDocumentFindings(suppText, otherFiles.map(f => f.name));
+          if (docFindings.length > 0) {
+            attemptSafeSourceFusion(css, docFindings, sourceFiles);
+          }
+        }
+
+        // v6+: Merge vision-extracted elements from image/scanned PDF files
+        const visionFiles = processedFiles.filter(f => f.visionCSS);
+        if (visionFiles.length > 0) {
+          const vFindings = [];
+          let vCount = 0;
+          for (const vf of visionFiles) {
+            for (const ve of vf.visionCSS.elements) {
+              ve.id = ve.id || elemId(ve.geometry, ve.placement);
+              ve.element_key = ve.element_key || ve.id;
+              css.elements.push(ve);
+              vCount++;
+            }
+            vFindings.push(...vf.visionCSS.findings);
+          }
+          if (vCount > 0) console.log(`Vision merge (VentSim path): ${vCount} elements added`);
+          if (vFindings.length > 0) {
+            css.metadata.visionFindings = vFindings;
+          }
         }
 
         const ai_generated_title = css.facility.name;
         const ai_generated_description = css.facility.description;
-
         console.log('VentSim CSS extraction complete');
+        const tracingReport = buildTracingReport(css, processedFiles);
+        css.metadata = css.metadata || {};
+        css.metadata.tracingReport = tracingReport;
         const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
-        return { cssS3Key, ai_generated_title, ai_generated_description };
+        return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport };
       }
     }
 
@@ -1057,14 +3141,41 @@ export const handler = async (event) => {
           const { text: suppText, truncatedFiles } = buildSupplementaryText(otherFiles);
           if (css.metadata?.diagnostics) css.metadata.diagnostics.truncatedFiles = truncatedFiles;
           css = await enrichCSS(css, suppText);
+
+          // v6: Restricted safe source fusion
+          const docFindings = await extractDocumentFindings(suppText, otherFiles.map(f => f.name));
+          if (docFindings.length > 0) {
+            attemptSafeSourceFusion(css, docFindings, sourceFiles);
+          }
+        }
+
+        // v6+: Merge vision-extracted elements
+        const dxfVisionFiles = processedFiles.filter(f => f.visionCSS);
+        if (dxfVisionFiles.length > 0) {
+          const vFindings = [];
+          let vCount = 0;
+          for (const vf of dxfVisionFiles) {
+            for (const ve of vf.visionCSS.elements) {
+              ve.id = ve.id || elemId(ve.geometry, ve.placement);
+              ve.element_key = ve.element_key || ve.id;
+              css.elements.push(ve);
+              vCount++;
+            }
+            vFindings.push(...vf.visionCSS.findings);
+          }
+          if (vCount > 0) console.log(`Vision merge (DXF path): ${vCount} elements added`);
+          if (vFindings.length > 0) css.metadata.visionFindings = vFindings;
         }
 
         const ai_generated_title = css.metadata.title || 'DXF Import';
         const ai_generated_description = `DXF model with ${css.metadata.diagnostics?.elementCount || 0} elements (${css.metadata.diagnostics?.proxyCount || 0} proxy, ${css.metadata.diagnostics?.semanticUpgradeCount || 0} semantic)`;
 
         console.log('DXF CSS extraction complete');
+        const tracingReport = buildTracingReport(css, processedFiles);
+        css.metadata = css.metadata || {};
+        css.metadata.tracingReport = tracingReport;
         const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
-        return { cssS3Key, ai_generated_title, ai_generated_description };
+        return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport };
       }
     }
 
@@ -1130,7 +3241,7 @@ IMPORTANT RULES:
     // Single-pass extraction (v3.2: improved prompts)
     async function singlePassExtraction() {
       console.log('Running single-pass Bedrock extraction...');
-      const fileContent = prepareFileContent(processedFiles);
+      const fileContent = buildPriorityFileContent(processedFiles, refinementText);
 
       const prompt = `You are an expert in interpreting architectural and engineering documents to extract building specifications.
 Extract structured data from the provided files and return it as a JSON object. ALL DIMENSIONS IN METRES.
@@ -1140,7 +3251,7 @@ Return ONLY valid JSON (no markdown, no explanations):
 
 {
   "buildingName": "string",
-  "buildingType": "BUILDING | OFFICE | WAREHOUSE | TUNNEL | FACILITY | PARKING | HOSPITAL | SCHOOL | INDUSTRIAL | RESIDENTIAL",
+  "buildingType": "BUILDING | OFFICE | WAREHOUSE | TUNNEL | UNDERGROUND_FACILITY | FACILITY | PARKING | HOSPITAL | SCHOOL | INDUSTRIAL | RESIDENTIAL",
   "dimensions": {
     "length_m": number,
     "width_m": number,
@@ -1151,15 +3262,18 @@ Return ONLY valid JSON (no markdown, no explanations):
   "rooms": [{ "name": "string", "usage": "OFFICE|STORAGE|MECHANICAL|ELECTRICAL|CIRCULATION|WC|LOBBY|LAB|PARKING|OTHER", "length_m": number, "width_m": number, "height_m": number, "x_position_m": number, "y_position_m": number, "floor": number (1-indexed, default 1) }],
   "openings": [{ "type": "DOOR|WINDOW", "wall_side": "NORTH|SOUTH|EAST|WEST", "x_offset_m": number, "width_m": number, "height_m": number, "sill_height_m": number, "floor": number (1-indexed, default 1) }],
   "ventilation": { "system_type": "natural|mechanical|hybrid", "intake_location": "string", "exhaust_location": "string", "num_fans": number },
-  "equipment": [{ "name": "string", "type": "GENERATOR|PUMP|FAN|COMPRESSOR|TRANSFORMER|BATTERY|CONVERTER|BOILER|CHILLER|AHU|OTHER", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number, "floor": number (1-indexed, default 1) }],
+  "equipment": [{ "name": "string", "type": "GENERATOR|PUMP|FAN|COMPRESSOR|TRANSFORMER|BATTERY|CONVERTER|BOILER|CHILLER|AHU|OTHER", "segment_name": "string (name of room/zone this equipment is in, if known)", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number, "floor": number (1-indexed, default 1) }],
   "materials": { "walls": "concrete|brick|steel|timber|glass|other", "floor": "concrete|timber|raised_access|screed|other", "roof": "concrete|metal|membrane|tiles|other" },
   "structural_system": "FRAME|LOADBEARING|SHELL|TRUSS|OTHER",
   "structure": { "column_grid": [{ "x_spacing_m": number, "y_spacing_m": number, "column_size_m": number }], "floor_to_floor_height_m": number, "num_floors": number },
-  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number, "floor": number (1-indexed, default 1) }]
+  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number, "floor": number (1-indexed, default 1) }],
+  "roof": { "type": "FLAT|GABLE", "pitch_degrees": number (default 25, range 5-60), "ridge_orientation": "ALONG_LENGTH|ALONG_WIDTH", "overhang_m": number (default 0.3, range 0-2) },
+  "sections": [{ "name": "string", "type": "MAIN|GARAGE|WING|ANNEX|TOWER|CANOPY|MEZZANINE|COURTYARD_WALL", "length_m": number, "width_m": number, "height_m": number, "num_floors": number, "x_offset_m": number, "y_offset_m": number, "roof_type": "FLAT|GABLE", "roof_pitch_degrees": number, "floor_level_m": number (for MEZZANINE: height above ground) }],
+  "vertical_features": [{ "name": "string", "type": "CHIMNEY|EXHAUST_STACK|VENT|PARAPET|ANTENNA_MOUNT", "x_position_m": number, "y_position_m": number, "width_m": number, "depth_m": number, "height_above_roof_m": number }]
 }
 
 Example output for a simple 2-storey office:
-{"buildingName":"Office Building","buildingType":"OFFICE","dimensions":{"length_m":30,"width_m":15,"height_m":7,"wall_thickness_m":0.3},"elevations":{"floor_level_m":0},"rooms":[{"name":"Reception","usage":"LOBBY","length_m":8,"width_m":6,"height_m":3.5,"x_position_m":1,"y_position_m":1,"floor":1},{"name":"Office A","usage":"OFFICE","length_m":6,"width_m":5,"height_m":3.5,"x_position_m":2,"y_position_m":2,"floor":2}],"openings":[{"type":"DOOR","wall_side":"SOUTH","x_offset_m":14,"width_m":1.2,"height_m":2.4,"sill_height_m":0,"floor":1}],"structure":{"num_floors":2,"floor_to_floor_height_m":3.5},"ventilation":{},"equipment":[],"materials":{"walls":"concrete","floor":"concrete","roof":"metal"},"structural_system":"FRAME","interior_walls":[]}
+{"buildingName":"Office Building","buildingType":"OFFICE","dimensions":{"length_m":30,"width_m":15,"height_m":7,"wall_thickness_m":0.3},"elevations":{"floor_level_m":0},"rooms":[{"name":"Reception","usage":"LOBBY","length_m":8,"width_m":6,"height_m":3.5,"x_position_m":1,"y_position_m":1,"floor":1},{"name":"Office A","usage":"OFFICE","length_m":6,"width_m":5,"height_m":3.5,"x_position_m":2,"y_position_m":2,"floor":2}],"openings":[{"type":"DOOR","wall_side":"SOUTH","x_offset_m":14,"width_m":1.2,"height_m":2.4,"sill_height_m":0,"floor":1}],"structure":{"num_floors":2,"floor_to_floor_height_m":3.5},"ventilation":{},"equipment":[],"materials":{"walls":"concrete","floor":"concrete","roof":"metal"},"structural_system":"FRAME","interior_walls":[],"roof":{"type":"FLAT"},"sections":[],"vertical_features":[]}
 
 Convert feet/inches to metres. Use realistic defaults for missing values. Return empty arrays [] when no data.
 
@@ -1207,30 +3321,46 @@ ${snippets}`;
         ? `This is a ${classification.buildingType} project with domain hints: ${classification.domainHints?.join(', ')}.`
         : 'Extract building geometry from the provided documents.';
 
-      const fileContent = prepareFileContent(processedFiles);
-      const pass2Prompt = `${domainContext}
+      const fileContent = buildPriorityFileContent(processedFiles, refinementText);
+
+      // Check if this is a tunnel/underground facility
+      const isTunnelType = classification && /TUNNEL|UNDERGROUND/i.test(classification.buildingType);
+
+      const pass2Prompt = isTunnelType
+        ? buildTunnelPass2Prompt(domainContext, fileContent, descriptionContent)
+        : `${domainContext}
 You are an expert in interpreting architectural and engineering documents to extract building specifications.
 Extract structured data and return it as a JSON object. ALL DIMENSIONS IN METRES.
 ${CONSTRAINT_RULES}
+
+SOURCE PRIORITY: The PRIMARY section contains the authoritative source for envelope, massing, and dimensions.
+SECONDARY documents provide equipment/MEP data only — do NOT let them reshape the building envelope.
+TERTIARY documents provide system metadata only — ignore for geometry.
 
 Return ONLY valid JSON (no markdown, no explanations):
 
 {
   "buildingName": "string",
-  "buildingType": "BUILDING | OFFICE | WAREHOUSE | TUNNEL | FACILITY | PARKING | HOSPITAL | SCHOOL | INDUSTRIAL | RESIDENTIAL",
+  "buildingType": "BUILDING | OFFICE | WAREHOUSE | TUNNEL | UNDERGROUND_FACILITY | FACILITY | PARKING | HOSPITAL | SCHOOL | INDUSTRIAL | RESIDENTIAL",
   "dimensions": { "length_m": number, "width_m": number, "height_m": number, "wall_thickness_m": number },
   "elevations": { "floor_level_m": number },
   "rooms": [{ "name": "string", "usage": "string", "length_m": number, "width_m": number, "height_m": number, "x_position_m": number, "y_position_m": number, "floor": number }],
   "openings": [{ "type": "DOOR|WINDOW", "wall_side": "NORTH|SOUTH|EAST|WEST", "x_offset_m": number, "width_m": number, "height_m": number, "sill_height_m": number, "floor": number }],
   "ventilation": { "system_type": "string", "num_fans": number },
-  "equipment": [{ "name": "string", "type": "string", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number, "floor": number }],
+  "equipment": [{ "name": "string", "type": "string", "segment_name": "string (room/zone name if known)", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number, "floor": number }],
   "materials": { "walls": "string", "floor": "string", "roof": "string" },
   "structural_system": "FRAME|LOADBEARING|SHELL|TRUSS|OTHER",
   "structure": { "column_grid": [], "floor_to_floor_height_m": number, "num_floors": number },
-  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number, "floor": number }]
+  "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number, "floor": number }],
+  "roof": { "type": "FLAT|GABLE", "pitch_degrees": number, "ridge_orientation": "ALONG_LENGTH|ALONG_WIDTH", "overhang_m": number },
+  "sections": [{ "name": "string", "type": "MAIN|GARAGE|WING|ANNEX|TOWER|CANOPY|MEZZANINE|COURTYARD_WALL", "length_m": number, "width_m": number, "height_m": number, "num_floors": number, "x_offset_m": number, "y_offset_m": number, "roof_type": "FLAT|GABLE", "roof_pitch_degrees": number, "floor_level_m": number (for MEZZANINE: height above ground) }],
+  "vertical_features": [{ "name": "string", "type": "CHIMNEY|EXHAUST_STACK|VENT|PARAPET|ANTENNA_MOUNT", "x_position_m": number, "y_position_m": number, "width_m": number, "depth_m": number, "height_above_roof_m": number }]
 }
 
 Convert feet/inches to metres. Use realistic defaults for missing values. Return empty arrays [] when no data.
+For roof: use GABLE for residential/school buildings, FLAT for warehouses/offices/industrial. ridge_orientation defaults to ALONG_LENGTH if building is longer than wide.
+For sections: include attached volumes like garages, wings, annexes at their offset positions relative to main building origin. For L-shaped or U-shaped buildings, model as main rectangular block + WING sections. For courtyards, model the open area as a void (no roof/floor section). MEZZANINE sections are partial-height interior floors (use floor_level_m for elevation). CANOPY sections generate columns + roof without walls.
+For vertical_features: include chimneys, exhaust stacks, vents that protrude above the roof.
 
 Building Description:
 ${descriptionContent || '(No description provided)'}
@@ -1361,6 +3491,36 @@ Rules: Only use element_keys from the list. Only set name, description, material
       css = buildingSpecToCSS(buildingSpec, sourceFiles);
     }
 
+    // v6+: Merge vision-extracted CSS elements and findings into the model
+    const allVisionFindings = [];
+    let visionElementCount = 0;
+    for (const pf of processedFiles) {
+      if (!pf.visionCSS) continue;
+      const { elements: vElems, findings: vFindings } = pf.visionCSS;
+
+      // Add confident vision elements to CSS
+      for (const vElem of vElems) {
+        vElem.id = vElem.id || elemId(vElem.geometry, vElem.placement);
+        vElem.element_key = vElem.element_key || vElem.id;
+        vElem.container = vElem.container || 'level-1';
+        vElem.relationships = vElem.relationships || [];
+        vElem.properties = vElem.properties || {};
+        css.elements.push(vElem);
+        visionElementCount++;
+      }
+
+      // Accumulate findings as metadata
+      allVisionFindings.push(...vFindings);
+    }
+    if (visionElementCount > 0) {
+      console.log(`Vision merge: ${visionElementCount} elements added from ${processedFiles.filter(f => f.visionCSS).length} vision sources`);
+    }
+    if (allVisionFindings.length > 0) {
+      css.metadata = css.metadata || {};
+      css.metadata.visionFindings = allVisionFindings;
+      console.log(`Vision findings: ${allVisionFindings.length} stored as metadata`);
+    }
+
     // v3.2: Facade fallback — generate openings from description if LLM returned none
     const structureClass = css.metadata?.structureClass || 'BUILDING';
     if (structureClass === 'BUILDING' && (!buildingSpec.openings || buildingSpec.openings.length === 0)) {
@@ -1419,8 +3579,11 @@ Rules: Only use element_keys from the list. Only set name, description, material
 
     console.log(`CSS generated: ${css.elements?.length || 0} elements, domain=${css.domain}`);
 
+    const tracingReport = buildTracingReport(css, processedFiles);
+    css.metadata = css.metadata || {};
+    css.metadata.tracingReport = tracingReport;
     const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
-    return { cssS3Key, ai_generated_title, ai_generated_description };
+    return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport };
   } catch (error) {
     console.error('ExtractBuildingSpec error:', error);
     // Let the error propagate to the Step Function so HandleFailure can mark it as failed

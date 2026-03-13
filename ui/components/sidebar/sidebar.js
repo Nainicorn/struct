@@ -143,8 +143,16 @@ const sidebar = {
         const rendersContainer = this.element.querySelector('.__sidebar-renders');
         if (!rendersContainer) return;
 
-        // Filter out failed renders - only show successful ones
+        // Filter out failed renders - show completed and processing
         const successfulRenders = renders.filter(r => r.status !== 'failed');
+        const emptyEl = this.element.querySelector('.__sidebar-empty');
+
+        if (successfulRenders.length === 0) {
+            rendersContainer.innerHTML = '';
+            if (emptyEl) emptyEl.style.display = '';
+            return;
+        }
+        if (emptyEl) emptyEl.style.display = 'none';
 
         // Sort renders by created_at (newest first)
         const sorted = successfulRenders.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
@@ -155,8 +163,9 @@ const sidebar = {
             const dotClass = `__render-item-status-dot--${status}`;
             const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
 
-            // Build metadata line: status + date only
+            // Build metadata line: status + date + refinement indicator
             const metaParts = [statusLabel];
+            if (render.refined_from) metaParts.push('↩ Refinement');
             if (render.created_at) {
                 metaParts.push(this._relativeTime(render.created_at));
             }

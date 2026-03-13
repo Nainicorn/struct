@@ -1,0 +1,108 @@
+EDUCATIONAL FACILITY SPECIFICATION
+Project: Maple Ridge Elementary School — Single-Story K-5 School
+Architect: Perkins & Will Education Studio
+Date: August 2024
+
+SITE & FOUNDATION
+Building footprint: 180 ft x 140 ft (25,200 sq ft). Single-story except gymnasium with double-height ceiling. Reinforced concrete spread footings, 6-inch slab-on-grade with 15-mil vapor barrier. Perimeter frost wall to 48 inches. Building oriented east-west for optimal classroom daylighting.
+
+STRUCTURAL SYSTEM
+Steel frame with open web steel joists. Columns W10x49 at 30 ft bays. Standard ceiling height 12 ft in corridors and classrooms. Gymnasium clear span 60 ft x 80 ft, 24 ft clear height. Auditorium 40 ft x 60 ft, 18 ft clear. Roof: steel deck with built-up roofing.
+
+CLASSROOM WING (6 Classrooms + 2 Labs)
+- Classrooms 101-106: 30 ft x 25 ft each = 750 sq ft, VCT flooring
+  - Each room: teacher desk area, 30 student stations, smartboard on north wall
+  - Windows: 3 each, 4 ft x 5 ft, south-facing, motorized blinds
+  - Doors: 36-inch solid core with vision lite, to corridor
+  - Built-in cabinetry on west wall (12 ft), sink station
+- Science Lab: 40 ft x 30 ft = 1,200 sq ft, epoxy flooring
+  - 6 lab bench stations (5 ft x 3 ft each) with gas and water
+  - Fume hood: 6 ft, located on north wall, dedicated exhaust
+  - Emergency shower/eyewash station at entry
+  - Chemical storage room: 6 ft x 8 ft, explosion-proof ventilation
+- Computer Lab: 30 ft x 25 ft = 750 sq ft, carpet tile
+  - 30 workstations, raised floor for cable management
+  - Dedicated cooling: supplemental mini-split, 2-ton
+
+MAIN CORRIDOR
+- Width: 10 ft, total length approximately 160 ft
+- VCT flooring, painted CMU walls
+- Lockers on both sides in classroom wing (240 total, 12 in x 12 in x 36 in)
+- 8 sets of double doors (36-inch each leaf) at wing transitions
+
+GYMNASIUM
+- Playing area: 60 ft x 80 ft = 4,800 sq ft, maple hardwood flooring
+- Bleacher seating: retractable, 6 rows each side, capacity 200
+- Ceiling height: 24 ft clear
+- 6 basketball hoops (4 side, 2 main)
+- Storage rooms: 2 each, 10 ft x 15 ft, rolling equipment doors
+- Boys locker room: 15 ft x 20 ft, tile, 10 lockers, 3 showers
+- Girls locker room: 15 ft x 20 ft, tile, 10 lockers, 3 showers
+- Coach office: 10 ft x 10 ft
+
+CAFETERIA
+- Dining area: 40 ft x 60 ft = 2,400 sq ft, VCT flooring, capacity 150
+- Serving line: 30 ft long, 4 ft wide, stainless steel counters
+- Kitchen: 20 ft x 30 ft = 600 sq ft, quarry tile flooring
+  - Walk-in cooler: 8 ft x 10 ft
+  - Walk-in freezer: 8 ft x 8 ft
+  - Cooking line: 20 ft (range, oven, fryer, steamer, kettle)
+  - 3-compartment sink, pot wash sink, hand sinks
+  - Type I grease hood: 20 ft long, stainless steel, with fire suppression
+  - Dishwasher: conveyor type
+
+AUDITORIUM
+- Seating area: 40 ft x 60 ft = 2,400 sq ft, sloped floor
+- Fixed seating: 300 seats, upholstered
+- Stage: 40 ft x 20 ft, maple flooring, 36 inches above auditorium floor
+- Stage wings: 10 ft x 20 ft each side
+- Control booth: 10 ft x 8 ft, rear of auditorium
+- Ceiling height: 18 ft at rear, 14 ft at stage
+
+ADMINISTRATION WING
+- Main Office/Reception: 20 ft x 25 ft = 500 sq ft, carpet
+- Principal Office: 12 ft x 15 ft = 180 sq ft, carpet
+- Assistant Principal: 10 ft x 12 ft, carpet
+- Conference Room: 15 ft x 12 ft, carpet, capacity 10
+- Nurse/Health Room: 12 ft x 12 ft, VCT, exam area + cot + sink
+- Records Room: 8 ft x 10 ft
+- Staff Workroom: 15 ft x 10 ft, copier, supplies, mailboxes
+
+LIBRARY / MEDIA CENTER
+- Main area: 45 ft x 40 ft = 1,800 sq ft, carpet
+- Shelving for 15,000 volumes
+- Reading area: 20 ft x 15 ft, soft seating
+- Circulation desk: 12 ft, built-in
+- Small group rooms: 2 each, 10 ft x 8 ft, glass walls
+- AV storage: 6 ft x 8 ft
+
+RESTROOMS
+- Student Boys: 12 ft x 15 ft, tile, 3 water closets + 2 urinals + 3 sinks
+- Student Girls: 12 ft x 15 ft, tile, 4 water closets + 3 sinks
+- Staff: 2 single-occupancy ADA restrooms (6 ft x 8 ft each)
+- Gymnasium: separate facilities in locker rooms
+
+EXTERIOR
+- Walls: brick veneer with CMU backup, R-19 cavity insulation
+- Roof: fully-adhered TPO membrane, R-30 polyiso insulation
+- Windows: aluminum frame, insulated low-e glass, all operable
+- Main entry: aluminum storefront with vestibule (8 ft x 10 ft)
+- Secure entry: video intercom, electric strike, buzzer system
+- Canopy: 8 ft projection over main entry and bus loop
+
+MECHANICAL
+- AHU-1 (Classroom Wing): 12,000 CFM, serves all classrooms + labs + corridors
+  - Energy recovery ventilator, MERV-14 filtration
+  - VAV boxes at each classroom for individual temperature control
+- AHU-2 (Gymnasium): 5,000 CFM, constant volume
+- AHU-3 (Cafeteria/Kitchen): 3,500 CFM + kitchen hood makeup air
+- Auditorium AHU: 4,000 CFM, CO2-based demand ventilation
+- Boiler: 2,000 MBH condensing gas, hydronic heating loop
+- Chiller: 80-ton air-cooled scroll, chilled water loop
+
+ELECTRICAL
+- Service: 480/277V 3-phase, 2000A
+- Emergency generator: 200kW diesel, serves life safety and IT
+- Lighting: LED throughout, daylight harvesting in classrooms
+- PA/intercom system: IP-based, classroom speakers + hallway horns
+- Security: 32 cameras, card access at all exterior doors

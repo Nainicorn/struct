@@ -1,0 +1,88 @@
+COMMERCIAL OFFICE BUILDING SPECIFICATION
+Project: Meridian Business Center — 2-Story Office with Basement Parking
+Architect: Hartfield Design Group
+Date: September 2024
+
+SITE & FOUNDATION
+The building occupies a rectangular footprint of 80 ft x 60 ft (4,800 sq ft per floor). The basement parking level extends the full footprint plus 10 ft on each side (100 ft x 80 ft = 8,000 sq ft). Foundation consists of reinforced concrete spread footings with 12-inch thick basement walls. Basement slab is 6 inches thick with waterproof membrane.
+
+STRUCTURAL SYSTEM
+Steel frame construction with composite metal deck floors. Columns are W12x72 at 20 ft bays in both directions. Floor-to-floor height is 14 ft (11 ft clear ceiling on office floors). Roof is flat with steel joists at 5 ft on center and 1.5-inch metal deck. Basement ceiling height is 10 ft clear.
+
+BASEMENT LEVEL — PARKING GARAGE
+- Open parking area: 100 ft x 80 ft, 8,000 sq ft
+- 45 parking spaces total (9 ft x 18 ft each including drive aisles)
+- Two-way drive aisle: 24 ft wide, running east-west
+- Concrete slab floor with sealed surface
+- Two stairwells: northwest and southeast corners (6 ft x 10 ft each)
+- One elevator shaft: center north (6 ft x 8 ft)
+- Mechanical/electrical room: 15 ft x 20 ft, southwest corner
+- Fire riser room: 6 ft x 8 ft, adjacent to mechanical room
+- Entry ramp: 12 ft wide, 15% slope, south side
+
+FIRST FLOOR LAYOUT
+- Main Lobby/Reception: 25 ft x 20 ft, terrazzo flooring, 14 ft ceiling, glass curtain wall on south
+- Reception Desk: 12 ft curved, solid surface countertop
+- Open Office Area: 50 ft x 40 ft, carpet tile flooring, modular workstations for 40 people
+- Conference Room A: 20 ft x 15 ft, carpet, AV-equipped, capacity 16
+- Conference Room B: 15 ft x 12 ft, carpet, whiteboard wall, capacity 10
+- Break Room/Kitchen: 18 ft x 14 ft, VCT flooring, full kitchen with commercial appliances
+- Men's Restroom: 10 ft x 12 ft, tile, 2 stalls + 2 urinals + 2 sinks
+- Women's Restroom: 10 ft x 12 ft, tile, 3 stalls + 2 sinks
+- Storage/Supply Room: 10 ft x 12 ft, VCT flooring
+- Electrical Room: 8 ft x 8 ft, concrete floor
+- IT/Telecom Closet: 6 ft x 8 ft
+
+SECOND FLOOR LAYOUT
+- Open Office Area: 55 ft x 45 ft, carpet tile, modular workstations for 50 people
+- Executive Office 1: 15 ft x 12 ft, carpet, built-in credenza
+- Executive Office 2: 15 ft x 12 ft, carpet, built-in credenza
+- Executive Office 3: 15 ft x 14 ft, carpet, corner office with two window walls
+- Board Room: 25 ft x 18 ft, carpet, AV system, capacity 20, glass partition wall
+- Men's Restroom: 10 ft x 12 ft, tile, 2 stalls + 2 urinals + 2 sinks
+- Women's Restroom: 10 ft x 12 ft, tile, 3 stalls + 2 sinks
+- Server Room: 14 ft x 12 ft, raised floor, dedicated cooling, fire suppression
+
+ROOF LEVEL
+- Mechanical penthouse: 20 ft x 15 ft, houses RTU-1
+- Elevator machine room: 8 ft x 8 ft
+- Roof access hatch: 3 ft x 3 ft
+
+EXTERIOR ENVELOPE
+- South facade: aluminum curtain wall system with 1-inch insulated glazing units
+- East/West facades: brick veneer with punched windows (5 ft x 6 ft), 4 ft on center
+- North facade: brick veneer with ribbon windows at second floor
+- Roof: TPO single-ply membrane, R-30 polyiso insulation, tapered to internal drains
+- Parapet: 42 inches high, aluminum coping
+
+VERTICAL CIRCULATION
+- Stairwell A (NW): 6 ft x 10 ft, concrete-filled metal pan treads, 3 flights (B1 to Roof)
+- Stairwell B (SE): 6 ft x 10 ft, same construction, 3 flights
+- Elevator: 3,500 lb hydraulic passenger, 6 ft x 8 ft cab, serves B1 through 2nd floor
+
+DOORS
+- Main entry: 72-inch aluminum storefront double doors with panic hardware
+- Secondary entry (east): 36-inch aluminum with card reader
+- Parking entry: 36-inch steel fire-rated (90 min)
+- Interior offices: 36-inch solid core wood, lever hardware
+- Conference rooms: 36-inch with sidelight, lever hardware
+- Restrooms: 36-inch solid core, kick plates
+- Stairwell doors: 36-inch steel, fire-rated (90 min), self-closing
+
+WINDOWS
+- Curtain wall (south): floor-to-ceiling, 5 ft modules, low-e insulated glass
+- Punched windows (east/west): 5 ft x 6 ft, aluminum frame, operable awning sash
+- North ribbon: continuous 3 ft high x 60 ft total, fixed
+
+ELECTRICAL
+- Service: 480/277V 3-phase, 1200A main switchboard in basement
+- Distribution: 208/120V panels on each floor via dry-type transformers
+- Emergency: 150kW diesel generator on concrete pad at grade, ATS in electrical room
+- Lighting: LED throughout, 2x4 troffers in offices, recessed downlights in lobby
+- Emergency lighting: battery backup units at exits and stairwells
+
+FIRE PROTECTION
+- Wet sprinkler system throughout, 4-inch riser in fire riser room
+- Standpipe in each stairwell
+- Fire alarm: addressable system, smoke detectors in all spaces, pull stations at exits
+- Server room: clean agent (FM-200) suppression system

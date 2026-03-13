@@ -1,0 +1,33 @@
+EQUIPMENT SCHEDULE — RESIDENTIAL HVAC & PLUMBING
+Project: 742 Evergreen Terrace
+Prepared: October 2024
+
+TAG	DESCRIPTION	MANUFACTURER	MODEL	CAPACITY	VOLTAGE	LOCATION	NOTES
+AHU-1	Air Handler Unit	Carrier	24ACC636A003	3 Ton / 36,000 BTU	240V/1ph	Basement Utility	16 SEER, variable speed blower
+CU-1	Condensing Unit	Carrier	24ACC636A003	3 Ton	240V/1ph	Exterior Grade Pad	R-410A refrigerant
+FUR-1	Gas Furnace	Carrier	59TP6A080V17-14	80,000 BTU input	120V/1ph	Basement Utility	96% AFUE, 2-stage
+HUM-1	Humidifier	Aprilaire	600M	0.72 GPH	120V/1ph	Supply Plenum	Bypass type
+TSTAT-1	Thermostat	Honeywell	T6 Pro	N/A	24V	Hallway 1F	Programmable, WiFi
+ERV-1	Energy Recovery	Panasonic	FV-10VE2	100 CFM	120V/1ph	Basement	Heat recovery, MERV-13
+EF-1	Exhaust Fan	Panasonic	FV-0511VKS2	50 CFM	120V/1ph	Master Bath	Motion activated, DC motor
+EF-2	Exhaust Fan	Panasonic	FV-0511VKS2	50 CFM	120V/1ph	Full Bath 2F	Motion activated, DC motor
+EF-3	Exhaust Fan	Panasonic	FV-0511VKS2	50 CFM	120V/1ph	Half Bath 1F	Motion activated, DC motor
+RH-1	Range Hood	Broan	BCSQ130SS	250 CFM	120V/1ph	Kitchen	30-inch, stainless, ducted to exterior
+WH-1	Water Heater	Rheem	XG50T06EC36U1	50 Gallon	N/A (Gas)	Garage	Natural gas, 36,000 BTU, 0.62 EF
+SP-1	Sump Pump	Zoeller	M53	0.3 HP	120V/1ph	Basement Pit	1.5-inch discharge, check valve
+WS-1	Water Softener	Culligan	HE 1.25	40,000 grain	120V/1ph	Basement	Timer-based regeneration
+
+DUCT SCHEDULE
+SECTION	SIZE (WxH or DIA)	MATERIAL	INSULATION	CFM	VELOCITY (FPM)	LOCATION
+Supply Trunk	12x8	Galv Steel	R-6 wrap	1200	850	Basement ceiling
+Supply Branch - LR	8x6	Galv Steel	R-6 wrap	400	700	Floor joist cavity
+Supply Branch - KIT	10x6	Galv Steel	R-6 wrap	500	750	Floor joist cavity
+Supply Branch - MBR	8x6	Galv Steel	R-6 wrap	350	700	2F ceiling
+Supply Branch - BR2	6x4	Galv Steel	R-6 wrap	200	600	2F ceiling
+Supply Branch - BR3	6x4	Galv Steel	R-6 wrap	175	600	2F ceiling
+Supply Branch - DR	6x4	Galv Steel	R-6 wrap	175	600	Floor joist cavity
+Return Trunk	14x8	Galv Steel	None	1200	650	Basement ceiling
+Return Branch - Hall	12x6	Galv Steel	None	600	500	Wall chase
+Return Branch - LR	10x6	Galv Steel	None	400	500	Wall chase
+Bath Exhaust	4 dia	PVC	None	50	800	2F ceiling to roof
+Kitchen Exhaust	6 dia	Galv Steel	None	200	900	Wall to exterior

@@ -8,7 +8,7 @@ const IFC_BUCKET = process.env.IFC_BUCKET || 'builting-ifc';
 
 export const handler = async (event) => {
   console.log('StoreIFC input:', JSON.stringify(event, null, 2));
-  const { userId, renderId, ifcS3Path, ai_generated_title, ai_generated_description, elementCounts, outputMode, cssHash } = event;
+  const { userId, renderId, ifcS3Path, ai_generated_title, ai_generated_description, elementCounts, outputMode, cssHash, tracingReport, validationSummary } = event;
 
   try {
     // Handle failure mode — called by Step Function Catch to mark render as failed
@@ -68,6 +68,34 @@ export const handler = async (event) => {
     if (cssHash) {
       updateExpr += ', cssHash = :hash';
       exprValues[':hash'] = cssHash;
+    }
+
+    if (tracingReport) {
+      updateExpr += ', tracingReport = :tr';
+      exprValues[':tr'] = tracingReport;
+    }
+
+    if (validationSummary) {
+      updateExpr += ', validationSummary = :vs';
+      exprValues[':vs'] = validationSummary;
+    }
+
+    if (elementCounts) {
+      // Compute quality score
+      const totalElems = Object.values(elementCounts).reduce((s, n) => s + n, 0);
+      const proxyCount = elementCounts['IfcBuildingElementProxy'] || 0;
+      const semanticRatio = totalElems > 0 ? (totalElems - proxyCount) / totalElems : 0;
+      const proxyPenalty = totalElems > 0 ? Math.max(0, 1 - (proxyCount / totalElems)) : 1;
+      const hasWalls = (elementCounts['IfcWall'] || 0) + (elementCounts['IfcWallStandardCase'] || 0) > 0;
+      const hasSlabs = (elementCounts['IfcSlab'] || 0) > 0;
+      const validScore = validationSummary?.valid ? 1 : 0.5;
+      const revitScore = (validationSummary?.revitCompatScore || 70) / 100;
+      const structScore = (hasWalls ? 0.5 : 0) + (hasSlabs ? 0.5 : 0);
+      const qualityScore = Math.round(
+        (semanticRatio * 30 + proxyPenalty * 20 + validScore * 20 + structScore * 20 + revitScore * 10)
+      );
+      updateExpr += ', qualityScore = :qs';
+      exprValues[':qs'] = qualityScore;
     }
 
     await dynamo.send(

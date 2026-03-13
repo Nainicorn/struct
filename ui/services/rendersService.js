@@ -19,6 +19,17 @@ const rendersService = {
 
   async getSourceFile(renderId, fileName) {
     return await aws.call(`/api/renders/${renderId}/sources/${encodeURIComponent(fileName)}`, { method: 'GET' });
+  },
+
+  async getVerificationReport(renderId) {
+    return await aws.call(`/api/renders/${renderId}/report`, { method: 'GET' });
+  },
+
+  async refineRender(renderId, refinement) {
+    return await aws.call(`/api/renders/${renderId}/refine`, {
+      method: 'POST',
+      body: JSON.stringify({ refinement })
+    });
   }
 };
 

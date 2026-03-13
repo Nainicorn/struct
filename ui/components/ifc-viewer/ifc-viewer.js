@@ -35,10 +35,12 @@ const ifcViewer = {
                 IfcAPI: this.ifcAPI
             });
 
-            // Set up camera - will be overridden by flyTo when model loads
-            this.viewer.camera.eye = [0, 0, 0];
-            this.viewer.camera.look = [0, 0, -1];
-            this.viewer.camera.up = [0, 1, 0];
+            // True isometric diagonal initial camera — jumpTo maintains this look
+            // direction, so all model types (buildings, flat networks, long tunnels)
+            // get a useful corner-above view rather than a front-elevation view.
+            this.viewer.camera.eye = [-80, -80, 80];
+            this.viewer.camera.look = [0, 0, 0];
+            this.viewer.camera.up = [0, 0, 1];
 
             console.log('xeokit Viewer initialized successfully');
         } catch (error) {
@@ -83,14 +85,42 @@ const ifcViewer = {
 
             console.log('IFC file loaded successfully');
 
-            // Fit model to view
+            // Fit model to view with orientation-aware camera placement
             try {
-                // Use jumpTo to avoid camera flight animation issues
                 this.viewer.cameraFlight.jumpTo(this.currentModel);
+
+                // After initial fit, check if model is very elongated (long single tunnel)
+                // and reposition camera to a proper side-oblique view (not top-down).
+                // Threshold >15 avoids firing on flat planar networks (ratio ~3-4).
+                const aabb = this.currentModel.aabb;
+                if (aabb) {
+                    const dx = aabb[3] - aabb[0];
+                    const dy = aabb[4] - aabb[1];
+                    const dz = aabb[5] - aabb[2];
+                    const longest = Math.max(dx, dy, dz);
+                    const shortest = Math.min(dx > 0.1 ? dx : Infinity, dy > 0.1 ? dy : Infinity, dz > 0.1 ? dz : Infinity);
+                    if (longest > 20 && longest / shortest > 15) {
+                        const cx = (aabb[0] + aabb[3]) / 2;
+                        const cy = (aabb[1] + aabb[4]) / 2;
+                        const cz = (aabb[2] + aabb[5]) / 2;
+                        // Side distance: 65% of tunnel length (sees full length from side)
+                        // Height: 20% of tunnel length (~17° elevation — proper side view)
+                        const sideDist = longest * 0.65;
+                        const height = longest * 0.2;
+                        if (dx >= dy) {
+                            // Tunnel along X — view from Y-side
+                            this.viewer.camera.eye = [cx, cy - sideDist, cz + height];
+                        } else {
+                            // Tunnel along Y — view from X-side
+                            this.viewer.camera.eye = [cx - sideDist, cy, cz + height];
+                        }
+                        this.viewer.camera.look = [cx, cy, cz];
+                        this.viewer.camera.up = [0, 0, 1];
+                    }
+                }
                 console.log('Camera positioned to fit model');
             } catch (cameraError) {
                 console.warn('Camera positioning error (non-fatal):', cameraError);
-                // Silently continue - viewer will still work, just needs manual camera adjustment
             }
 
         } catch (error) {
@@ -166,8 +196,8 @@ const ifcViewer = {
                 }
             }
             const totalSampled = Math.ceil(sample.length / (step * 4));
-            if (nonBgPixels / totalSampled < 0.03) {
-                // Less than 3% non-background — likely blank canvas
+            if (nonBgPixels / totalSampled < 0.005) {
+                // Less than 0.5% non-background — likely blank canvas (lowered for thin elongated models)
                 return null;
             }
 
@@ -176,6 +206,31 @@ const ifcViewer = {
             console.warn('Snapshot capture failed:', e);
             return null;
         }
+    },
+
+    /**
+     * Set up pick (click-to-select) events on the viewer canvas.
+     * Fires a custom 'elementPicked' DOM event with { id, type, name } when an element is clicked.
+     * Fires 'elementPickCleared' when background is clicked.
+     */
+    setupPickEvents() {
+        if (!this.viewer) return;
+        this.viewer.scene.input.on('mouseclicked', (coords) => {
+            const pickResult = this.viewer.scene.pick({ canvasPos: coords });
+            if (pickResult && pickResult.entity) {
+                const entity = pickResult.entity;
+                const metaObject = this.viewer.metaScene.metaObjects[entity.id];
+                document.dispatchEvent(new CustomEvent('elementPicked', {
+                    detail: {
+                        id: entity.id,
+                        type: metaObject?.type || 'Unknown',
+                        name: metaObject?.name || entity.id
+                    }
+                }));
+            } else {
+                document.dispatchEvent(new CustomEvent('elementPickCleared'));
+            }
+        });
     },
 
     /**

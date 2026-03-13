@@ -74,8 +74,8 @@ The backend folder contains the most recent code or information that is is ident
       - builting-router (node.js20 and arm64): API gateway router for auth, user data, renders, presigned URLs, and finalize endpoint (starts Step Function directly)
       - builting-read (node.js20 and arm64): retrieves render from DynamoDB and lists uploaded files from S3
       - builting-extract (node.js20 and arm64): downloads files from S3, extracts building specs as CSS v1.0 via Bedrock + VentSim/DXF/XLSX/DOCX parsers + multi-pass Bedrock extraction + enrichment; esbuild-bundled (5.7MB)
-      - builting-transform (node.js20 and arm64): consolidated Lambda that runs ValidateCSS → RepairCSS → NormalizeGeometry → MergeWalls → InferOpenings → InferSlabs
-      - builting-generate (python3.11 container): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, mesh fallback (IfcTriangulatedFaceSet), viewer compatibility scoring
+      - builting-transform (node.js20 and arm64): consolidated Lambda that runs ValidateCSS → RepairCSS → NormalizeGeometry → DecomposeTunnelShell (v2 stable frame + v3 infrastructure containment hints) → MergeWalls → InferOpenings → InferSlabs (MergeWalls and InferSlabs skip for TUNNEL domain)
+      - builting-generate (python3.11 container): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, mesh fallback (IfcTriangulatedFaceSet), viewer compatibility scoring, tunnel shell report generation, decomposed parent skip logic, v3 BIM semantics (IfcDuctSegment, IfcSpace containment, branch IfcElementAssembly aggregation, IfcMaterialLayerSetUsage)
       - builting-store (node.js20 and arm64): updates DynamoDB with IFC path, elementCounts, outputMode, cssHash
 
     - Step Function
@@ -105,6 +105,9 @@ The backend folder contains the most recent code or information that is is ident
                   GET
                   OPTIONS
                   /download
+                     GET
+                     OPTIONS
+                  /report
                      GET
                      OPTIONS
                   /finalize
@@ -137,15 +140,28 @@ The backend folder contains the most recent code or information that is is ident
 ## Project Status
 
 ### COMPLETED ✅
-See `COMPLETED.md` for full implementation history — all phases through end-to-end working pipeline are done.
+See `COMPLETED.md` for full implementation history — all phases through final gap-closure are done.
 
-### Remaining / Reach Goals
-1. Human-in-the-loop approval after generation so user can add fixes
-2. Edit/retry failed renders
-3. Multi-level buildings with ramps and stairs
-4. MEP systems visualization (HVAC, plumbing, electrical)
-5. Complex curved geometries for tunnels
-6. Image/blueprint file support (.png, .jpg) via Bedrock vision
+### Current: All Core Phases Complete (v6+ deployed 2026-03-13)
+- v6 Phases 1-9: Guardrails, Visual QA, Tunnel Clamping, Building Hardening, Quantity Sets, Validation, Source Report, Image Ingestion, Source Fusion
+- Requirements-Closure: Evidence Trail, Visual Improvements, BIM Maturity, Regression Tests, Scope Boundary
+- Final Gap-Closure Phases 1-8:
+  1. Revit Compatibility Validation (12-check scoring)
+  2. Connected System Topology (IfcDistributionSystem + IfcDistributionPort + connections)
+  3. Blueprint/Image Geometry Extraction Upgrade (type-specific vision, confidence-gated CSS)
+  4. Element-Level Evidence Mapping (sourceExcerpt, pageNumber, coordinateSource, Pset_SourceProvenance)
+  5. Universal Building Robustness (mezzanine, canopy, shared walls, L-shaped)
+  6. Viewer/Visualization Export (geometry stats, export readiness)
+  7. Full Verification Artifact (v2.0 engineer audit report)
+  8. Final Safety Checks (element limits, overlap detection, coordinate bounds)
+
+### Remaining / Future Work
+1. Edit/retry failed renders
+2. Complex curved geometries for tunnels
+3. Formal Revit round-trip proof
+4. Real-time sensor ingestion
+5. CAD-quality geometry from blueprints (advanced OCR/symbol recognition)
+6. Native glTF/OBJ export in Lambda
 7. Real-time collaboration / multi-user support
 8. Render versioning / history
 

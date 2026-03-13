@@ -1,0 +1,68 @@
+RESIDENTIAL BUILDING SPECIFICATION
+Project: Single-Family Dwelling — 742 Evergreen Terrace
+Architect: Morrison & Associates
+Date: October 2024
+
+SITE & FOUNDATION
+The lot measures 60 ft wide by 120 ft deep. The house footprint is approximately 40 ft x 30 ft (1,200 sq ft per floor). Foundation is poured concrete slab-on-grade, 4 inches thick with 6-mil vapor barrier underneath. Perimeter footings are 24 inches deep x 16 inches wide. Foundation walls extend 8 inches above grade.
+
+STRUCTURAL FRAMING
+Two-story wood frame construction. Exterior walls are 2x6 studs at 16 inches on center. Interior walls are 2x4 studs at 16 inches on center. Floor-to-ceiling height is 9 ft on the first floor and 8 ft on the second floor. Roof is gable style with 6:12 pitch, engineered trusses at 24 inches on center. Ridge height is approximately 26 ft from grade.
+
+FIRST FLOOR LAYOUT
+- Foyer/Entry: 6 ft x 8 ft, tile flooring, coat closet (2 ft x 3 ft)
+- Living Room: 18 ft x 14 ft, hardwood flooring, fireplace on north wall (brick surround, 4 ft wide opening)
+- Kitchen: 12 ft x 14 ft, tile flooring, L-shaped counter layout
+  - Island: 4 ft x 6 ft, granite countertop
+  - Appliances: 36-inch range, 30-inch refrigerator, dishwasher, microwave above range
+  - Cabinets: upper and lower along east and south walls
+- Dining Room: 12 ft x 10 ft, hardwood flooring, adjacent to kitchen through 6 ft cased opening
+- Half Bathroom: 5 ft x 6 ft, tile flooring, pedestal sink, toilet
+- Laundry Room: 6 ft x 8 ft, tile flooring, side-by-side washer/dryer, utility sink
+- Garage (attached): 20 ft x 22 ft, concrete slab floor, two 9 ft x 7 ft overhead doors on south wall
+  - Man door to laundry room on east wall
+
+SECOND FLOOR LAYOUT
+- Master Bedroom: 16 ft x 14 ft, carpet flooring
+  - Walk-in closet: 6 ft x 8 ft
+  - Master Bathroom: 10 ft x 8 ft, tile flooring, double vanity (60 inches), soaking tub (60 x 32 inches), separate shower stall (36 x 48 inches), toilet
+- Bedroom 2: 12 ft x 11 ft, carpet flooring, standard closet (6 ft x 2 ft)
+- Bedroom 3: 11 ft x 10 ft, carpet flooring, standard closet (5 ft x 2 ft)
+- Full Bathroom: 8 ft x 6 ft, tile flooring, single vanity, tub/shower combo (60 x 32 inches), toilet
+- Hallway: 3.5 ft wide, connects all rooms, open to foyer below via railing
+
+DOORS
+- Front entry: 36-inch fiberglass with sidelights (12 inches each side)
+- Rear entry (kitchen): 72-inch sliding glass door to patio
+- Interior doors: 32-inch hollow core, 6-panel style
+- Master bedroom: 36-inch solid core
+- Closet doors: bifold, 48-inch for standard closets, 72-inch for walk-in
+
+WINDOWS
+- Living room: two 48 x 60 inch double-hung on west wall, one 36 x 48 inch on north wall
+- Kitchen: 48 x 36 inch above sink on east wall
+- Dining room: 60 x 48 inch picture window on south wall
+- Bedrooms: two 36 x 48 inch double-hung each
+- Bathrooms: 24 x 36 inch frosted glass
+
+EXTERIOR
+- Siding: fiber cement lap siding, 7-inch exposure
+- Roof: architectural asphalt shingles, 30-year warranty
+- Soffit/fascia: aluminum, continuous ventilation
+- Gutters: 5-inch K-style aluminum with 3-inch downspouts
+
+MECHANICAL
+- HVAC: 3-ton split system, 16 SEER AC, 96% AFUE gas furnace
+  - Supply and return ductwork in floor trusses and wall chases
+  - Thermostat in hallway near staircase
+- Water heater: 50-gallon natural gas, located in garage
+- Electrical: 200-amp service panel in garage
+  - Kitchen: 4 dedicated 20-amp circuits
+  - Each bedroom: 2 circuits
+  - Smoke/CO detectors hardwired in all bedrooms and hallways
+
+PLUMBING
+- Supply: 3/4-inch copper main, 1/2-inch branches to fixtures
+- Drain: 4-inch PVC main stack, 3-inch to toilets, 2-inch to sinks/tubs
+- Fixtures: chrome finish throughout
+- Exterior: two hose bibs (front and rear)

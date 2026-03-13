@@ -19,7 +19,8 @@
         "userId.$": "$.userId",
         "bucket.$": "$.bucket",
         "files.$": "$.metadata.files",
-        "description.$": "$.metadata.render.description"
+        "description.$": "$.metadata.render.description",
+        "render.$": "$.metadata.render"
       },
       "ResultPath": "$.specResult",
       "Next": "CSSPipeline",
@@ -68,7 +69,8 @@
         "ai_generated_description.$": "$.specResult.ai_generated_description",
         "elementCounts.$": "$.ifcResult.elementCounts",
         "outputMode.$": "$.ifcResult.outputMode",
-        "cssHash.$": "$.ifcResult.cssHash"
+        "cssHash.$": "$.ifcResult.cssHash",
+        "tracingReport.$": "$.specResult.tracingReport"
       },
       "End": true,
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]

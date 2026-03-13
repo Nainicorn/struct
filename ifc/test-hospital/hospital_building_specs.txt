@@ -1,0 +1,125 @@
+HEALTHCARE FACILITY SPECIFICATION
+Project: Cedar Valley Community Hospital — 2-Story Acute Care Hospital
+Architect: HKS Healthcare Architecture
+Date: July 2024
+
+SITE & FOUNDATION
+Building footprint: 200 ft x 150 ft (30,000 sq ft per floor, 60,000 sq ft total). Reinforced concrete mat foundation, 24-inch thick. Grade beams between columns. Basement mechanical chase (partial, 80 ft x 40 ft) under surgical wing. Building oriented with ED entrance on south, main entrance on east.
+
+STRUCTURAL SYSTEM
+Reinforced concrete frame with post-tensioned flat slab floors. Columns 24 in x 24 in at 30 ft bays. Floor-to-floor height: 14 ft (12 ft clear). Lateral system: concrete shear walls at elevator/stair cores. Roof: concrete slab with built-up roofing. Designed for Essential Facility (Risk Category IV).
+
+FIRST FLOOR — EMERGENCY, SURGICAL, DIAGNOSTICS
+
+Emergency Department (South Wing):
+- ED Entrance vestibule: 12 ft x 15 ft, automatic sliding doors, ambulance canopy
+- ED Waiting: 25 ft x 20 ft = 500 sq ft, seating for 25, check-in desk
+- Triage: 15 ft x 12 ft, privacy curtain, medical equipment
+- Trauma Bay: 20 ft x 25 ft = 500 sq ft, ceiling-mounted booms, medical gas
+- Exam Rooms 1-6: 10 ft x 12 ft each, curtain track, hand sink, medical gas panel
+- ED Nurse Station: 20 ft x 15 ft, central monitoring, pneumatic tube
+- ED Corridor: 8 ft wide, 100 ft total, handrails both sides
+- Decontamination Room: 12 ft x 10 ft, separate exterior access, floor drain
+
+Surgical Suite (West Wing):
+- OR Suite 1: 20 ft x 25 ft = 500 sq ft, laminar flow ceiling, medical gas booms
+- OR Suite 2: 20 ft x 25 ft = 500 sq ft, same configuration
+- OR Suite 3: 20 ft x 25 ft = 500 sq ft, same configuration
+- Pre-Op/Recovery: 30 ft x 25 ft = 750 sq ft, 6 bays with curtains, nurse station
+- Sterile Processing: 20 ft x 25 ft = 500 sq ft, decontam/clean/sterile zones
+- Surgical Corridor: 8 ft wide, restricted access, card reader
+- Scrub Stations: 3 each, stainless steel, between OR suites
+- Anesthesia Workroom: 10 ft x 12 ft
+- Surgeon Lounge: 15 ft x 12 ft
+
+Diagnostics (Central):
+- Radiology Suite: 20 ft x 25 ft, lead-lined walls (1/16 inch sheet lead), control room 8 ft x 10 ft
+- CT Room: 25 ft x 20 ft, structural floor reinforcement for scanner, lead-lined
+- Ultrasound: 12 ft x 15 ft
+- Laboratory: 25 ft x 20 ft = 500 sq ft, casework, fume hoods (2 each), BSL-2 rated
+- Pharmacy: 20 ft x 15 ft = 300 sq ft, clean room (ISO 7), laminar flow hoods
+- Blood Bank: 10 ft x 12 ft, within laboratory
+
+Support (Central/East):
+- Main Lobby: 40 ft x 30 ft = 1,200 sq ft, information desk, waiting area, gift shop alcove
+- Registration: 15 ft x 10 ft, 3 stations
+- Cafeteria: 40 ft x 30 ft = 1,200 sq ft, seating for 80
+- Kitchen: 25 ft x 20 ft = 500 sq ft, commercial, Type I hood, walk-in cooler/freezer
+- Chapel/Meditation: 15 ft x 20 ft = 300 sq ft
+- Admin Offices: 30 ft x 25 ft = 750 sq ft, open office + 4 private offices
+- Medical Records: 15 ft x 20 ft
+- Loading Dock: 15 ft x 30 ft, 2 dock positions
+
+SECOND FLOOR — PATIENT CARE
+
+Patient Wing (North):
+- Patient Room 201-206: 12 ft x 15 ft each = 180 sq ft
+  - Each: private bathroom (5 ft x 8 ft), patient lift track, headwall with medical gas/data
+  - Window: 5 ft x 6 ft, operable hopper vent
+  - Nurse call at bedside and bathroom
+- ICU Bays 1-4: 12 ft x 16 ft each = 192 sq ft
+  - Open bay design with curtains, direct nurse station visibility
+  - Ceiling-mounted patient lift
+  - Full medical gas panel (O2, air, vacuum, N2O)
+- Isolation Rooms 1-2: 12 ft x 15 ft each
+  - Negative pressure anteroom (5 ft x 5 ft) with interlocked doors
+  - HEPA exhaust, dedicated return air (no recirculation)
+  - Observation window with blinds
+- Nurse Station (Central): 20 ft x 15 ft, central monitoring, medication room adjacent
+- Medication Room: 8 ft x 10 ft, secure, controlled substance safe, Pyxis station
+- Clean Supply: 8 ft x 12 ft
+- Soiled Utility: 8 ft x 10 ft, hopper, flushing rim sink
+- Nourishment Station: 6 ft x 8 ft, ice machine, microwave, refrigerator
+- Patient Corridor: 8 ft wide, handrails, crash rail protection
+- Staff Lounge: 15 ft x 12 ft
+- Conference/Report Room: 15 ft x 12 ft
+- Server/IT Room: 12 ft x 15 ft, raised floor, dedicated cooling
+
+VERTICAL CIRCULATION
+- Elevator 1 (Patient): 5,000 lb, 6 ft x 8 ft cab, stretcher-capable
+- Elevator 2 (Service): 5,000 lb, 6 ft x 8 ft cab
+- Stairwell A (NE): 8 ft x 10 ft, concrete, pressurized
+- Stairwell B (SW): 8 ft x 10 ft, concrete, pressurized
+
+EXTERIOR ENVELOPE
+- Walls: brick/precast panels, R-30 continuous insulation, air barrier
+- Curtain wall: main lobby and ED entrance, insulated low-e glass
+- Windows: aluminum, insulated, limited operable (patient rooms only)
+- Roof: fully-adhered TPO, R-40 insulation, fall protection anchors
+- Helipad: future provision, structural reinforcement in place
+
+MECHANICAL / HVAC
+- AHU-1 (Surgical): 18,000 CFM, 100% outdoor air capability
+  - HEPA final filtration, energy recovery, redundant fans
+  - OR suites: 20 ACH minimum, positive pressure
+- AHU-2 (Patient Wing): 14,000 CFM
+  - MERV-14 + MERV-17 filtration, 6 ACH minimum in patient rooms
+  - Isolation rooms: 12 ACH, negative pressure, HEPA exhaust
+- AHU-3 (Emergency): 8,000 CFM, 100% outdoor air for trauma
+- Boiler plant: 2 x 2,000 MBH redundant condensing boilers
+- Chiller plant: 2 x 150-ton centrifugal chillers, N+1 redundancy
+- Medical gas: bulk O2, medical air compressor, vacuum pumps, N2O manifold
+- Pneumatic tube system: 12 stations, 2 transfer units
+
+ELECTRICAL
+- Service: 480/277V, 3-phase, 3000A, dual utility feeds
+- Emergency power: 500kW diesel generator (Essential Electrical System)
+  - Life Safety branch, Critical branch, Equipment branch per NFPA 99
+  - 10-second transfer for life safety
+- UPS: 100kVA for OR lights, monitoring, IT
+- Nurse call: IP-based, pillow speaker, staff locator badges
+- Security: card access all doors, 64 cameras, infant/patient tracking
+
+FIRE PROTECTION
+- Fully sprinklered, wet system
+- Smoke compartments per NFPA 101 Healthcare
+- Fire alarm: voice evacuation, smoke detection all spaces
+- OR: wet chemical suppression (not clean agent, per hospital preference)
+- Kitchen: wet chemical hood suppression
+
+PLUMBING
+- Domestic hot water: 2 x 100-gallon commercial gas, recirculation loop
+- Tempered water to patient fixtures (max 110°F)
+- Acid waste system in laboratory
+- Grease interceptor for kitchen
+- Medical gas: piped O2, vacuum, medical air, N2O to all clinical spaces

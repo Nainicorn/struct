@@ -17,6 +17,8 @@ const renderbox = {
     currentBlobUrl: null, // Track blob URL to prevent premature garbage collection
     isRendering: false, // Flag to track if render is currently in progress
     currentRenderTitle: null, // AI-generated title of the active render (for download filename)
+    _onElementPicked: null,   // Stored handler refs for deduplication
+    _onElementPickCleared: null,
 
     // Initialize the renderbox component
     async init() {
@@ -183,6 +185,10 @@ const renderbox = {
             ifcViewer.resize();
             const canvas = this.element.querySelector('#ifc-viewer-canvas');
             if (canvas) canvas.focus();
+
+            // Set up element pick events (element click → source info chip)
+            ifcViewer.setupPickEvents();
+            this._bindPickEvents();
 
             // Capture thumbnail only if one doesn't already exist in the cache.
             // This keeps sidebar thumbnails static once captured.
@@ -531,6 +537,77 @@ const renderbox = {
     },
 
     /**
+     * Bind element pick events from IFC viewer — show/hide element info chip
+     */
+    _bindPickEvents() {
+        // Remove any previously bound pick listeners to avoid duplicates
+        if (this._onElementPicked) document.removeEventListener('elementPicked', this._onElementPicked);
+        if (this._onElementPickCleared) document.removeEventListener('elementPickCleared', this._onElementPickCleared);
+
+        const chip = this.element.querySelector('.__renderbox-element-chip');
+        const chipType = this.element.querySelector('.__renderbox-element-chip-type');
+        const chipName = this.element.querySelector('.__renderbox-element-chip-name');
+        const chipId = this.element.querySelector('.__renderbox-element-chip-id');
+
+        this._onElementPicked = (e) => {
+            if (!chip || !chipType || !chipName) return;
+            const { type, name, id } = e.detail;
+            // Readable type: IfcWallStandardCase → Wall Standard Case
+            const readableType = type.replace(/^Ifc/, '').replace(/([a-z])([A-Z])/g, '$1 $2');
+            chipType.textContent = readableType;
+            // Show name only if meaningful
+            const readableName = name && name.length < 80 && !name.startsWith('#') ? name : '';
+            chipName.textContent = readableName;
+            chipName.style.display = readableName ? 'block' : 'none';
+            // Show IFC class as a subtle label
+            if (chipId) {
+                chipId.textContent = type;
+                chipId.style.display = 'block';
+            }
+            chip.style.display = 'flex';
+        };
+
+        this._onElementPickCleared = () => {
+            if (chip) chip.style.display = 'none';
+        };
+
+        document.addEventListener('elementPicked', this._onElementPicked);
+        document.addEventListener('elementPickCleared', this._onElementPickCleared);
+    },
+
+    /**
+     * Handle refinement submission when a render is already loaded
+     */
+    async _handleRefineRender() {
+        const descriptionInput = this.element.querySelector('.__renderbox-description');
+        const refinement = descriptionInput?.textContent.trim() || '';
+        if (!refinement) {
+            this._showError('Please describe the correction to apply');
+            return;
+        }
+
+        const renderId = this.element.dataset.renderId;
+        if (!renderId) return;
+
+        try {
+            this._showLoadingState('Submitting refinement...');
+            if (descriptionInput) {
+                descriptionInput.textContent = '';
+                descriptionInput.classList.add('is-empty');
+            }
+
+            const { renderId: newRenderId } = await rendersService.refineRender(renderId, refinement);
+
+            // Start polling on the new render ID
+            this._startPolling(newRenderId);
+        } catch (error) {
+            console.error('Refinement failed:', error);
+            this._hideLoadingState();
+            this._showError(`Failed to submit refinement: ${error.message}`);
+        }
+    },
+
+    /**
      * Bind all event listeners
      */
     _bindEvents() {
@@ -563,23 +640,36 @@ const renderbox = {
             });
         }
 
-        // Handle "Start Render" button click
+        // Handle "Start Render" button click — routes based on current state
         const startBtn = this.element.querySelector('.__renderbox-start');
         if (startBtn) {
             startBtn.addEventListener('click', async () => {
-                await this._handleStartRender();
-            });
-        }
-
-        // Handle description input - allow submitting with Ctrl+Enter
-        const descriptionInput = this.element.querySelector('.__renderbox-description');
-        if (descriptionInput) {
-            descriptionInput.addEventListener('keydown', async (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
+                if (this.element.dataset.state === 'viewing-render') {
+                    await this._handleRefineRender();
+                } else {
                     await this._handleStartRender();
                 }
             });
+        }
+
+        // Handle description input - allow submitting with Enter
+        const descriptionInput = this.element.querySelector('.__renderbox-description');
+        if (descriptionInput) {
+            // Stop all keyboard events from reaching the xeokit viewer canvas
+            // (otherwise WASD/arrows move the camera while typing)
+            descriptionInput.addEventListener('keydown', async (e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (this.element.dataset.state === 'viewing-render') {
+                        await this._handleRefineRender();
+                    } else {
+                        await this._handleStartRender();
+                    }
+                }
+            });
+            descriptionInput.addEventListener('keyup', (e) => e.stopPropagation());
+            descriptionInput.addEventListener('keypress', (e) => e.stopPropagation());
 
             // Monitor input content to show/hide placeholder
             const updateEmptyState = () => {
@@ -727,8 +817,18 @@ const renderbox = {
                 return;
             }
 
-            // Update loading message with elapsed time
-            this._updateLoadingMessage(`Processing your render... (${minutes}m elapsed)`);
+            // Update loading message with pipeline stage estimate
+            const stages = [
+                { t: 0, label: 'Reading uploaded files...' },
+                { t: 8000, label: 'Extracting building structure...' },
+                { t: 25000, label: 'Transforming geometry...' },
+                { t: 50000, label: 'Generating IFC model...' },
+                { t: 90000, label: 'Running validation...' },
+                { t: 150000, label: 'Finalizing render...' },
+            ];
+            const stage = [...stages].reverse().find(s => elapsed >= s.t) || stages[0];
+            const timeStr = minutes > 0 ? ` (${minutes}m elapsed)` : '';
+            this._updateLoadingMessage(`${stage.label}${timeStr}`);
 
             // Exponential backoff polling: 2s → 5s → 10s → 15s
             let delay;

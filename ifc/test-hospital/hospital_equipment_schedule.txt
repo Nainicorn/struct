@@ -1,0 +1,85 @@
+MEDICAL EQUIPMENT & MEP SCHEDULE — CEDAR VALLEY COMMUNITY HOSPITAL
+Biomedical Engineering Dept.
+Date: July 2024
+
+=== HVAC MAJOR EQUIPMENT ===
+TAG	DESCRIPTION	MANUFACTURER	MODEL	CAPACITY	VOLTAGE	LOCATION	SPECIAL
+AHU-1	Air Handler Surgical	Trane	M-Series	18,000 CFM	480V/3ph	Mech Room 1F	100% OA capable, HEPA
+AHU-2	Air Handler Patient	Trane	M-Series	14,000 CFM	480V/3ph	Mech Room 2F	ERV, MERV-14+17
+AHU-3	Air Handler Emergency	Trane	M-Series	8,000 CFM	480V/3ph	Mech Room 1F	100% OA for trauma
+CH-1	Chiller	Carrier	19XR	150 Ton	480V/3ph	Mech Room 1F	Centrifugal, R-134a
+CH-2	Chiller	Carrier	19XR	150 Ton	480V/3ph	Mech Room 1F	Redundant, R-134a
+B-1	Boiler	Lochinvar	CREST	2,000 MBH	N/A (Gas)	Boiler Room 1F	Condensing, 96% eff
+B-2	Boiler	Lochinvar	CREST	2,000 MBH	N/A (Gas)	Boiler Room 1F	Redundant
+CT-1	Cooling Tower	Marley	NC8300	300 Ton	480V/3ph	Roof	Crossflow, VFD fans
+P-CHW-1	Chilled Water Pump	Bell & Gossett	e-1510	150 GPM	480V/3ph	Mech Room 1F	Primary, VFD
+P-CHW-2	Chilled Water Pump	Bell & Gossett	e-1510	150 GPM	480V/3ph	Mech Room 1F	Secondary, VFD
+P-HW-1	Hot Water Pump	Bell & Gossett	e-1510	100 GPM	208V/3ph	Boiler Room	Primary
+P-HW-2	Hot Water Pump	Bell & Gossett	e-1510	100 GPM	208V/3ph	Boiler Room	Secondary
+
+=== EXHAUST SYSTEMS ===
+TAG	DESCRIPTION	CFM	VOLTAGE	LOCATION	TYPE
+EF-ISO-1	Isolation Exhaust 1	500	208V/1ph	Roof	HEPA filtered, dedicated
+EF-ISO-2	Isolation Exhaust 2	500	208V/1ph	Roof	HEPA filtered, dedicated
+EF-LAB	Lab Fume Hood Exhaust	600	208V/1ph	Roof	Variable volume
+EF-KIT	Kitchen Exhaust	3,000	480V/3ph	Roof	Upblast, grease rated
+EF-GEN	General Exhaust	2,000	208V/1ph	Roof	Toilet/soiled utility
+CRAC-1	Server Room Cooling	1,500	208V/1ph	Server Room 2F	Liebert, dedicated
+
+=== MEDICAL GAS SYSTEMS ===
+TAG	SYSTEM	SOURCE	PIPE SIZE	PRESSURE	OUTLETS	LOCATION
+O2	Oxygen	Bulk LOX Tank	2 in Cu	50 PSI	85	All clinical spaces
+MA	Medical Air	Compressor	1.5 in Cu	50 PSI	60	OR, ED, Patient, ICU
+VAC	Vacuum	Pump	2 in Cu	-15 inHg	70	All clinical spaces
+N2O	Nitrous Oxide	Manifold	0.5 in Cu	50 PSI	6	OR Suites only
+WAGD	Waste Gas Disposal	Dedicated	1 in Cu	N/A	6	OR Suites only
+O2-SRC	Bulk O2 Tank	VGL Cryogenics	3000L	200 PSI	N/A	Exterior Pad North
+MA-SRC	Med Air Compressor	BeaconMedaes	Silentaire	Duplex 10HP	480V	Mech Room 1F
+VAC-SRC	Vacuum Pump	BeaconMedaes	Silentaire	Duplex 10HP	480V	Mech Room 1F
+N2O-MAN	N2O Manifold	Western Med	M1-940	Dual bank	N/A	Mech Room 1F
+
+=== ELECTRICAL DISTRIBUTION ===
+TAG	DESCRIPTION	CAPACITY	VOLTAGE	LOCATION	BRANCH
+MSB	Main Switchboard	3000A	480/277V 3ph	Elec Room 1F	Normal
+ATS-1	Auto Transfer Switch	1200A	480V	Elec Room 1F	Life Safety
+ATS-2	Auto Transfer Switch	800A	480V	Elec Room 1F	Critical
+ATS-3	Auto Transfer Switch	600A	480V	Elec Room 1F	Equipment
+GEN-1	Generator	Caterpillar	C15	500 kW	480V 3ph	Exterior Grade	Emergency
+UPS-1	UPS System	Eaton	9395	100 kVA	480V	Server Room	OR + Monitoring
+XF-1	Transformer	Square D	EE75T3H	75 kVA	480-208/120V	Elec Room 1F	Normal
+XF-2	Transformer	Square D	EE75T3H	75 kVA	480-208/120V	Elec Room 2F	Normal
+XF-3	Transformer	Square D	EE45T3H	45 kVA	480-208/120V	Elec Room 1F	Emergency
+
+=== PLUMBING ===
+TAG	DESCRIPTION	MANUFACTURER	MODEL	CAPACITY	FUEL/VOLTAGE	LOCATION
+WH-1	Water Heater	A.O. Smith	BTH-500A	100 Gallon	Gas	Mech Room 1F
+WH-2	Water Heater	A.O. Smith	BTH-500A	100 Gallon	Gas	Mech Room 1F
+TMV-1	Mixing Valve	Leonard	TM-80-AT	80 GPM	N/A	Mech Room 1F
+RCP-1	Recirc Pump	Grundfos	UP 15-42	N/A	120V	Mech Room 1F
+GI-1	Grease Interceptor	Zurn	GT2702-50	50 GPM	N/A	Below Kitchen Slab
+AW-1	Acid Waste Tank	Watts	AWS-9	9 Gallon	120V	Below Lab Slab
+
+=== FIRE PROTECTION ===
+TAG	DESCRIPTION	MANUFACTURER	CAPACITY	LOCATION
+FP-1	Fire Pump	Patterson	750 GPM	Fire Pump Room 1F
+JP-1	Jockey Pump	Patterson	30 GPM	Fire Pump Room 1F
+FACP	Fire Alarm Panel	Notifier	NFS2-3030	Elec Room 1F
+CA-1	Clean Agent (Kitchen)	Ansul R-102	N/A	Kitchen Hood
+WC-1	Wet Chemical (OR)	Ansul R-102	N/A	OR Kitchen
+
+=== PNEUMATIC TUBE ===
+STATION	LOCATION	TYPE
+PT-01	ED Nurse Station	Send/Receive
+PT-02	Pharmacy	Send/Receive
+PT-03	Laboratory	Send/Receive
+PT-04	OR Nurse Station	Send/Receive
+PT-05	2F Nurse Station	Send/Receive
+PT-06	Radiology	Send/Receive
+PT-07	Admin	Send only
+PT-08	Blood Bank	Send/Receive
+PT-09	Sterile Processing	Send/Receive
+PT-10	ED Triage	Send/Receive
+PT-11	Registration	Send only
+PT-12	ICU Nurse Station	Send/Receive
+TU-1	Transfer Unit	Mech Room 1F	Dual blower
+TU-2	Transfer Unit	Mech Room 2F	Dual blower

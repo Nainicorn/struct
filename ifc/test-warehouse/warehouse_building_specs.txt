@@ -1,0 +1,78 @@
+INDUSTRIAL WAREHOUSE / DISTRIBUTION CENTER SPECIFICATION
+Project: CrossDock Logistics Hub — Single-Story Warehouse with Office Mezzanine
+Engineer: Brinkman Industrial Design
+Date: November 2024
+
+SITE & FOUNDATION
+Building footprint: 200 ft x 120 ft (24,000 sq ft total). Slab-on-grade construction with 6-inch reinforced concrete, fiber mesh reinforcement, 4,000 PSI. Joint spacing at 15 ft intervals. Dock area has depressed slab (48 inches below main floor) for dock levelers. Perimeter footings 36 inches deep x 20 inches wide. Frost wall to 42 inches.
+
+STRUCTURAL SYSTEM
+Pre-engineered metal building (PEMB). Clear span rigid frames at 25 ft bays. Clear height 28 ft to underside of structure. Eave height 30 ft. Roof slope 1:12. Purlins at 5 ft on center. Girts at 5.5 ft on center. All structural steel hot-dip galvanized.
+
+WAREHOUSE AREAS
+- Main Storage Zone 1 (East): 80 ft x 80 ft = 6,400 sq ft
+  - Pallet racking: 5 bays x 4 levels, 42 in deep selective rack
+  - Aisle width: 12 ft (reach truck rated)
+- Main Storage Zone 2 (Center): 80 ft x 80 ft = 6,400 sq ft
+  - Bulk storage floor area, no racking
+  - Floor load: 500 PSF
+- Main Storage Zone 3 (West): 80 ft x 80 ft = 6,400 sq ft
+  - Pallet racking: 5 bays x 4 levels, 42 in deep selective rack
+  - Aisle width: 12 ft
+
+SHIPPING/RECEIVING DOCK
+- Dock face: 120 ft long on south wall
+- 4 dock doors: 8 ft x 10 ft overhead sectional doors with dock levelers
+  - Dock leveler capacity: 30,000 lbs
+  - Dock bumpers: 12 in x 12 in x 4 in laminated rubber
+  - Dock seals: foam pad type with head curtain
+- Staging area: 120 ft x 30 ft = 3,600 sq ft
+- Drive-in door: 1 each, 14 ft x 16 ft, insulated sectional, motor operated (west wall)
+
+OFFICE / MEZZANINE
+- Mezzanine platform: 30 ft x 60 ft = 1,800 sq ft, northwest corner, 12 ft above warehouse floor
+- Steel structure with composite deck, 100 PSF live load
+- Access: one steel stairway (4 ft wide, 17 risers) with steel pipe railing
+- Office layout on mezzanine:
+  - General Office: 20 ft x 25 ft, carpet tile
+  - Manager Office: 12 ft x 12 ft, carpet tile
+  - Break Room: 15 ft x 10 ft, VCT flooring, kitchenette with sink/microwave/refrigerator
+  - Restroom (M): 8 ft x 6 ft, tile
+  - Restroom (F): 8 ft x 6 ft, tile
+  - IT/Server Closet: 6 ft x 6 ft
+
+EXTERIOR ENVELOPE
+- Walls: 26-gauge metal panels, R-25 faced fiberglass insulation
+- Roof: 24-gauge standing seam metal roof, R-30 insulation
+- Dock wall (south): 8-inch CMU to 4 ft, metal panel above
+- 4 translucent wall panels (5 ft x 10 ft each) on east and west walls for daylighting
+- Personnel doors: 36-inch insulated steel, 3 total (east, west, north)
+
+MECHANICAL / HVAC
+- Warehouse: gas-fired unit heaters (4 units, 250,000 BTU each), suspended at 20 ft
+- Warehouse ventilation: 2 HVLS (High Volume Low Speed) ceiling fans, 24 ft diameter
+- Warehouse exhaust: 2 roof-mounted exhaust fans (4,000 CFM each)
+- Dock exhaust: 1 wall-mounted exhaust fan (8,000 CFM) with intake louvers
+- Office mezzanine: 5-ton rooftop package unit, ductwork in ceiling plenum
+- Compressor room ventilation: dedicated exhaust fan (1,500 CFM)
+
+ELECTRICAL
+- Service: 480/277V 3-phase, 600A main disconnect
+- Distribution: 208/120V panel for office via 75kVA transformer
+- Warehouse lighting: LED high-bay fixtures (200W each, 28 ft mounting height), 48 total
+- Office lighting: 2x4 LED troffers, occupancy sensors
+- Dock lights: adjustable arm dock lights at each door position
+- Emergency: battery-powered exit/emergency lights, no generator
+
+FIRE PROTECTION
+- ESFR sprinkler system (Early Suppression Fast Response)
+- K-factor 25.2 heads at ceiling, 100 sq ft spacing
+- 6-inch riser, fire department connection on south wall
+- Portable extinguishers per NFPA 10
+
+PLUMBING
+- Restrooms: standard fixtures, ADA compliant
+- Break room: single basin sink, drinking fountain
+- Floor drains: 4 total in warehouse (one per zone + dock area)
+- Exterior: 2 hose bibs, 1 fire hydrant connection
+- Compressed air: 2-stage reciprocating compressor (25 HP), piped to dock area and zones

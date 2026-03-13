@@ -1,0 +1,70 @@
+EQUIPMENT & ASSET INVENTORY — CROSSDOCK LOGISTICS HUB
+Facility Manager: Industrial Properties LLC
+Last Updated: November 2024
+
+=== HVAC EQUIPMENT ===
+TAG	DESCRIPTION	MANUFACTURER	MODEL	CAPACITY	VOLTAGE	LOCATION
+RTU-1	Rooftop Unit	Trane	YCD480B4	40 Ton	480V/3ph	Roof Center
+UH-1	Unit Heater	Modine	HD125AS0111	125,000 BTU	N/A (Gas)	Warehouse Zone 1, 20ft height
+UH-2	Unit Heater	Modine	HD125AS0111	125,000 BTU	N/A (Gas)	Warehouse Zone 2, 20ft height
+UH-3	Unit Heater	Modine	HD125AS0111	125,000 BTU	N/A (Gas)	Warehouse Zone 3, 20ft height
+UH-4	Unit Heater	Modine	HD125AS0111	125,000 BTU	N/A (Gas)	Dock Area, 18ft height
+HVLS-1	Ceiling Fan	Big Ass Fans	Powerfoil X3.0	85,000 CFM	480V/3ph	Zone 1/2 boundary, 22ft mount
+HVLS-2	Ceiling Fan	Big Ass Fans	Powerfoil X3.0	85,000 CFM	480V/3ph	Zone 2/3 boundary, 22ft mount
+EF-R1	Roof Exhaust Fan	Greenheck	CUBE-180-50	4,000 CFM	480V/3ph	Roof East
+EF-R2	Roof Exhaust Fan	Greenheck	CUBE-180-50	4,000 CFM	480V/3ph	Roof West
+EF-D1	Dock Exhaust Fan	Greenheck	SBE-1-36	8,000 CFM	480V/3ph	South Wall Above Dock
+EF-C1	Compressor Rm Fan	Greenheck	SP-A600	1,500 CFM	208V/1ph	Compressor Room Wall
+PKG-1	Office Split System	Mitsubishi	MXZ-5C42NAHZ	42,000 BTU	208V/1ph	Office Mezzanine
+PKG-1A	Indoor Head	Mitsubishi	MSZ-GL15NA	15,000 BTU	N/A	General Office
+PKG-1B	Indoor Head	Mitsubishi	MSZ-GL09NA	9,000 BTU	N/A	Manager Office
+PKG-1C	Indoor Head	Mitsubishi	MSZ-GL09NA	9,000 BTU	N/A	Break Room
+
+=== DOCK EQUIPMENT ===
+TAG	DESCRIPTION	MANUFACTURER	MODEL	CAPACITY	SIZE	LOCATION
+DL-1	Dock Leveler	Rite-Hite	RHH4000	30,000 lb	6x8 ft	Dock Position 1
+DL-2	Dock Leveler	Rite-Hite	RHH4000	30,000 lb	6x8 ft	Dock Position 2
+DL-3	Dock Leveler	Rite-Hite	RHH4000	30,000 lb	6x8 ft	Dock Position 3
+DL-4	Dock Leveler	Rite-Hite	RHH4000	30,000 lb	6x8 ft	Dock Position 4
+DS-1	Dock Seal	Rite-Hite	Eclipse	N/A	9x10 ft	Dock Position 1
+DS-2	Dock Seal	Rite-Hite	Eclipse	N/A	9x10 ft	Dock Position 2
+DS-3	Dock Seal	Rite-Hite	Eclipse	N/A	9x10 ft	Dock Position 3
+DS-4	Dock Seal	Rite-Hite	Eclipse	N/A	9x10 ft	Dock Position 4
+VR-1	Vehicle Restraint	Rite-Hite	DOK-LOK	N/A	N/A	Dock Position 1
+VR-2	Vehicle Restraint	Rite-Hite	DOK-LOK	N/A	N/A	Dock Position 2
+VR-3	Vehicle Restraint	Rite-Hite	DOK-LOK	N/A	N/A	Dock Position 3
+VR-4	Vehicle Restraint	Rite-Hite	DOK-LOK	N/A	N/A	Dock Position 4
+DLT-1	Dock Light	Rite-Hite	LED-44	N/A	44in arm	Dock Position 1
+DLT-2	Dock Light	Rite-Hite	LED-44	N/A	44in arm	Dock Position 2
+DLT-3	Dock Light	Rite-Hite	LED-44	N/A	44in arm	Dock Position 3
+DLT-4	Dock Light	Rite-Hite	LED-44	N/A	44in arm	Dock Position 4
+
+=== DOORS ===
+TAG	TYPE	SIZE	DESCRIPTION	LOCATION
+OHD-1	Overhead Sectional	8x10 ft	Dock door, insulated, motor operated	Dock Pos 1
+OHD-2	Overhead Sectional	8x10 ft	Dock door, insulated, motor operated	Dock Pos 2
+OHD-3	Overhead Sectional	8x10 ft	Dock door, insulated, motor operated	Dock Pos 3
+OHD-4	Overhead Sectional	8x10 ft	Dock door, insulated, motor operated	Dock Pos 4
+OHD-5	Overhead Sectional	14x16 ft	Drive-in door, insulated, motor operated	West Wall
+PD-1	Personnel Door	36 in	Insulated steel, panic hardware	East Wall
+PD-2	Personnel Door	36 in	Insulated steel, keyed	West Wall
+PD-3	Personnel Door	36 in	Insulated steel, keyed	North Wall
+
+=== COMPRESSED AIR ===
+TAG	DESCRIPTION	MANUFACTURER	MODEL	CAPACITY	VOLTAGE	LOCATION
+AC-1	Air Compressor	Ingersoll Rand	UP6-25-125	25 HP / 100 CFM	480V/3ph	Compressor Room
+AT-1	Air Receiver Tank	Manchester	302429	120 Gallon	N/A	Compressor Room
+AD-1	Air Dryer	Ingersoll Rand	D180IN	106 CFM	208V/1ph	Compressor Room
+
+=== RACKING ===
+ZONE	TYPE	BAYS	LEVELS	DEPTH	LOAD PER LEVEL	HEIGHT
+Zone 1	Selective Pallet	5	4	42 in	2,500 lb	20 ft
+Zone 3	Selective Pallet	5	4	42 in	2,500 lb	20 ft
+
+=== ELECTRICAL ===
+TAG	DESCRIPTION	CAPACITY	VOLTAGE	LOCATION
+MSB	Main Switchboard	600A	480/277V 3ph	Electrical Room
+XF-1	Dry Transformer	75 kVA	480 to 208/120V	Electrical Room
+PNL-A	Lighting Panel	225A	277V	Electrical Room
+PNL-B	Power Panel	225A	480V	Electrical Room
+PNL-C	Office Panel	100A	208/120V	Office Mezzanine

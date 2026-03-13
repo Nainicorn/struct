@@ -21,6 +21,13 @@ const renders = {
     const path = event.path || event.rawPath || '';
 
     try {
+      // POST /api/renders/{renderId}/refine - refine with engineer correction
+      if (method === 'POST' && path.includes('/refine')) {
+        const renderId = path.split('/').slice(-2)[0];
+        const body = typeof event.body === 'string' ? JSON.parse(event.body || '{}') : (event.body || {});
+        return await renders.refineRender(userId, renderId, body.refinement);
+      }
+
       // POST /api/renders/{renderId}/finalize - finalize upload and start pipeline
       if (method === 'POST' && path.includes('/finalize')) {
         const renderId = path.split('/').slice(-2)[0];
@@ -31,6 +38,12 @@ const renders = {
       if (method === 'GET' && path.includes('/download')) {
         const renderId = path.split('/').slice(-2)[0];
         return await renders.getDownloadUrl(userId, renderId);
+      }
+
+      // GET /api/renders/{renderId}/report - download verification report
+      if (method === 'GET' && path.includes('/report')) {
+        const renderId = path.split('/').slice(-2)[0];
+        return await renders.getVerificationReport(userId, renderId);
       }
 
       // GET /api/renders/{renderId}/sources/{fileName} - download source file
@@ -167,6 +180,19 @@ const renders = {
     }
   },
 
+  getVerificationReport: async (userId, renderId) => {
+    const key = `uploads/${userId}/${renderId}/reports/verification_report.json`;
+    try {
+      const response = await s3.send(new GetObjectCommand({ Bucket: DATA_BUCKET, Key: key }));
+      const buffer = await response.Body.transformToByteArray();
+      const reportJson = Buffer.from(buffer).toString('utf-8');
+      return { report: JSON.parse(reportJson) };
+    } catch (err) {
+      console.error('Error fetching verification report:', err.message);
+      return { error: 'Verification report not found', statusCode: 404 };
+    }
+  },
+
   finalizeRender: async (userId, renderId) => {
     console.log('Finalizing render:', { userId, renderId });
 
@@ -238,6 +264,45 @@ const renders = {
     console.log(`Step Function started: ${executionResult.executionArn}`);
 
     return { message: 'Render finalized and pipeline started', renderId, fileCount: fileManifest.length };
+  },
+
+  refineRender: async (userId, renderId, refinementText) => {
+    if (!refinementText || typeof refinementText !== 'string' || !refinementText.trim()) {
+      return { error: 'refinement text is required', statusCode: 400 };
+    }
+
+    const stateMachineArn = process.env.STATE_MACHINE_ARN;
+    if (!stateMachineArn) return { error: 'Pipeline not configured', statusCode: 500 };
+
+    const original = await renders.getRender(userId, renderId);
+    if (original.error) return original;
+    if (original.status !== 'completed') {
+      return { error: 'Can only refine completed renders', statusCode: 400 };
+    }
+
+    const newRenderId = `render-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const newItem = {
+      user_id: userId,
+      render_id: newRenderId,
+      status: 'processing',
+      created_at: Math.floor(Date.now() / 1000),
+      source_files: original.source_files || [],
+      s3_path: original.s3_path,
+      description: original.description || '',
+      refinement: refinementText.trim(),
+      refined_from: renderId
+    };
+
+    await dynamo.send(new PutCommand({ TableName, Item: newItem }));
+
+    const executionResult = await sfn.send(new StartExecutionCommand({
+      stateMachineArn,
+      input: JSON.stringify({ userId, renderId: newRenderId, bucket: DATA_BUCKET }),
+      name: `refine-${newRenderId}`
+    }));
+    console.log(`Refine pipeline started: ${executionResult.executionArn}`);
+
+    return { renderId: newRenderId, message: 'Refinement pipeline started' };
   },
 
   deleteRender: async (userId, renderId) => {
