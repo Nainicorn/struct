@@ -103,12 +103,40 @@ TYPE_COLORS = {
 }
 
 # Shell piece colors — layer 2 in color precedence (after semanticType, before css_type)
+# High-contrast palette: warm vs cool walls, dark ground/roof, bright void
 SHELL_PIECE_COLORS = {
-    'LEFT_WALL': (0.78, 0.78, 0.74),    # light warm gray
-    'RIGHT_WALL': (0.78, 0.78, 0.74),   # matches left wall
-    'FLOOR': (0.55, 0.55, 0.52),        # noticeably darker
-    'ROOF': (0.40, 0.40, 0.45),         # dark gray — clearly the roof
-    'VOID': (0.70, 0.82, 0.95),         # translucent sky blue
+    'LEFT_WALL':  (0.76, 0.60, 0.42),   # warm tan / sandstone
+    'RIGHT_WALL': (0.55, 0.63, 0.75),   # cool steel-blue
+    'FLOOR':      (0.40, 0.36, 0.32),   # dark brown / concrete
+    'ROOF':       (0.30, 0.32, 0.38),   # dark slate-blue
+    'VOID':       (0.55, 0.78, 0.95),   # bright sky blue (transparency preserved elsewhere)
+}
+
+# Equipment size defaults (width, height, depth) — override only when CSS has placeholder 1×1×1
+# Universal: applies to all domains
+EQUIPMENT_SIZE_DEFAULTS = {
+    'IfcFan':                       (1.2, 1.2, 0.8),
+    'IfcPump':                      (0.8, 0.6, 1.0),
+    'IfcValve':                     (0.3, 0.3, 0.2),
+    'IfcSensor':                    (0.15, 0.15, 0.1),
+    'IfcCompressor':                (1.5, 1.2, 2.0),
+    'IfcTransformer':               (1.0, 1.5, 0.8),
+    'IfcBoiler':                    (0.8, 1.2, 0.8),
+    'IfcChiller':                   (1.5, 1.0, 2.0),
+    'IfcElectricDistributionBoard': (0.6, 1.8, 0.3),
+    'IfcLightFixture':              (0.6, 0.1, 0.6),
+    'IfcFireSuppressionTerminal':   (0.15, 0.15, 0.3),
+    'IfcAlarm':                     (0.15, 0.15, 0.1),
+    'IfcCommunicationsAppliance':   (0.4, 0.4, 0.2),
+    'IfcTank':                      (1.5, 2.0, 1.5),
+    'IfcActuator':                  (0.2, 0.2, 0.15),
+    'IfcElectricGenerator':         (1.5, 1.2, 2.0),
+    'IfcUnitaryEquipment':          (0.8, 0.8, 0.8),
+    'IfcAirToAirHeatRecovery':      (1.0, 0.8, 1.2),
+    'IfcCableCarrierSegment':       (0.3, 0.15, 2.0),
+    'IfcCableSegment':              (0.05, 0.05, 2.0),
+    'IfcPipeSegment':               (0.15, 0.15, 2.0),
+    'IfcDuctSegment':               (0.4, 0.4, 2.0),
 }
 
 # CSS type → IFC entity mapping (confident, >= 0.7)
@@ -833,6 +861,11 @@ def generate_ifc4_from_css(css):
     style_report = {}
     all_elem_names = []
     proxy_tracking = {'count': 0, 'reasons': {}}
+    shell_naming_hits = 0  # count of elements that used shell piece naming path
+    shell_naming_samples = []  # first few shell-named elements for QA
+    duct_naming_hits = 0  # count of duct/pipe elements with descriptive names
+    duct_naming_samples = []  # first few duct/pipe named elements for QA
+    equipment_size_overrides = 0  # count of equipment with placeholder geometry replaced
 
     for elem in elements:
         try:
@@ -856,37 +889,63 @@ def generate_ifc4_from_css(css):
 
             # --- Descriptive naming ---
             raw_name = elem.get('name', '')
-            GENERIC_RAW_NAMES = {'WALL', 'SLAB', 'SPACE', 'DUCT', 'EQUIPMENT', 'PROXY',
-                                 'TUNNEL_SEGMENT', 'PIPE', 'COLUMN', 'BEAM', 'DOOR', 'WINDOW', ''}
+            GENERIC_RAW_NAMES = {'WALL', 'SLAB', 'SPACE', 'DUCT', 'PIPE', 'EQUIPMENT', 'PROXY',
+                                 'TUNNEL_SEGMENT', 'COLUMN', 'BEAM', 'DOOR', 'WINDOW', ''}
 
             # Helper: make IFC semantic type human-readable
             def _readable_semantic(st):
                 r = st.replace('Ifc', '')
                 return re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', r)
 
-            if shell_piece and derived_branch:
-                # Shell decomposition pieces: "Left Wall — Branch 1710 (Main Tunnel)"
+            if shell_piece:
+                # Hard-enforce shell naming — always override Name for shell-derived elements
                 piece_labels = {
                     'LEFT_WALL': 'Left Wall', 'RIGHT_WALL': 'Right Wall',
                     'FLOOR': 'Floor Slab', 'ROOF': 'Roof Slab', 'VOID': 'Void Space'
                 }
                 piece_label = piece_labels.get(shell_piece, shell_piece)
-                if raw_name and raw_name != derived_branch and raw_name not in GENERIC_RAW_NAMES:
-                    elem_name = f"{piece_label} — {derived_branch} ({raw_name})"
+                # branch_label priority: readable raw_name > derivedFromBranch > css_id
+                if raw_name and raw_name not in GENERIC_RAW_NAMES and raw_name.upper() not in GENERIC_RAW_NAMES:
+                    if derived_branch and derived_branch != raw_name:
+                        branch_label = derived_branch
+                        elem_name = f"{piece_label} — {branch_label} ({raw_name})"
+                    else:
+                        branch_label = raw_name
+                        elem_name = f"{piece_label} — {branch_label}"
+                elif derived_branch:
+                    branch_label = derived_branch
+                    elem_name = f"{piece_label} — {branch_label}"
                 else:
-                    elem_name = f"{piece_label} — {derived_branch}"
+                    branch_label = css_id
+                    elem_name = f"{piece_label} — {branch_label}"
+                shell_naming_hits += 1
+                if len(shell_naming_samples) < 5:
+                    shell_naming_samples.append(f"{shell_piece}: {elem_name}")
+            elif css_type == 'DUCT':
+                # Duct naming — always "Ventilation Duct"
+                duct_label = raw_name if (raw_name and raw_name.upper() not in GENERIC_RAW_NAMES) else css_id
+                elem_name = f"Ventilation Duct — {duct_label}"
+                duct_naming_hits += 1
+                if len(duct_naming_samples) < 5:
+                    duct_naming_samples.append(elem_name)
+            elif css_type == 'PIPE':
+                # Pipe naming — always "Pipe Segment"
+                pipe_label = raw_name if (raw_name and raw_name.upper() not in GENERIC_RAW_NAMES) else css_id
+                elem_name = f"Pipe Segment — {pipe_label}"
+                duct_naming_hits += 1
+                if len(duct_naming_samples) < 5:
+                    duct_naming_samples.append(elem_name)
             elif raw_name and raw_name.upper() not in GENERIC_RAW_NAMES:
-                # Has a real name — prepend type context if it's just a code like "Branch_1710"
+                # Has a real name — prepend type context
                 if semantic_type and semantic_type != 'IfcBuildingElementProxy':
                     type_prefix = _readable_semantic(semantic_type)
                     # Don't duplicate if name already contains the type
                     if type_prefix.lower() not in raw_name.lower():
-                        elem_name = f"{type_prefix}: {raw_name}"
+                        elem_name = f"{type_prefix} — {raw_name}"
                     else:
                         elem_name = raw_name
-                elif css_type in ('DUCT', 'PIPE', 'EQUIPMENT'):
-                    type_label = css_type.replace('_', ' ').title()
-                    elem_name = f"{type_label}: {raw_name}"
+                elif css_type == 'EQUIPMENT':
+                    elem_name = f"Equipment — {raw_name}"
                 else:
                     elem_name = raw_name
             elif semantic_type and semantic_type != 'IfcBuildingElementProxy':
@@ -962,6 +1021,21 @@ def generate_ifc4_from_css(css):
 
             # Create placement (with sanitized axis/ref)
             elem_lp = create_element_placement(f, storey_lp, placement_data, elem_id=css_id)
+
+            # Equipment size override: replace placeholder 1×1×1 with realistic defaults
+            if css_type == 'EQUIPMENT' and semantic_type in EQUIPMENT_SIZE_DEFAULTS:
+                g_profile = geometry_data.get('profile', {})
+                g_w = float(g_profile.get('width', 1))
+                g_h = float(g_profile.get('height', 1))
+                g_d = float(geometry_data.get('depth', 1))
+                if abs(g_w - 1.0) < 0.01 and abs(g_h - 1.0) < 0.01 and abs(g_d - 1.0) < 0.01:
+                    new_w, new_h, new_d = EQUIPMENT_SIZE_DEFAULTS[semantic_type]
+                    geometry_data = dict(geometry_data)
+                    geometry_data['profile'] = dict(g_profile)
+                    geometry_data['profile']['width'] = new_w
+                    geometry_data['profile']['height'] = new_h
+                    geometry_data['depth'] = new_d
+                    equipment_size_overrides += 1
 
             # Create geometry (with normalized direction + fallback chain)
             solid_or_surface, pds, fallback_used = create_element_geometry(f, subcontext, geometry_data, elem_id=css_id)
@@ -1073,14 +1147,46 @@ def generate_ifc4_from_css(css):
             if ifc_entity_type == 'IfcSpace':
                 create_kwargs['ObjectType'] = properties.get('usage', 'OTHER')
 
+            # v10: Human-readable ObjectType for walls and equipment
+            if ifc_entity_type in ('IfcWall', 'IfcWallStandardCase'):
+                is_ext = properties.get('isExternal', False)
+                create_kwargs['ObjectType'] = 'Exterior Wall' if is_ext else 'Interior Wall'
+            elif ifc_entity_type == 'IfcSlab':
+                slab_t = properties.get('slabType', 'FLOOR')
+                create_kwargs['ObjectType'] = 'Roof Slab' if slab_t == 'ROOF' else 'Floor Slab'
+            elif semantic_type and semantic_type.startswith('Ifc') and ifc_entity_type not in ('IfcBuildingElementProxy', 'IfcSpace'):
+                # Convert IfcFan → "Ventilation Fan", IfcPump → "Pump", etc.
+                READABLE_TYPES = {
+                    'IfcFan': 'Ventilation Fan', 'IfcPump': 'Pump', 'IfcValve': 'Valve',
+                    'IfcSensor': 'Sensor', 'IfcCompressor': 'Compressor', 'IfcTransformer': 'Transformer',
+                    'IfcBoiler': 'Boiler', 'IfcChiller': 'Chiller', 'IfcTank': 'Tank',
+                    'IfcLightFixture': 'Light Fixture', 'IfcAlarm': 'Alarm',
+                    'IfcDuctSegment': 'Ventilation Duct', 'IfcPipeSegment': 'Pipe Segment',
+                    'IfcCableSegment': 'Cable Segment', 'IfcColumn': 'Column',
+                    'IfcDoor': 'Door', 'IfcWindow': 'Window', 'IfcStair': 'Staircase',
+                    'IfcFireSuppressionTerminal': 'Fire Suppression', 'IfcCommunicationsAppliance': 'Communications Device',
+                    'IfcElectricDistributionBoard': 'Electrical Panel',
+                }
+                readable = READABLE_TYPES.get(semantic_type) or READABLE_TYPES.get(ifc_entity_type)
+                if readable:
+                    create_kwargs['ObjectType'] = readable
+
             # IfcSlab PredefinedType from properties
             if ifc_entity_type == 'IfcSlab' and properties.get('slabType'):
                 create_kwargs['PredefinedType'] = properties['slabType']
 
-            # v5: IfcBuildingElementProxy gets enriched ObjectType (semanticType preferred)
+            # v5: IfcBuildingElementProxy gets enriched ObjectType + Name for traceability
             if ifc_entity_type == 'IfcBuildingElementProxy':
                 obj_type = semantic_type if semantic_type and semantic_type != 'IfcBuildingElementProxy' else css_type
-                create_kwargs['ObjectType'] = obj_type
+                source = elem.get('source', '')
+                if source:
+                    create_kwargs['ObjectType'] = f'{obj_type} [{source}]'
+                else:
+                    create_kwargs['ObjectType'] = obj_type
+                # Improve generic proxy names
+                eq_name = elem.get('name', '') or properties.get('equipmentName', '') or properties.get('equipmentType', '')
+                if eq_name and (not elem_name or elem_name == css_id or elem_name.startswith('elem-')):
+                    create_kwargs['Name'] = f'{obj_type}: {eq_name}'
 
             try:
                 ifc_element = f.create_entity(ifc_entity_type, **create_kwargs)
@@ -1095,6 +1201,12 @@ def generate_ifc4_from_css(css):
                 ifc_element = f.create_entity('IfcBuildingElementProxy', **create_kwargs)
 
             ifc_elements_by_css_id[css_id] = ifc_element
+
+            # v11: Set Description on transition helpers so they're greppable in IFC text
+            if properties.get('isTransitionHelper') and ifc_element:
+                approx_type = properties.get('geometryApproximation', 'UNKNOWN')
+                node_id = properties.get('bendNodeId') or properties.get('junctionNodeId', '')
+                ifc_element.Description = f"Junction Transition Helper: {approx_type} at node {node_id}"
 
             # Populate key-based lookup for v3 semantic upgrades
             ek = elem.get('element_key', '')
@@ -1286,7 +1398,7 @@ def generate_ifc4_from_css(css):
                               f"Check metadata.placementZIsAbsolute flag.")
 
     # v7: Consolidated Visual QA Report
-    GENERIC_NAMES = {'WALL', 'SLAB', 'SPACE', 'DUCT', 'EQUIPMENT', 'TUNNEL_SEGMENT', 'PROXY'}
+    GENERIC_NAMES = {'WALL', 'SLAB', 'SPACE', 'DUCT', 'PIPE', 'EQUIPMENT', 'TUNNEL_SEGMENT', 'PROXY'}
     generic_names = [n for n in all_elem_names if n in GENERIC_NAMES]
 
     # Aggregate style tier counts across all element types
@@ -1294,6 +1406,9 @@ def generate_ifc4_from_css(css):
     for entry in style_report.values():
         for tier in style_tier_totals:
             style_tier_totals[tier] += entry.get(tier, 0)
+
+    # Count shellPiece-derived elements in CSS input (regardless of naming path)
+    shell_piece_element_count = sum(1 for e in elements if e.get('properties', {}).get('shellPiece'))
 
     total_styled = sum(style_tier_totals.values())
     print(f"v7 VISUAL QA SUMMARY:")
@@ -1308,6 +1423,37 @@ def generate_ifc4_from_css(css):
     if proxy_tracking['reasons']:
         print(f"  Proxy reasons: {json.dumps(proxy_tracking['reasons'])}")
     print(f"  Style details: {json.dumps(style_report)}")
+
+    # v8: Shell naming QA — regression check
+    print(f"  Shell piece elements in CSS: {shell_piece_element_count}")
+    print(f"  Shell naming hits: {shell_naming_hits} elements used shell piece naming path")
+    if shell_naming_samples:
+        print(f"  Shell name samples: {shell_naming_samples}")
+
+    # v8: Duct/pipe naming QA
+    print(f"  Duct/pipe naming hits: {duct_naming_hits}")
+    if duct_naming_samples:
+        print(f"  Duct/pipe name samples: {duct_naming_samples}")
+
+    # v9: Equipment size overrides
+    print(f"  Equipment size overrides: {equipment_size_overrides}")
+
+    # v8: Sample resolved colors for shell elements
+    shell_color_samples = []
+    for sp_key, sp_rgb in SHELL_PIECE_COLORS.items():
+        shell_color_samples.append(f"{sp_key}=({sp_rgb[0]:.2f},{sp_rgb[1]:.2f},{sp_rgb[2]:.2f})")
+    print(f"  Shell colors: {', '.join(shell_color_samples)}")
+
+    # REGRESSION CHECK: if shellPiece-derived elements exist but naming hits == 0
+    if shell_piece_element_count > 0 and shell_naming_hits == 0:
+        print(f"ERROR: SHELL NAMING REGRESSION — {shell_piece_element_count} elements have "
+              f"properties.shellPiece but 0 used the shell naming path. "
+              f"Descriptive names (Left Wall, Right Wall, etc.) were NOT applied.")
+    elif shell_naming_hits > 0:
+        # Verify shell names are actually descriptive (not just element keys)
+        shell_name_descriptive = sum(1 for n in all_elem_names
+                                      if any(label in n for label in ('Left Wall', 'Right Wall', 'Floor Slab', 'Roof Slab', 'Void Space')))
+        print(f"  Descriptive shell names: {shell_name_descriptive}/{shell_naming_hits}")
 
     # v6: IFC class counts
     ifc_class_counts = {}
@@ -1329,6 +1475,74 @@ def generate_ifc4_from_css(css):
         slab_count = sum(1 for e in elements if e.get('type') == 'SLAB')
         if wall_count < 4 or slab_count < 2:
             print(f"WARNING: Building model incomplete — {wall_count} walls, {slab_count} slabs. Envelope fallback may have been applied.")
+
+    # v10: REGRESSION CHECKS — structural realism validation
+    regression_errors = []
+    regression_warnings = []
+
+    # 8A: Origin count — too many elements at (0,0,0) indicates placement failure
+    origin_count = sum(1 for e in elements
+                       if e.get('placement', {}).get('origin', {}).get('x', 1) == 0
+                       and e.get('placement', {}).get('origin', {}).get('y', 1) == 0
+                       and e.get('placement', {}).get('origin', {}).get('z', 1) == 0)
+    origin_pct = (origin_count * 100 // max(element_count, 1)) if element_count > 0 else 0
+    if origin_pct > 5 and origin_count > 3:
+        regression_errors.append(f'ORIGIN_CLUSTER: {origin_count} elements ({origin_pct}%) at origin (0,0,0)')
+
+    # 8B: NaN/Inf placement check
+    nan_count = sum(1 for e in elements
+                    if any(not isinstance(v, (int, float)) or (isinstance(v, float) and (v != v or abs(v) == float('inf')))
+                           for v in [e.get('placement', {}).get('origin', {}).get(a, 0) for a in ('x', 'y', 'z')]))
+    if nan_count > 0:
+        regression_errors.append(f'NAN_PLACEMENT: {nan_count} elements have NaN/Inf coordinates')
+
+    # 8C: Semantic count validation (v11: upgraded severity for structure-critical checks)
+    if is_tunnel:
+        wall_elems = sum(1 for e in elements if e.get('type') == 'WALL')
+        slab_elems = sum(1 for e in elements if e.get('type') == 'SLAB')
+        space_elems = sum(1 for e in elements if e.get('type') == 'SPACE')
+        if wall_elems == 0: regression_errors.append('CRITICAL_TUNNEL_NO_WALLS: No IfcWall elements in tunnel model')
+        if slab_elems == 0: regression_errors.append('CRITICAL_TUNNEL_NO_SLABS: No IfcSlab elements in tunnel model')
+        if space_elems == 0: regression_warnings.append('TUNNEL_NO_SPACES: No IfcSpace elements in tunnel model')
+        if shell_piece_element_count > 0 and shell_naming_hits == 0:
+            regression_errors.append(f'SHELL_NAMING_REGRESSION: {shell_piece_element_count} shell pieces without descriptive names')
+    else:
+        wall_elems = sum(1 for e in elements if e.get('type') == 'WALL')
+        slab_elems = sum(1 for e in elements if e.get('type') == 'SLAB')
+        if wall_elems < 4 and slab_elems < 2:
+            regression_errors.append(f'CRITICAL_BUILDING_MINIMAL: Only {wall_elems} walls and {slab_elems} slabs')
+        elif wall_elems < 4:
+            regression_warnings.append(f'BUILDING_FEW_WALLS: Only {wall_elems} walls (expected >= 4)')
+        elif slab_elems < 2:
+            regression_warnings.append(f'BUILDING_FEW_SLABS: Only {slab_elems} slabs (expected >= 2)')
+
+    # 8D: Domain isolation — shellPiece only on TUNNEL, envelopeFallback only on non-TUNNEL
+    if not is_tunnel:
+        shell_on_building = sum(1 for e in elements if e.get('properties', {}).get('shellPiece'))
+        if shell_on_building > 0:
+            regression_warnings.append(f'DOMAIN_LEAK: {shell_on_building} elements have shellPiece in non-tunnel model')
+    if is_tunnel:
+        fallback_on_tunnel = sum(1 for e in elements if e.get('properties', {}).get('isFallback'))
+        if fallback_on_tunnel > 0:
+            regression_warnings.append(f'DOMAIN_LEAK: {fallback_on_tunnel} elements have envelopeFallback in tunnel model')
+
+    # 8E: Proxy ratio check (exclude transition helpers from canonical count)
+    canonical_proxy_count = sum(1 for e in elements if e.get('semanticType') == 'IfcBuildingElementProxy' and not e.get('properties', {}).get('isTransitionHelper'))
+    proxy_pct = (canonical_proxy_count * 100 // max(element_count, 1)) if element_count > 0 else 0
+    if proxy_pct > 10:
+        regression_warnings.append(f'HIGH_PROXY: {proxy_pct}% canonical proxy elements ({canonical_proxy_count}/{element_count})')
+
+    # 9B: Element count drift check — CSS input vs output
+    css_element_count = len(css_data.get('elements', [])) if 'css_data' in dir() else 0
+    if css_element_count > 0 and element_count > 0:
+        drop_pct = ((css_element_count - element_count) * 100) // css_element_count
+        if drop_pct > 50:
+            regression_errors.append(f'CRITICAL_ELEMENT_DRIFT: Elements dropped {drop_pct}% from CSS input ({css_element_count}) to output ({element_count})')
+
+    if regression_errors:
+        print(f"v10 REGRESSION ERRORS: {regression_errors}")
+    if regression_warnings:
+        print(f"v10 REGRESSION WARNINGS: {regression_warnings}")
 
     # ---- Process VOIDS relationships (v3.2: IfcOpeningElement intermediary) ----
     opening_elements_for_storey = {}  # container_id -> list of IfcOpeningElement
@@ -1761,7 +1975,22 @@ def generate_ifc4_from_css(css):
             'missingShellSiblingCount': missing_shell_sibling_count,
             'skippedWrongClassCount': skipped_wrong_class_count,
             'invalidVoidSpaceClassCount': invalid_void_space_class_count,
+            # v11: curved geometry + transition helper counters
+            'curvedShellCount': metadata.get('curvedGeometry', {}).get('curvedShellCount', 0),
+            'curvedVoidCount': metadata.get('curvedGeometry', {}).get('circularCount', 0) + metadata.get('curvedGeometry', {}).get('horseshoeCount', 0),
+            'shellApproximation': metadata.get('curvedGeometry', {}).get('shellApproximation', 'RECTANGULAR'),
         }
+
+        # v11: Count transition helpers in elements
+        transition_helpers = [e for e in elements if e.get('properties', {}).get('isTransitionHelper')]
+        bend_plugs = [e for e in transition_helpers if e.get('properties', {}).get('geometryApproximation') == 'BEND_PLUG']
+        junction_plugs = [e for e in transition_helpers if e.get('properties', {}).get('geometryApproximation') == 'JUNCTION_PLUG']
+        junction_voids = [e for e in transition_helpers if e.get('properties', {}).get('shellPiece') == 'VOID']
+        tunnel_shell_report['transitionHelperCount'] = len(transition_helpers)
+        tunnel_shell_report['bendPlugCount'] = len(bend_plugs)
+        tunnel_shell_report['junctionPlugCount'] = len(junction_plugs)
+        tunnel_shell_report['junctionVoidCount'] = len(junction_voids)
+
         print(f"Tunnel shell report: {json.dumps(tunnel_shell_report)}")
 
     print(f"IFC generation complete: {element_count} elements created, {error_count} errors, mode={output_mode}")
@@ -2347,6 +2576,60 @@ def handler(event, context):
         building_warnings = metadata.get('buildingValidationWarnings', [])
         source_fusion = metadata.get('sourceFusion', {})
         envelope_fallback = metadata.get('envelopeFallbackApplied', False)
+        dimension_clamps = metadata.get('dimensionClamps', 0)
+        shell_continuity = metadata.get('shellContinuity', {})
+        equipment_mounting = metadata.get('equipmentMounting', {})
+        safety_warnings = metadata.get('safetyWarnings', [])
+
+        # v10: Aggregate structural warnings for frontend
+        structural_warnings = []
+        if envelope_fallback:
+            ef_detail = metadata.get('envelopeFallback', {})
+            structural_warnings.append({'type': 'envelope_fallback', 'detail': ef_detail})
+        if dimension_clamps > 0:
+            structural_warnings.append({'type': 'dimension_clamps', 'count': dimension_clamps})
+        if shell_continuity.get('pairsAligned', 0) > 0:
+            structural_warnings.append({'type': 'shell_continuity', 'pairsAligned': shell_continuity['pairsAligned'], 'groups': shell_continuity.get('continuityGroups', 0)})
+        if equipment_mounting.get('mounted', 0) > 0:
+            structural_warnings.append({'type': 'equipment_mounted', 'count': equipment_mounting['mounted'], 'originGuard': equipment_mounting.get('originGuard', 0)})
+        # Count geometry approximations
+        approx_count = sum(1 for e in elements if e.get('properties', {}).get('geometryApproximation'))
+        if approx_count > 0:
+            structural_warnings.append({'type': 'geometry_approximation', 'count': approx_count})
+        # Junction transitions
+        jt = metadata.get('junctionTransitions', {})
+        if jt.get('transitionElementCount', 0) > 0:
+            structural_warnings.append({'type': 'junction_transitions', 'junctionCount': jt.get('junctionCount', 0), 'bendCount': jt.get('bendCount', 0), 'elementCount': jt.get('transitionElementCount', 0), 'voidHelpers': jt.get('voidHelpersGenerated', 0)})
+        # Shell extensions
+        je = metadata.get('junctionExtensions', {})
+        if je.get('count', 0) > 0:
+            structural_warnings.append({'type': 'shell_extensions', 'count': je['count'], 'nodes': len(je.get('nodes', []))})
+        # Curved geometry
+        cg = metadata.get('curvedGeometry', {})
+        if cg.get('circularCount', 0) > 0 or cg.get('horseshoeCount', 0) > 0:
+            structural_warnings.append({'type': 'curved_geometry', 'circularCount': cg.get('circularCount', 0), 'horseshoeCount': cg.get('horseshoeCount', 0), 'note': cg.get('note', '')})
+        # Opening validation
+        ov = metadata.get('openingValidation', {})
+        if ov.get('total', 0) > 0:
+            structural_warnings.append({'type': 'opening_validation', 'total': ov['total'], 'valid': ov.get('valid', 0), 'rehosted': ov.get('rehosted', 0), 'downgraded': ov.get('downgraded', 0)})
+        # Wall axis cleanup
+        wc = metadata.get('wallAxisCleanup', {})
+        if wc.get('snappedCount', 0) > 0:
+            structural_warnings.append({'type': 'wall_cleanup', 'snappedCount': wc['snappedCount'], 'groupCount': wc.get('groupCount', 0), 'skippedOverCap': wc.get('skippedOverCap', 0)})
+        # Interior coherence
+        ic = metadata.get('interiorCoherence')
+        if ic:
+            structural_warnings.append({'type': 'interior_coherence', 'grade': ic})
+        # Refinement report
+        rr = metadata.get('refinementReport', {})
+        if rr.get('summary'):
+            structural_warnings.append({'type': 'refinement_report', 'summary': rr['summary']})
+        # Approximation proxies (transition helpers — counted separately from canonical proxies)
+        approx_proxy_count = sum(1 for e in elements if e.get('properties', {}).get('isTransitionHelper'))
+        if approx_proxy_count > 0:
+            structural_warnings.append({'type': 'approximation_proxies', 'count': approx_proxy_count})
+        for sw in safety_warnings:
+            structural_warnings.append({'type': 'safety', 'detail': sw})
 
         verification_report = {
             'reportVersion': '2.0',
@@ -2370,7 +2653,7 @@ def handler(event, context):
                 'transform': {'cssValidationIssues': css_validation, 'envelopeFallback': envelope_fallback},
                 'generate': {'outputMode': output_mode, 'cacheHit': metadata.get('cacheHit', False), 'elementsProcessed': element_count},
             },
-            'fileContributions': tracing_report.get('byFile', {}),
+            'fileContributions': tracing_report.get('fileContributions', tracing_report.get('byFile', {})),
             'sourceBreakdown': tracing_report.get('bySource', {}),
             'roleBreakdown': tracing_report.get('byRole', {}),
             'confidenceDistribution': tracing_report.get('confidence', {}),
@@ -2388,6 +2671,11 @@ def handler(event, context):
             },
             'sourceFusion': source_fusion,
             'envelopeFallbackApplied': envelope_fallback,
+            'structuralWarnings': structural_warnings,
+            'regressionChecks': {
+                'errors': regression_errors if 'regression_errors' in dir() else [],
+                'warnings': regression_warnings if 'regression_warnings' in dir() else [],
+            },
             'elementSummary': element_summary,
             'bbox': ifc_bbox,
             'orientationWarnings': gen_orientation_warnings,
@@ -2485,10 +2773,13 @@ def handler(event, context):
         else:
             revit_checks.append({'check': 'GenericNames', 'status': 'PASS', 'detail': 'All elements have descriptive names'})
 
-        # 2. Check proxy ratio
-        proxy_count = element_summary.get('IfcBuildingElementProxy', 0)
-        total_elems = sum(element_summary.values()) if element_summary else 0
-        proxy_ratio = proxy_count / max(total_elems, 1)
+        # 2. Check proxy ratio (exclude transition helpers — they are intentional approximation geometry)
+        transition_helper_count = sum(1 for e in elements if
+            e.get('semanticType') == 'IfcBuildingElementProxy' and
+            e.get('properties', {}).get('isTransitionHelper'))
+        proxy_count = max(element_summary.get('IfcBuildingElementProxy', 0) - transition_helper_count, 0)
+        total_elems = max(sum(element_summary.values()) - transition_helper_count, 1) if element_summary else 1
+        proxy_ratio = proxy_count / total_elems
         if proxy_ratio > 0.5:
             revit_checks.append({'check': 'ProxyRatio', 'status': 'WARNING', 'detail': f'{proxy_ratio:.0%} elements are proxies'})
         else:
@@ -2582,6 +2873,47 @@ def handler(event, context):
             'MaterialAssignment': 'PASS',
         }
 
+        # Visual QA summary in report
+        verification_report['visualQA'] = {
+            'styleTierTotals': style_tier_totals,
+            'genericNameCount': len(generic_names),
+            'totalElementNames': len(all_elem_names),
+            'proxyCount': proxy_tracking.get('count', 0),
+            'proxyReasons': proxy_tracking.get('reasons', {}),
+            'ifcClassCounts': ifc_class_counts,
+        }
+
+        # v8: Naming QA — shell naming audit
+        verification_report['namingQA'] = {
+            'shellPieceElementCount': shell_piece_element_count,
+            'shellNamingHits': shell_naming_hits,
+            'shellNamingSamples': shell_naming_samples,
+            'ductNamingHits': duct_naming_hits,
+            'ductNamingSamples': duct_naming_samples,
+            'genericNameCount': len(generic_names),
+            'genericNameSamples': generic_names[:10],
+            'totalElements': len(all_elem_names),
+            'descriptiveShellNames': sum(1 for n in all_elem_names
+                                          if any(label in n for label in ('Left Wall', 'Right Wall', 'Floor Slab', 'Roof Slab', 'Void Space'))),
+            'ductNameSamples': [n for n in all_elem_names if 'Ventilation Duct' in n or 'Pipe Segment' in n][:5],
+            'fanNameSamples': [n for n in all_elem_names if 'Fan' in n or 'fan' in n][:5],
+        }
+
+        # Source fusion data — always include (even empty)
+        source_fusion = css_data.get('metadata', {}).get('sourceFusion', {})
+        verification_report['sourceFusion'] = {
+            'fusedCount': source_fusion.get('fusedCount', 0),
+            'rejectedCount': source_fusion.get('rejectedCount', 0),
+            'totalFindings': source_fusion.get('totalFindings', 0),
+            'note': source_fusion.get('note', ''),
+            'log': source_fusion.get('log', []),
+        }
+
+        # Interior suppression data if available
+        interior_suppression = css_data.get('metadata', {}).get('interiorSuppression')
+        if interior_suppression:
+            verification_report['interiorSuppression'] = interior_suppression
+
         # Input/Output summary for audit trail
         verification_report['auditTrail'] = {
             'inputFiles': tracing_report.get('parsedFiles', []),
@@ -2624,5 +2956,9 @@ def handler(event, context):
             'totalElements': element_count if 'element_count' in dir() else 0,
             'revitCompatScore': (revit_pass_count * 100 // max(len(revit_checks), 1)) if 'revit_pass_count' in dir() and 'revit_checks' in dir() else 0,
         },
+        'sourceFusion': metadata.get('sourceFusion') if 'metadata' in dir() else None,
+        'tracingReport': tracing_report if 'tracing_report' in dir() else {},
+        'structuralWarnings': structural_warnings if 'structural_warnings' in dir() else [],
+        'refinementReport': metadata.get('refinementReport') if 'metadata' in dir() else None,
         'status': 'IFC generated, validated, and saved to S3'
     }

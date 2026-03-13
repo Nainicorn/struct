@@ -15,6 +15,7 @@ const s3 = new S3Client({});
 
 export const handler = async (event) => {
   console.log('CSS Pipeline invoked');
+  ambiguousProfileCount = 0; // reset per invocation
 
   const { cssS3Key, userId, renderId, bucket } = event;
 
@@ -51,6 +52,18 @@ export const handler = async (event) => {
   // ========== STEP 3B: TUNNEL SHELL DECOMPOSITION ==========
   decomposeTunnelShell(css);
 
+  // ========== STEP 3C: TUNNEL SHELL CONTINUITY ALIGNMENT ==========
+  alignShellContinuity(css);
+
+  // ========== STEP 3D: SHELL EXTENSION AT JUNCTIONS ==========
+  extendShellAtJunctions(css);
+
+  // ========== STEP 3E: JUNCTION TRANSITION HELPERS ==========
+  generateJunctionTransitions(css);
+
+  // ========== STEP 3F: EQUIPMENT MOUNTING (universal) ==========
+  applyEquipmentMounting(css);
+
   // ========== STEP 4: MERGE WALLS ==========
   mergeWalls(css);
   console.log('Wall merge complete');
@@ -63,15 +76,27 @@ export const handler = async (event) => {
   createOpeningRelationships(css);
   console.log('Opening relationships complete');
 
+  // ========== STEP 5C: OPENING PLACEMENT VALIDATION ==========
+  validateOpeningPlacement(css);
+
   // ========== STEP 6: INFER SLABS ==========
   inferSlabs(css);
   console.log('Slab inference complete');
+
+  // ========== STEP 6B: BUILDING ENVELOPE GUARANTEE ==========
+  guaranteeBuildingEnvelope(css);
+
+  // ========== STEP 6C: WALL AXIS CLEANUP ==========
+  cleanBuildingWallAxes(css);
 
   // ========== STEP 7: ENVELOPE FALLBACK CHECK (v3.2) ==========
   checkEnvelopeFallback(css);
 
   // ========== STEP 7B: BUILDING STRUCTURAL VALIDATION (v6) ==========
   validateBuildingStructure(css);
+
+  // ========== STEP 7C: DIMENSION VALIDATION (universal) ==========
+  clampAbsurdDimensions(css);
 
   // ========== STEP 8: CSS VALIDATION (v6) ==========
   const cssIssues = [];
@@ -176,6 +201,12 @@ export const handler = async (event) => {
     duplicatePositions: duplicatePositionCount,
     outOfBounds: outOfBoundsCount
   } : null;
+
+  // Track ambiguous wall profiles for upstream extraction quality monitoring
+  if (ambiguousProfileCount > 0) {
+    console.log(`Transform: ${ambiguousProfileCount} wall(s) had ambiguous profiles (width ≈ height). Consider improving upstream extraction.`);
+    css.metadata.ambiguousWallProfiles = ambiguousProfileCount;
+  }
 
   // Save processed CSS back to S3
   const processedKey = `uploads/${userId}/${renderId}/css/css_processed.json`;
@@ -501,6 +532,85 @@ function vecAdd(a, b) { return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }; }
 
 function vecSub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
 
+function vecDist(a, b) { return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2); }
+
+function generateCirclePoints(radius, n) {
+  const points = [];
+  for (let i = 0; i < n; i++) {
+    const angle = (2 * Math.PI * i) / n;
+    points.push({ x: +(radius * Math.cos(angle)).toFixed(4), y: +(radius * Math.sin(angle)).toFixed(4) });
+  }
+  return points;
+}
+
+function generateHorseshoePoints(w, h, archSegs) {
+  const points = [];
+  const halfW = w / 2;
+  points.push({ x: -halfW, y: 0 });
+  points.push({ x: halfW, y: 0 });
+  points.push({ x: halfW, y: +(h * 0.5).toFixed(4) });
+  for (let i = 0; i <= archSegs; i++) {
+    const angle = Math.PI * i / archSegs;
+    points.push({ x: +(halfW * Math.cos(angle)).toFixed(4), y: +(h * 0.5 + halfW * Math.sin(angle)).toFixed(4) });
+  }
+  points.push({ x: -halfW, y: +(h * 0.5).toFixed(4) });
+  return points;
+}
+
+// ---- Curved shell arc profile generators ----
+// All profiles are in the local cross-section plane (local X=side, local Y=up)
+// centered at the tunnel axis origin. Each returns a closed polygon (ARBITRARY profile).
+
+function generateLeftWallArcProfile(R, t, segments) {
+  // Left half-annulus: outer arc from π/2→3π/2 (top→left→bottom), inner arc reversed
+  const points = [];
+  const innerR = R - t;
+  for (let i = 0; i <= segments; i++) {
+    const angle = Math.PI / 2 + Math.PI * i / segments;
+    points.push({ x: +(R * Math.cos(angle)).toFixed(4), y: +(R * Math.sin(angle)).toFixed(4) });
+  }
+  for (let i = segments; i >= 0; i--) {
+    const angle = Math.PI / 2 + Math.PI * i / segments;
+    points.push({ x: +(innerR * Math.cos(angle)).toFixed(4), y: +(innerR * Math.sin(angle)).toFixed(4) });
+  }
+  return points;
+}
+
+function generateRightWallArcProfile(R, t, segments) {
+  // Right half-annulus: outer arc from -π/2→π/2 (bottom→right→top), inner arc reversed
+  const points = [];
+  const innerR = R - t;
+  for (let i = 0; i <= segments; i++) {
+    const angle = -Math.PI / 2 + Math.PI * i / segments;
+    points.push({ x: +(R * Math.cos(angle)).toFixed(4), y: +(R * Math.sin(angle)).toFixed(4) });
+  }
+  for (let i = segments; i >= 0; i--) {
+    const angle = -Math.PI / 2 + Math.PI * i / segments;
+    points.push({ x: +(innerR * Math.cos(angle)).toFixed(4), y: +(innerR * Math.sin(angle)).toFixed(4) });
+  }
+  return points;
+}
+
+function generateRoofArcProfile(halfW, wallH, archHeight, t, segments) {
+  // Horseshoe roof arch: outer arc from π→0 (left→top→right) at y=wallH, inner arc reversed
+  // archHeight = radius of arch (typically = halfW)
+  const points = [];
+  const baseY = wallH;
+  const innerHalfW = halfW - t;
+  const innerArchH = archHeight - t;
+  // Outer arch
+  for (let i = 0; i <= segments; i++) {
+    const angle = Math.PI - Math.PI * i / segments;
+    points.push({ x: +(halfW * Math.cos(angle)).toFixed(4), y: +(baseY + archHeight * Math.sin(angle)).toFixed(4) });
+  }
+  // Inner arch reversed
+  for (let i = segments; i >= 0; i--) {
+    const angle = Math.PI - Math.PI * i / segments;
+    points.push({ x: +(innerHalfW * Math.cos(angle)).toFixed(4), y: +(baseY + innerArchH * Math.sin(angle)).toFixed(4) });
+  }
+  return points;
+}
+
 function decomposeTunnelShell(css) {
   if (!css.elements || css.elements.length === 0) return;
   if ((css.domain || '').toUpperCase() !== 'TUNNEL') {
@@ -520,6 +630,9 @@ function decomposeTunnelShell(css) {
   let skippedInvalidFrame = 0;
   let spaceSuppressedCount = 0;
   let defaultedThicknessCount = 0;
+  let circularVoidCount = 0;
+  let horseshoeVoidCount = 0;
+  let curvedShellCount = 0;
 
   const derivedElements = [];
 
@@ -540,12 +653,46 @@ function decomposeTunnelShell(css) {
       continue;
     }
 
-    // Skip circular tunnels
+    // Handle non-rectangular tunnels: shell pieces stay RECTANGLE, void gets polygon profile
     const shape = props.shape || '';
     const profileType = elem.geometry?.profile?.type || '';
+    let isApproximated = false;
+    let approximationType = null;
+    let curvedVoidProfile = null; // polygon profile for VOID if non-rectangular
+
     if (shape !== 'rectangular' && profileType !== 'RECTANGLE') {
-      skippedCircularCount++;
-      continue;
+      const profile = elem.geometry?.profile || {};
+      if (profile.radius && profile.radius > 0) {
+        const diameter = profile.radius * 2;
+        profile.width = diameter;
+        profile.height = diameter;
+        profile.type = 'RECTANGLE';
+        isApproximated = true;
+        // Determine curved void profile
+        const innerRadius = profile.radius - WALL_THICKNESS;
+        if (innerRadius > 0.1) {
+          if (shape === 'horseshoe') {
+            const innerW = diameter - 2 * WALL_THICKNESS;
+            const innerH = diameter - 2 * WALL_THICKNESS;
+            curvedVoidProfile = { type: 'ARBITRARY', points: generateHorseshoePoints(innerW, innerH, 12) };
+            approximationType = 'HORSESHOE_TO_RECT';
+            horseshoeVoidCount++;
+          } else {
+            curvedVoidProfile = { type: 'ARBITRARY', points: generateCirclePoints(innerRadius, 16) };
+            approximationType = 'CIRCULAR_TO_RECT';
+            circularVoidCount++;
+          }
+        } else {
+          approximationType = shape === 'horseshoe' ? 'HORSESHOE_TO_RECT' : 'CIRCULAR_TO_RECT';
+        }
+      } else if (profile.width && profile.height) {
+        profile.type = 'RECTANGLE';
+        isApproximated = true;
+        approximationType = `${(shape || 'UNKNOWN').toUpperCase()}_TO_RECT`;
+      } else {
+        skippedCircularCount++;
+        continue;
+      }
     }
 
     // Required placement/geometry fields
@@ -604,30 +751,67 @@ function decomposeTunnelShell(css) {
     const parentMaterial = elem.material || { name: 'concrete', color: [0.7, 0.7, 0.7], transparency: 0.0 };
     const spaceMaterial = { name: 'space', color: [0.88, 0.88, 0.88], transparency: 0.7 };
 
-    // Shell pieces definition: [suffix, cssType, semanticType, offsetVec, profileW, profileH, refDir, confidence, extraProps]
+    // Shell pieces definition: [suffix, cssType, semanticType, offsetVec, profileW, profileH, refDir, confidence, extraProps, curvedProfile]
     // v2: stable branch frame — ALL pieces use refDir=side (local X=side, local Y=up, local Z=tunnel dir)
     // Offsets are thickness-aware: centers inset by t/2 from outer boundary
     // Slabs span between wall inner faces (W-2t) to avoid corner overlap
     const t = WALL_THICKNESS;
     const slabW = W - 2 * t;
 
-    const pieces = [
-      ['left_wall', 'WALL', 'IfcWall', vecScale(side, -(W / 2 - t / 2)), t, H, side, 0.92, {}],
-      ['right_wall', 'WALL', 'IfcWall', vecScale(side, (W / 2 - t / 2)), t, H, side, 0.92, {}],
-      ['floor', 'SLAB', 'IfcSlab', vecScale(up, -(H / 2 - t / 2)), slabW, t, side, 0.92, { slabType: 'FLOOR' }],
-      ['roof', 'SLAB', 'IfcSlab', vecScale(up, (H / 2 - t / 2)), slabW, t, side, 0.92, { slabType: 'ROOF' }],
-    ];
+    let pieces;
+    const ARC_SEGMENTS = 12;
+
+    if (isApproximated && approximationType === 'CIRCULAR_TO_RECT') {
+      // CIRCULAR TUNNEL: 2 curved half-annulus walls + void (no separate floor/roof)
+      // Place walls at tunnel center (offset=0) with arc profiles that include position
+      const R = W / 2;  // outer radius = half diameter
+      const leftProfile = { type: 'ARBITRARY', points: generateLeftWallArcProfile(R, t, ARC_SEGMENTS) };
+      const rightProfile = { type: 'ARBITRARY', points: generateRightWallArcProfile(R, t, ARC_SEGMENTS) };
+      pieces = [
+        ['left_wall', 'WALL', 'IfcWall', { x: 0, y: 0, z: 0 }, W, H, side, 0.92, { geometryApproximation: 'CIRCULAR_ARC_SHELL' }, leftProfile],
+        ['right_wall', 'WALL', 'IfcWall', { x: 0, y: 0, z: 0 }, W, H, side, 0.92, { geometryApproximation: 'CIRCULAR_ARC_SHELL' }, rightProfile],
+        // Floor slab as thin chord at bottom (structural reference)
+        ['floor', 'SLAB', 'IfcSlab', vecScale(up, -(H / 2 - t / 2)), slabW, t, side, 0.92, { slabType: 'FLOOR' }],
+      ];
+      curvedShellCount += 2;
+    } else if (isApproximated && approximationType === 'HORSESHOE_TO_RECT') {
+      // HORSESHOE TUNNEL: rectangular left/right walls + curved roof arch + flat floor
+      const halfW = W / 2;
+      const wallH = H * 0.5;  // straight wall height (lower half)
+      const archH = halfW;    // arch height = half-width (semicircular top)
+      const roofProfile = { type: 'ARBITRARY', points: generateRoofArcProfile(halfW, wallH, archH, t, ARC_SEGMENTS) };
+      pieces = [
+        ['left_wall', 'WALL', 'IfcWall', vecScale(side, -(W / 2 - t / 2)), t, H, side, 0.92, {}],
+        ['right_wall', 'WALL', 'IfcWall', vecScale(side, (W / 2 - t / 2)), t, H, side, 0.92, {}],
+        ['floor', 'SLAB', 'IfcSlab', vecScale(up, -(H / 2 - t / 2)), slabW, t, side, 0.92, { slabType: 'FLOOR' }],
+        // Roof uses curved arch profile, placed at tunnel center
+        ['roof', 'SLAB', 'IfcSlab', { x: 0, y: 0, z: 0 }, slabW, t, side, 0.92, { slabType: 'ROOF', geometryApproximation: 'HORSESHOE_ARCH_SHELL' }, roofProfile],
+      ];
+      curvedShellCount += 1;
+    } else {
+      // RECTANGULAR TUNNEL: standard 4-piece decomposition
+      pieces = [
+        ['left_wall', 'WALL', 'IfcWall', vecScale(side, -(W / 2 - t / 2)), t, H, side, 0.92, {}],
+        ['right_wall', 'WALL', 'IfcWall', vecScale(side, (W / 2 - t / 2)), t, H, side, 0.92, {}],
+        ['floor', 'SLAB', 'IfcSlab', vecScale(up, -(H / 2 - t / 2)), slabW, t, side, 0.92, { slabType: 'FLOOR' }],
+        ['roof', 'SLAB', 'IfcSlab', vecScale(up, (H / 2 - t / 2)), slabW, t, side, 0.92, { slabType: 'ROOF' }],
+      ];
+    }
 
     // Void space — stable frame, inner clear dimensions
     const innerW = W - 2 * t;
     const innerH = H - 2 * t;
     if (innerW > 0.1 && innerH > 0.1) {
-      pieces.push(['void', 'SPACE', 'IfcSpace', { x: 0, y: 0, z: 0 }, innerW, innerH, side, 0.85, {}]);
+      const voidExtraProps = {};
+      if (curvedVoidProfile) {
+        voidExtraProps.geometryApproximation = shape === 'horseshoe' ? 'HORSESHOE_POLYGON' : 'CIRCULAR_POLYGON_16';
+      }
+      pieces.push(['void', 'SPACE', 'IfcSpace', { x: 0, y: 0, z: 0 }, innerW, innerH, side, 0.85, voidExtraProps]);
     } else {
       spaceSuppressedCount++;
     }
 
-    for (const [suffix, cssType, semanticType, offsetVec, profW, profH, refDir, confidence, extraProps] of pieces) {
+    for (const [suffix, cssType, semanticType, offsetVec, profW, profH, refDir, confidence, extraProps, curvedShellProfile] of pieces) {
       // Sanity check offset magnitude
       const offsetMag = Math.sqrt(offsetVec.x * offsetVec.x + offsetVec.y * offsetVec.y + offsetVec.z * offsetVec.z);
       if (offsetMag > Math.max(W, H)) {
@@ -641,15 +825,21 @@ function decomposeTunnelShell(css) {
         refDirection: refDir || { ...placement.refDirection }
       };
 
+      // Use curved polygon profile for shell pieces or VOID if available, else RECTANGLE
+      let derivedProfile;
+      if (curvedShellProfile) {
+        derivedProfile = { ...curvedShellProfile };
+      } else if (suffix === 'void' && curvedVoidProfile) {
+        derivedProfile = { ...curvedVoidProfile };
+      } else {
+        derivedProfile = { type: 'RECTANGLE', width: profW, height: profH };
+      }
+
       const derivedGeometry = {
         method: 'EXTRUSION',
         direction: { x: 0, y: 0, z: 1 },
         depth: depth,
-        profile: {
-          type: 'RECTANGLE',
-          width: profW,
-          height: profH
-        }
+        profile: derivedProfile
       };
 
       const derivedId = elemId(derivedGeometry, derivedPlacement);
@@ -659,6 +849,7 @@ function decomposeTunnelShell(css) {
         id: derivedId,
         element_key: `${parentKey}_${suffix}`,
         type: cssType,
+        name: elem.name || elem.id || parentKey,
         semanticType: semanticType,
         confidence: confidence,
         source: parentSource,
@@ -670,7 +861,8 @@ function decomposeTunnelShell(css) {
           ...props,
           derivedFromBranch: parentKey,
           shellPiece: suffix.toUpperCase(),
-          decompositionMethod: 'rectangular_shell_v1',
+          decompositionMethod: isApproximated ? 'approximated_shell_v1' : 'rectangular_shell_v1',
+          ...(isApproximated && suffix !== 'void' ? { geometryApproximation: 'RECT_INSCRIBED_IN_' + (approximationType || 'CURVED').replace('_TO_RECT', '') } : {}),
           shellThickness_m: WALL_THICKNESS,
           shellThicknessBasis: 'DEFAULT',
           ...extraProps
@@ -684,6 +876,16 @@ function decomposeTunnelShell(css) {
     }
 
     decomposedBranchCount++;
+  }
+
+  // v8: Shell decomposition QA logging
+  if (derivedShellPieceCount > 0) {
+    const sampleDerived = derivedElements.slice(0, 3);
+    console.log(`Shell decomposition: ${decomposedBranchCount} branches → ${derivedShellPieceCount} shell pieces`);
+    console.log(`  Sample derived elements:`);
+    for (const d of sampleDerived) {
+      console.log(`    ${d.properties.shellPiece}: name="${d.name}", key="${d.element_key}", derivedFrom="${d.properties.derivedFromBranch}"`);
+    }
   }
 
   // ---- v3.1: Finite-segment centerline matching — link EQUIPMENT to nearest void space ----
@@ -903,7 +1105,1165 @@ function decomposeTunnelShell(css) {
     placementCorrectedCount
   };
 
+  // Track curved geometry approximations
+  if (circularVoidCount > 0 || horseshoeVoidCount > 0 || curvedShellCount > 0) {
+    css.metadata.curvedGeometry = {
+      circularCount: circularVoidCount,
+      horseshoeCount: horseshoeVoidCount,
+      curvedShellCount,
+      shellApproximation: curvedShellCount > 0 ? 'ARC_POLYGON' : 'RECTANGULAR',
+      voidApproximation: 'POLYGON',
+      note: curvedShellCount > 0
+        ? `${curvedShellCount} shell pieces use arc polygon profiles (IfcArbitraryClosedProfileDef). Void interior uses polygon approximation.`
+        : 'Structural shell pieces use rectangular approximation. Void interior uses polygon approximation.'
+    };
+  }
+
   console.log(`Tunnel shell decomposition: ${decomposedBranchCount} branches → ${derivedShellPieceCount} shell pieces | Equipment containment: ${infrastructureLinkedCount} linked to ${voidSpaces.length} eligible void spaces (${noVoidAvailableCount} unmatched, ${invalidVoidCandidateCount} invalid void candidates)`);
+}
+
+
+// ============================================================================
+// PHASE 1A: TUNNEL SHELL CONTINUITY ALIGNMENT
+// Aligns adjacent shell pieces across branches without destroying semantics.
+// Preserves: element_key, derivedFromBranch, shellPiece, assemblies, boundaries.
+// Only micro-adjusts placement.origin and profile dimensions for zero-gap continuity.
+// ============================================================================
+
+function alignShellContinuity(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
+
+  // Build adjacency from TUNNEL_SEGMENT entry/exit nodes
+  const parentSegments = css.elements.filter(e => e.type === 'TUNNEL_SEGMENT' && e.properties?.branchClass === 'STRUCTURAL');
+  const shellPieces = css.elements.filter(e => e.properties?.shellPiece && e.properties?.derivedFromBranch);
+
+  // Map: node → [parentKey, ...]
+  const nodeToParents = {};
+  for (const seg of parentSegments) {
+    const key = seg.element_key || seg.id;
+    const entry = seg.properties?.entry_node;
+    const exit = seg.properties?.exit_node;
+    if (entry) { if (!nodeToParents[entry]) nodeToParents[entry] = []; nodeToParents[entry].push(key); }
+    if (exit) { if (!nodeToParents[exit]) nodeToParents[exit] = []; nodeToParents[exit].push(key); }
+  }
+
+  // Find adjacent pairs: branches sharing a node with exactly degree 2 (no junctions)
+  const adjacentPairs = new Set();
+  for (const [node, parents] of Object.entries(nodeToParents)) {
+    if (parents.length === 2) {
+      const sorted = [parents[0], parents[1]].sort();
+      adjacentPairs.add(`${sorted[0]}||${sorted[1]}`);
+    }
+  }
+
+  if (adjacentPairs.size === 0) {
+    console.log('alignShellContinuity: no adjacent branch pairs found');
+    return;
+  }
+
+  // Group shell pieces by derivedFromBranch + shellPiece role
+  const shellByBranchRole = {};
+  for (const sp of shellPieces) {
+    const branch = sp.properties.derivedFromBranch;
+    const role = sp.properties.shellPiece;
+    const key = `${branch}__${role}`;
+    shellByBranchRole[key] = sp;
+  }
+
+  let alignedPairs = 0;
+  let dimensionSnaps = 0;
+  let continuityGroupCounter = 0;
+  const continuityGroups = {}; // groupId -> [element_key, ...]
+
+  const SHELL_ROLES = ['LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF', 'VOID'];
+  const AXIS_DOT_MIN = 0.996; // ~5 degrees
+  const DIM_TOLERANCE = 0.15; // 15%
+
+  for (const pairKey of adjacentPairs) {
+    const [branchA, branchB] = pairKey.split('||');
+
+    for (const role of SHELL_ROLES) {
+      const pieceA = shellByBranchRole[`${branchA}__${role}`];
+      const pieceB = shellByBranchRole[`${branchB}__${role}`];
+      if (!pieceA || !pieceB) continue;
+
+      const axisA = vecNormalize(pieceA.placement?.axis);
+      const axisB = vecNormalize(pieceB.placement?.axis);
+      if (!axisA || !axisB) continue;
+
+      // Check axis alignment (within 5 degrees)
+      const dot = Math.abs(vecDot(axisA, axisB));
+      if (dot < AXIS_DOT_MIN) continue;
+
+      // Check cross-section similarity (within 15%)
+      const wA = pieceA.geometry?.profile?.width || 0;
+      const hA = pieceA.geometry?.profile?.height || 0;
+      const wB = pieceB.geometry?.profile?.width || 0;
+      const hB = pieceB.geometry?.profile?.height || 0;
+      if (wA > 0 && wB > 0 && Math.abs(wA - wB) / Math.max(wA, wB) > DIM_TOLERANCE) continue;
+      if (hA > 0 && hB > 0 && Math.abs(hA - hB) / Math.max(hA, hB) > DIM_TOLERANCE) continue;
+
+      // Snap cross-section dimensions to average
+      if (wA > 0 && wB > 0 && wA !== wB) {
+        const avgW = (wA + wB) / 2;
+        pieceA.geometry.profile.width = avgW;
+        pieceB.geometry.profile.width = avgW;
+        dimensionSnaps++;
+      }
+      if (hA > 0 && hB > 0 && hA !== hB) {
+        const avgH = (hA + hB) / 2;
+        pieceA.geometry.profile.height = avgH;
+        pieceB.geometry.profile.height = avgH;
+        dimensionSnaps++;
+      }
+
+      // Snap endpoints to eliminate micro-gaps
+      // Piece endpoint = origin + axis * depth/2
+      // Piece startpoint = origin - axis * depth/2
+      const depthA = pieceA.geometry?.depth || 0;
+      const depthB = pieceB.geometry?.depth || 0;
+      if (depthA <= 0 || depthB <= 0) continue;
+
+      const oA = pieceA.placement.origin;
+      const oB = pieceB.placement.origin;
+
+      // Find which ends are closest (A_end to B_start or A_start to B_end)
+      const endA = vecAdd(oA, vecScale(axisA, depthA / 2));
+      const startA = vecAdd(oA, vecScale(axisA, -depthA / 2));
+      const endB = vecAdd(oB, vecScale(axisB, depthB / 2));
+      const startB = vecAdd(oB, vecScale(axisB, -depthB / 2));
+
+      const dEndAStartB = Math.sqrt((endA.x - startB.x) ** 2 + (endA.y - startB.y) ** 2 + (endA.z - startB.z) ** 2);
+      const dStartAEndB = Math.sqrt((startA.x - endB.x) ** 2 + (startA.y - endB.y) ** 2 + (startA.z - endB.z) ** 2);
+
+      // Only snap if gap is small (< 0.5m)
+      const minGap = Math.min(dEndAStartB, dStartAEndB);
+      if (minGap > 0.5) continue;
+
+      if (dEndAStartB <= dStartAEndB && dEndAStartB > 0.001) {
+        // Snap endA → startB: shift both origins slightly
+        const mid = { x: (endA.x + startB.x) / 2, y: (endA.y + startB.y) / 2, z: (endA.z + startB.z) / 2 };
+        // New origin A: mid - axis * depthA/2
+        pieceA.placement.origin = vecAdd(mid, vecScale(axisA, -depthA / 2));
+        // New origin B: mid + axis * depthB/2
+        pieceB.placement.origin = vecAdd(mid, vecScale(axisB, depthB / 2));
+      } else if (dStartAEndB > 0.001) {
+        const mid = { x: (startA.x + endB.x) / 2, y: (startA.y + endB.y) / 2, z: (startA.z + endB.z) / 2 };
+        pieceA.placement.origin = vecAdd(mid, vecScale(axisA, depthA / 2));
+        pieceB.placement.origin = vecAdd(mid, vecScale(axisB, -depthB / 2));
+      }
+
+      // Assign continuity group
+      const existingGroupA = pieceA.properties.continuityGroupId;
+      const existingGroupB = pieceB.properties.continuityGroupId;
+      let groupId;
+      if (existingGroupA) { groupId = existingGroupA; }
+      else if (existingGroupB) { groupId = existingGroupB; }
+      else { groupId = `cg-${role.toLowerCase()}-${continuityGroupCounter++}`; }
+
+      pieceA.properties.continuityGroupId = groupId;
+      pieceB.properties.continuityGroupId = groupId;
+      if (!pieceA.properties.adjacentShellKeys) pieceA.properties.adjacentShellKeys = [];
+      if (!pieceB.properties.adjacentShellKeys) pieceB.properties.adjacentShellKeys = [];
+      if (!pieceA.properties.adjacentShellKeys.includes(pieceB.element_key)) pieceA.properties.adjacentShellKeys.push(pieceB.element_key);
+      if (!pieceB.properties.adjacentShellKeys.includes(pieceA.element_key)) pieceB.properties.adjacentShellKeys.push(pieceA.element_key);
+
+      if (!continuityGroups[groupId]) continuityGroups[groupId] = new Set();
+      continuityGroups[groupId].add(pieceA.element_key);
+      continuityGroups[groupId].add(pieceB.element_key);
+
+      alignedPairs++;
+    }
+  }
+
+  // Phase 3D: Dimension averaging at degree-3+ nodes (no endpoint snapping — too complex for multi-branch)
+  let junctionDimSnaps = 0;
+  const junctionNodes = [];
+  for (const [node, parents] of Object.entries(nodeToParents)) {
+    if (parents.length < 3) continue;
+    junctionNodes.push(node);
+
+    for (const role of SHELL_ROLES) {
+      const piecesAtNode = parents.map(p => shellByBranchRole[`${p}__${role}`]).filter(Boolean);
+      if (piecesAtNode.length < 2) continue;
+
+      // Average width and height across all pieces at this junction
+      const widths = piecesAtNode.map(p => p.geometry?.profile?.width).filter(w => w > 0);
+      const heights = piecesAtNode.map(p => p.geometry?.profile?.height).filter(h => h > 0);
+      if (widths.length >= 2) {
+        const avgW = widths.reduce((s, w) => s + w, 0) / widths.length;
+        for (const p of piecesAtNode) {
+          if (p.geometry?.profile?.width > 0 && Math.abs(p.geometry.profile.width - avgW) / avgW < DIM_TOLERANCE) {
+            p.geometry.profile.width = avgW;
+            junctionDimSnaps++;
+          }
+        }
+      }
+      if (heights.length >= 2) {
+        const avgH = heights.reduce((s, h) => s + h, 0) / heights.length;
+        for (const p of piecesAtNode) {
+          if (p.geometry?.profile?.height > 0 && Math.abs(p.geometry.profile.height - avgH) / avgH < DIM_TOLERANCE) {
+            p.geometry.profile.height = avgH;
+            junctionDimSnaps++;
+          }
+        }
+      }
+    }
+  }
+
+  if (!css.metadata) css.metadata = {};
+  css.metadata.shellContinuity = {
+    adjacentBranchPairs: adjacentPairs.size,
+    alignedShellPairs: alignedPairs,
+    dimensionSnaps,
+    junctionDimSnaps,
+    junctionNodes: junctionNodes.length,
+    continuityGroups: Object.keys(continuityGroups).length,
+    sampleGroups: Object.entries(continuityGroups).slice(0, 3).map(([id, keys]) => ({ id, members: keys.size }))
+  };
+
+  console.log(`alignShellContinuity: ${alignedPairs} shell pairs aligned across ${adjacentPairs.size} branch pairs, ${Object.keys(continuityGroups).length} continuity groups, ${dimensionSnaps} dimension snaps, ${junctionDimSnaps} junction dimension snaps at ${junctionNodes.length} junction nodes`);
+}
+
+
+// ============================================================================
+// PHASE 3A: SHELL EXTENSION AT JUNCTIONS
+// Extends shell pieces at junction/bend nodes to reduce gaps.
+// ============================================================================
+
+function extendShellAtJunctions(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
+
+  const parentSegments = css.elements.filter(e => e.type === 'TUNNEL_SEGMENT' && e.properties?.branchClass === 'STRUCTURAL');
+  const shellPieces = css.elements.filter(e => e.properties?.shellPiece && e.properties?.derivedFromBranch);
+
+  // Build node adjacency
+  const nodeToParents = {};
+  const segByKey = {};
+  for (const seg of parentSegments) {
+    const key = seg.element_key || seg.id;
+    segByKey[key] = seg;
+    const entry = seg.properties?.entry_node;
+    const exit = seg.properties?.exit_node;
+    if (entry) { if (!nodeToParents[entry]) nodeToParents[entry] = []; nodeToParents[entry].push(key); }
+    if (exit) { if (!nodeToParents[exit]) nodeToParents[exit] = []; nodeToParents[exit].push(key); }
+  }
+
+  // Shell pieces by branch
+  const shellByBranch = {};
+  for (const sp of shellPieces) {
+    const branch = sp.properties.derivedFromBranch;
+    if (!shellByBranch[branch]) shellByBranch[branch] = [];
+    shellByBranch[branch].push(sp);
+  }
+
+  let extensionCount = 0;
+  const extendedNodes = [];
+
+  for (const [node, parents] of Object.entries(nodeToParents)) {
+    const degree = parents.length;
+    if (degree < 2) continue;
+
+    // For degree-2: check angle between axes
+    let shouldExtend = degree >= 3;
+    if (degree === 2) {
+      const segA = segByKey[parents[0]];
+      const segB = segByKey[parents[1]];
+      if (segA && segB) {
+        const axA = vecNormalize(segA.placement?.axis);
+        const axB = vecNormalize(segB.placement?.axis);
+        if (axA && axB) {
+          const dot = Math.abs(vecDot(axA, axB));
+          // angle > 20° means dot < cos(20°) ≈ 0.94
+          if (dot < 0.94) shouldExtend = true;
+        }
+      }
+    }
+    if (!shouldExtend) continue;
+
+    // Extend shell pieces from each branch at this node
+    for (const parentKey of parents) {
+      const seg = segByKey[parentKey];
+      if (!seg) continue;
+      const pieces = shellByBranch[parentKey];
+      if (!pieces || pieces.length === 0) continue;
+
+      // Determine which end of the segment faces this node
+      const isEntryEnd = seg.properties?.entry_node === node;
+      const segAxis = vecNormalize(seg.placement?.axis);
+      if (!segAxis) continue;
+
+      for (const piece of pieces) {
+        const depth = piece.geometry?.depth;
+        if (!depth || depth <= 0) continue;
+
+        const EXTENSION = Math.min(0.5, depth * 0.1);
+        if (EXTENSION < 0.01) continue;
+
+        // Extend depth
+        piece.geometry.depth = depth + EXTENSION;
+
+        // Shift origin so the far end stays fixed
+        // If entry_node is at this junction, the entry end is at origin - axis*depth/2
+        // We want to extend that end: shift origin toward junction by EXTENSION/2
+        const shift = isEntryEnd ? -EXTENSION / 2 : EXTENSION / 2;
+        const pieceAxis = vecNormalize(piece.placement?.axis);
+        if (pieceAxis && piece.placement?.origin) {
+          piece.placement.origin = vecAdd(piece.placement.origin, vecScale(pieceAxis, shift));
+        }
+
+        if (!piece.properties) piece.properties = {};
+        piece.properties.junctionExtended = true;
+        extensionCount++;
+      }
+    }
+    extendedNodes.push(node);
+  }
+
+  if (!css.metadata) css.metadata = {};
+  css.metadata.junctionExtensions = { count: extensionCount, nodes: extendedNodes };
+  if (extensionCount > 0) {
+    console.log(`extendShellAtJunctions: ${extensionCount} shell pieces extended at ${extendedNodes.length} nodes`);
+  }
+}
+
+
+// ============================================================================
+// PHASE 3B: JUNCTION TRANSITION HELPER VOLUMES
+// Generates 1-2 approximation geometry elements per junction to fill gaps.
+// Uses PROXY type — NOT canonical structure.
+// ============================================================================
+
+function generateJunctionTransitions(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
+
+  const WALL_THICKNESS = 0.3;
+  const parentSegments = css.elements.filter(e => e.type === 'TUNNEL_SEGMENT' && e.properties?.branchClass === 'STRUCTURAL');
+  const shellPieces = css.elements.filter(e => e.properties?.shellPiece && e.properties?.derivedFromBranch);
+
+  // Build node adjacency
+  const nodeToParents = {};
+  const segByKey = {};
+  for (const seg of parentSegments) {
+    const key = seg.element_key || seg.id;
+    segByKey[key] = seg;
+    const entry = seg.properties?.entry_node;
+    const exit = seg.properties?.exit_node;
+    if (entry) { if (!nodeToParents[entry]) nodeToParents[entry] = []; nodeToParents[entry].push(key); }
+    if (exit) { if (!nodeToParents[exit]) nodeToParents[exit] = []; nodeToParents[exit].push(key); }
+  }
+
+  // Shell pieces by branch (for checking voids)
+  const voidByBranch = {};
+  for (const sp of shellPieces) {
+    if (sp.properties?.shellPiece === 'VOID') {
+      voidByBranch[sp.properties.derivedFromBranch] = sp;
+    }
+  }
+
+  const transitionElements = [];
+  let junctionCount = 0;
+  let bendCount = 0;
+  let voidHelpersGenerated = 0;
+
+  for (const [node, parents] of Object.entries(nodeToParents)) {
+    const degree = parents.length;
+    if (degree < 2) continue;
+
+    // Collect branch endpoints at this node
+    const branchEndpoints = [];
+    for (const parentKey of parents) {
+      const seg = segByKey[parentKey];
+      if (!seg?.placement?.origin || !seg?.placement?.axis) continue;
+      const ax = vecNormalize(seg.placement.axis);
+      if (!ax) continue;
+      const depth = seg.geometry?.depth || 0;
+      const W = seg.geometry?.profile?.width || 4;
+      const H = seg.geometry?.profile?.height || 4;
+
+      // Determine which endpoint is at this node
+      const isEntry = seg.properties?.entry_node === node;
+      const endOffset = isEntry ? -depth / 2 : depth / 2;
+      const endpoint = vecAdd(seg.placement.origin, vecScale(ax, endOffset));
+
+      branchEndpoints.push({ key: parentKey, endpoint, axis: ax, W, H, depth, container: seg.container, isEntry });
+    }
+
+    if (branchEndpoints.length < 2) continue;
+
+    // For degree-2: check angle for bend transition
+    if (degree === 2) {
+      const axA = branchEndpoints[0].axis;
+      const axB = branchEndpoints[1].axis;
+      const dot = Math.abs(vecDot(axA, axB));
+      // angle > 30° means dot < cos(30°) ≈ 0.866
+      if (dot >= 0.866) continue;
+
+      // Generate bend plug
+      const center = {
+        x: (branchEndpoints[0].endpoint.x + branchEndpoints[1].endpoint.x) / 2,
+        y: (branchEndpoints[0].endpoint.y + branchEndpoints[1].endpoint.y) / 2,
+        z: (branchEndpoints[0].endpoint.z + branchEndpoints[1].endpoint.z) / 2
+      };
+      const bisector = vecNormalize(vecAdd(axA, axB));
+      const bendAxis = bisector || axA;
+      const jW = Math.max(branchEndpoints[0].W, branchEndpoints[1].W);
+      const jH = Math.max(branchEndpoints[0].H, branchEndpoints[1].H);
+      // Adaptive depth: cover the gap between endpoints, with 20% margin, capped at 2m
+      const gapDist = vecDist(branchEndpoints[0].endpoint, branchEndpoints[1].endpoint);
+      const bendPlugDepth = Math.max(0.5, Math.min(gapDist * 1.2, 2.0));
+
+      transitionElements.push({
+        id: `bend-plug-${node}`,
+        element_key: `bend-plug-${node}`,
+        type: 'PROXY',
+        name: `Bend Transition — ${node}`,
+        semanticType: 'IfcBuildingElementProxy',
+        confidence: 0.2,
+        source: 'TRANSITION_APPROXIMATION',
+        container: branchEndpoints[0].container,
+        placement: {
+          origin: center,
+          axis: bendAxis,
+          refDirection: vecNormalize(vecCross(bendAxis, { x: 0, y: 0, z: 1 })) || { x: 1, y: 0, z: 0 }
+        },
+        geometry: {
+          method: 'EXTRUSION',
+          direction: { x: 0, y: 0, z: 1 },
+          depth: bendPlugDepth,
+          profile: { type: 'RECTANGLE', width: jW, height: jH }
+        },
+        material: { name: 'concrete', color: [0.7, 0.7, 0.7], transparency: 0.0 },
+        properties: { isBendTransition: true, isTransitionHelper: true, geometryApproximation: 'BEND_PLUG', bendNodeId: node, gapDistance: +gapDist.toFixed(3) },
+        relationships: []
+      });
+      bendCount++;
+      continue;
+    }
+
+    // Degree ≥ 3: junction transition plug
+    junctionCount++;
+
+    // Compute junction center
+    const center = {
+      x: branchEndpoints.reduce((s, b) => s + b.endpoint.x, 0) / branchEndpoints.length,
+      y: branchEndpoints.reduce((s, b) => s + b.endpoint.y, 0) / branchEndpoints.length,
+      z: branchEndpoints.reduce((s, b) => s + b.endpoint.z, 0) / branchEndpoints.length
+    };
+
+    const jW = Math.max(...branchEndpoints.map(b => b.W));
+    const jH = Math.max(...branchEndpoints.map(b => b.H));
+    const maxDepth = Math.max(...branchEndpoints.map(b => b.depth));
+    // Compute max gap from center to any branch endpoint BEFORE plug depth calculation
+    const maxGap = Math.max(...branchEndpoints.map(b => vecDist(b.endpoint, center)));
+    // Adaptive depth: max of proportional rule and 2*maxGap (to span from center to furthest endpoint), capped at 3m
+    const plugDepth = Math.max(Math.min(1.0, 0.15 * maxDepth), Math.min(2 * maxGap, 3.0));
+
+    // Weighted average axis
+    const avgAxis = vecNormalize(branchEndpoints.reduce((acc, b) => vecAdd(acc, b.axis), { x: 0, y: 0, z: 0 }));
+    const junctionAxis = avgAxis || { x: 1, y: 0, z: 0 };
+
+    const plugElem = {
+      id: `junction-plug-${node}`,
+      element_key: `junction-plug-${node}`,
+      type: 'PROXY',
+      name: `Junction Transition — ${node}`,
+      semanticType: 'IfcBuildingElementProxy',
+      confidence: 0.25,
+      source: 'TRANSITION_APPROXIMATION',
+      container: branchEndpoints[0].container,
+      placement: {
+        origin: center,
+        axis: junctionAxis,
+        refDirection: vecNormalize(vecCross(junctionAxis, { x: 0, y: 0, z: 1 })) || { x: 1, y: 0, z: 0 }
+      },
+      geometry: {
+        method: 'EXTRUSION',
+        direction: { x: 0, y: 0, z: 1 },
+        depth: plugDepth,
+        profile: { type: 'RECTANGLE', width: jW, height: jH }
+      },
+      material: { name: 'concrete', color: [0.7, 0.7, 0.7], transparency: 0.0 },
+      properties: {
+        isTransitionHelper: true,
+        junctionNodeId: node,
+        junctionDegree: degree,
+        geometryApproximation: 'JUNCTION_PLUG',
+        maxGapDistance: +maxGap.toFixed(3)
+      },
+      relationships: []
+    };
+    transitionElements.push(plugElem);
+
+    // Conditionally generate companion void
+    const hasVoids = branchEndpoints.some(b => !!voidByBranch[b.key]);
+    const needsVoid = hasVoids || maxGap > 0.5;
+
+    if (needsVoid) {
+      const innerW = jW - 2 * WALL_THICKNESS;
+      const innerH = jH - 2 * WALL_THICKNESS;
+      if (innerW > 0.1 && innerH > 0.1) {
+        transitionElements.push({
+          id: `junction-void-${node}`,
+          element_key: `junction-void-${node}`,
+          type: 'SPACE',
+          name: `Junction Void — ${node}`,
+          semanticType: 'IfcSpace',
+          confidence: 0.2,
+          source: 'TRANSITION_APPROXIMATION',
+          container: branchEndpoints[0].container,
+          placement: { ...plugElem.placement, origin: { ...center } },
+          geometry: {
+            method: 'EXTRUSION',
+            direction: { x: 0, y: 0, z: 1 },
+            depth: plugDepth,
+            profile: { type: 'RECTANGLE', width: innerW, height: innerH }
+          },
+          material: { name: 'space', color: [0.88, 0.88, 0.88], transparency: 0.7 },
+          properties: { isTransitionHelper: true, shellPiece: 'VOID', junctionNodeId: node },
+          relationships: []
+        });
+        voidHelpersGenerated++;
+      }
+    }
+  }
+
+  if (transitionElements.length > 0) {
+    css.elements.push(...transitionElements);
+  }
+
+  if (!css.metadata) css.metadata = {};
+  css.metadata.junctionTransitions = {
+    junctionCount,
+    bendCount,
+    transitionElementCount: transitionElements.length,
+    voidHelpersGenerated
+  };
+  if (transitionElements.length > 0) {
+    console.log(`generateJunctionTransitions: ${junctionCount} junctions, ${bendCount} bends → ${transitionElements.length} transition elements (${voidHelpersGenerated} void helpers)`);
+  }
+}
+
+
+// ============================================================================
+// PHASE 3: EQUIPMENT MOUNTING (Universal — domain-aware)
+// Deterministic placement corrections so equipment appears physically installed.
+// ============================================================================
+
+function applyEquipmentMounting(css) {
+  if (!css.elements || css.elements.length === 0) return;
+
+  const isTunnel = (css.domain || '').toUpperCase() === 'TUNNEL';
+
+  // Mounting type by semantic type
+  const WALL_MOUNTED = new Set(['IfcSensor', 'IfcAlarm', 'IfcActuator', 'IfcCommunicationsAppliance',
+    'IfcElectricDistributionBoard', 'IfcFireSuppressionTerminal']);
+  const CEILING_MOUNTED = new Set(['IfcLightFixture', 'IfcFan', 'IfcCableCarrierSegment']);
+  const FLOOR_MOUNTED = new Set(['IfcPump', 'IfcTank', 'IfcTransformer', 'IfcBoiler', 'IfcChiller',
+    'IfcCompressor', 'IfcElectricGenerator']);
+
+  // Build spatial context
+  // For tunnels: collect void spaces with their geometry
+  const voidSpaces = {};
+  if (isTunnel) {
+    for (const e of css.elements) {
+      if (e.properties?.shellPiece === 'VOID' && e.placement?.origin) {
+        const branch = e.properties.derivedFromBranch;
+        if (branch) {
+          voidSpaces[branch] = {
+            origin: e.placement.origin,
+            width: (e.geometry?.profile?.width || 4) - 0.1,
+            height: (e.geometry?.profile?.height || 4) - 0.1,
+            depth: e.geometry?.depth || 10
+          };
+        }
+      }
+    }
+  }
+
+  // For buildings: get storey elevations and heights
+  const storeyInfo = {};
+  if (!isTunnel) {
+    const levels = css.levelsOrSegments || [];
+    for (let i = 0; i < levels.length; i++) {
+      const elev = levels[i].elevation_m || 0;
+      const height = levels[i].height_m || 3.0;
+      storeyInfo[levels[i].id] = { elevation: elev, height };
+    }
+  }
+
+  let mountingCorrections = 0;
+  let originGuardCorrections = 0;
+  const STANDOFF = 0.05;
+
+  for (const elem of css.elements) {
+    if (elem.type !== 'EQUIPMENT') continue;
+    const st = elem.semanticType || '';
+    const o = elem.placement?.origin;
+    if (!o) continue;
+
+    // Origin guard: equipment at exactly (0,0,0) is almost certainly unplaced
+    if (Math.abs(o.x) < 0.001 && Math.abs(o.y) < 0.001 && Math.abs(o.z) < 0.001) {
+      // Find nearest space center
+      let bestCenter = null;
+      let bestDist = Infinity;
+      if (isTunnel) {
+        for (const vs of Object.values(voidSpaces)) {
+          bestCenter = vs.origin;
+          break; // just use first available
+        }
+      } else {
+        // For buildings: use first storey center from bbox
+        const bbox = css.metadata?.bbox;
+        if (bbox) {
+          bestCenter = {
+            x: (bbox.min.x + bbox.max.x) / 2,
+            y: (bbox.min.y + bbox.max.y) / 2,
+            z: bbox.min.z + 1.0
+          };
+        }
+      }
+      if (bestCenter) {
+        if (!elem.metadata) elem.metadata = {};
+        elem.metadata.originalPlacement = { ...o };
+        elem.metadata.originError = true;
+        elem.placement.origin = { ...bestCenter };
+        originGuardCorrections++;
+      }
+      continue;
+    }
+
+    // Determine mounting type
+    let mountType = 'NONE';
+    if (WALL_MOUNTED.has(st)) mountType = 'WALL';
+    else if (CEILING_MOUNTED.has(st)) mountType = 'CEILING';
+    else if (FLOOR_MOUNTED.has(st)) mountType = 'FLOOR';
+    if (mountType === 'NONE') continue;
+
+    // Save original
+    if (!elem.metadata) elem.metadata = {};
+    elem.metadata.originalPlacement = { ...o };
+
+    const eqHeight = elem.geometry?.profile?.height || elem.geometry?.depth || 0.5;
+
+    if (isTunnel) {
+      // Use matched void space
+      const matchedBranch = elem.properties?.hostStructuralBranchMatched || elem.properties?.derivedFromBranch;
+      const vs = matchedBranch ? voidSpaces[matchedBranch] : Object.values(voidSpaces)[0];
+      if (!vs) continue;
+
+      const halfH = vs.height / 2;
+      const floorZ = vs.origin.z - halfH;
+      const ceilZ = vs.origin.z + halfH;
+
+      if (mountType === 'FLOOR') {
+        o.z = floorZ + STANDOFF;
+        mountingCorrections++;
+      } else if (mountType === 'CEILING') {
+        o.z = ceilZ - eqHeight - STANDOFF;
+        mountingCorrections++;
+      } else if (mountType === 'WALL') {
+        // Clamp z to mid-height of void (wall-mounted typically at ~1.5m above floor)
+        o.z = floorZ + Math.min(1.5, halfH);
+        mountingCorrections++;
+      }
+    } else {
+      // Building: use storey info
+      const container = elem.container || 'level-1';
+      const si = storeyInfo[container] || { elevation: 0, height: 3.0 };
+
+      if (mountType === 'FLOOR') {
+        o.z = si.elevation + STANDOFF;
+        mountingCorrections++;
+      } else if (mountType === 'CEILING') {
+        o.z = si.elevation + si.height - eqHeight - STANDOFF;
+        mountingCorrections++;
+      } else if (mountType === 'WALL') {
+        o.z = si.elevation + Math.min(1.5, si.height * 0.5);
+        mountingCorrections++;
+      }
+    }
+
+    elem.metadata.mountingType = mountType;
+    elem.metadata.correctedBy = 'EQUIPMENT_MOUNTING';
+    elem.metadata.correctionDelta = {
+      dx: Math.round((o.x - elem.metadata.originalPlacement.x) * 100) / 100,
+      dy: Math.round((o.y - elem.metadata.originalPlacement.y) * 100) / 100,
+      dz: Math.round((o.z - elem.metadata.originalPlacement.z) * 100) / 100
+    };
+  }
+
+  if (!css.metadata) css.metadata = {};
+  css.metadata.equipmentMounting = { mountingCorrections, originGuardCorrections };
+  console.log(`applyEquipmentMounting: ${mountingCorrections} mounting corrections, ${originGuardCorrections} origin guard corrections`);
+}
+
+
+// ============================================================================
+// PHASE 2: BUILDING ENVELOPE GUARANTEE (domain: non-TUNNEL)
+// Ensures coherent rectangular envelope when extraction is weak.
+// ============================================================================
+
+function guaranteeBuildingEnvelope(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+
+  const walls = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL');
+  const floorSlabs = css.elements.filter(e => (e.type || '').toUpperCase() === 'SLAB' && (e.properties?.slabType || '').toUpperCase() === 'FLOOR');
+  const roofSlabs = css.elements.filter(e => (e.type || '').toUpperCase() === 'SLAB' && (e.properties?.slabType || '').toUpperCase() === 'ROOF');
+  const allSlabs = css.elements.filter(e => (e.type || '').toUpperCase() === 'SLAB');
+
+  // Compute bounding box from all elements
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const e of css.elements) {
+    const o = e.placement?.origin;
+    if (!o) continue;
+    if (o.x < minX) minX = o.x; if (o.x > maxX) maxX = o.x;
+    if (o.y < minY) minY = o.y; if (o.y > maxY) maxY = o.y;
+    if (o.z < minZ) minZ = o.z; if (o.z > maxZ) maxZ = o.z;
+  }
+
+  if (!isFinite(minX)) return; // no valid placements
+
+  // Get storey height or default
+  const firstLevel = (css.levelsOrSegments || [])[0];
+  const storeyHeight = firstLevel?.height_m || 3.0;
+  const container = firstLevel?.id || 'level-1';
+
+  // Ensure reasonable bbox dimensions
+  const bboxW = Math.max(maxX - minX, 3.0);
+  const bboxD = Math.max(maxY - minY, 3.0);
+
+  const generated = [];
+  let fallbackApplied = false;
+
+  // Generate walls if fewer than 4
+  if (walls.length < 4) {
+    fallbackApplied = true;
+    const wallThickness = 0.25;
+    const wallHeight = storeyHeight;
+
+    // 4 envelope walls: North, South, East, West
+    const wallDefs = [
+      { name: 'North Wall', ox: (minX + maxX) / 2, oy: maxY, dirX: 1, dirY: 0, len: bboxW },
+      { name: 'South Wall', ox: (minX + maxX) / 2, oy: minY, dirX: 1, dirY: 0, len: bboxW },
+      { name: 'East Wall', ox: maxX, oy: (minY + maxY) / 2, dirX: 0, dirY: 1, len: bboxD },
+      { name: 'West Wall', ox: minX, oy: (minY + maxY) / 2, dirX: 0, dirY: 1, len: bboxD },
+    ];
+
+    for (const wd of wallDefs) {
+      const wallElem = {
+        id: `env-wall-${wd.name.toLowerCase().replace(/\s/g, '-')}`,
+        element_key: `env-wall-${wd.name.toLowerCase().replace(/\s/g, '-')}`,
+        type: 'WALL',
+        name: wd.name,
+        semanticType: 'IfcWall',
+        confidence: 0.4,
+        source: 'ENVELOPE_FALLBACK',
+        container,
+        placement: {
+          origin: { x: wd.ox, y: wd.oy, z: minZ },
+          axis: { x: 0, y: 0, z: 1 },                          // local Z = up (extrusion direction)
+          refDirection: { x: wd.dirX, y: wd.dirY, z: 0 }       // local X = wall run direction
+        },
+        geometry: {
+          method: 'EXTRUSION',
+          direction: { x: 0, y: 0, z: 1 },
+          depth: wallHeight,
+          profile: { type: 'RECTANGLE', width: wd.len, height: wallThickness }
+        },
+        material: { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 },
+        properties: { isExternal: true, isFallback: true },
+        relationships: []
+      };
+      generated.push(wallElem);
+    }
+  }
+
+  // Generate floor slab if missing
+  if (floorSlabs.length === 0 && allSlabs.filter(s => !s.properties?.slabType || s.properties.slabType === 'FLOOR').length === 0) {
+    fallbackApplied = true;
+    generated.push({
+      id: 'env-floor-slab',
+      element_key: 'env-floor-slab',
+      type: 'SLAB',
+      name: 'Floor Slab',
+      semanticType: 'IfcSlab',
+      confidence: 0.4,
+      source: 'ENVELOPE_FALLBACK',
+      container,
+      placement: {
+        origin: { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: minZ },
+        axis: { x: 0, y: 0, z: 1 },             // local Z = up (extrusion direction)
+        refDirection: { x: 1, y: 0, z: 0 }       // local X = length direction
+      },
+      geometry: {
+        method: 'EXTRUSION',
+        direction: { x: 0, y: 0, z: 1 },
+        depth: 0.2,
+        profile: { type: 'RECTANGLE', width: bboxW, height: bboxD }
+      },
+      material: { name: 'concrete_floor', color: [0.65, 0.65, 0.65], transparency: 0 },
+      properties: { slabType: 'FLOOR', isFallback: true },
+      relationships: []
+    });
+  }
+
+  // Generate roof slab if missing
+  if (roofSlabs.length === 0 && allSlabs.filter(s => (s.properties?.slabType || '').toUpperCase() === 'ROOF').length === 0) {
+    fallbackApplied = true;
+    generated.push({
+      id: 'env-roof-slab',
+      element_key: 'env-roof-slab',
+      type: 'SLAB',
+      name: 'Roof Slab',
+      semanticType: 'IfcSlab',
+      confidence: 0.4,
+      source: 'ENVELOPE_FALLBACK',
+      container,
+      placement: {
+        origin: { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: minZ + storeyHeight },
+        axis: { x: 0, y: 0, z: 1 },             // local Z = up (extrusion direction)
+        refDirection: { x: 1, y: 0, z: 0 }       // local X = length direction
+      },
+      geometry: {
+        method: 'EXTRUSION',
+        direction: { x: 0, y: 0, z: 1 },
+        depth: 0.2,
+        profile: { type: 'RECTANGLE', width: bboxW, height: bboxD }
+      },
+      material: { name: 'metal_roof', color: [0.4, 0.45, 0.5], transparency: 0 },
+      properties: { slabType: 'ROOF', isFallback: true },
+      relationships: []
+    });
+  }
+
+  if (generated.length > 0) {
+    css.elements.push(...generated);
+    if (!css.metadata) css.metadata = {};
+    css.metadata.envelopeFallbackApplied = true;
+    css.metadata.envelopeFallback = {
+      generatedWalls: generated.filter(e => e.type === 'WALL').length,
+      generatedSlabs: generated.filter(e => e.type === 'SLAB').length,
+      originalWalls: walls.length,
+      originalSlabs: allSlabs.length,
+      bboxUsed: { minX, maxX, minY, maxY, minZ, maxZ, bboxW, bboxD }
+    };
+    console.log(`guaranteeBuildingEnvelope: generated ${generated.length} fallback elements (${generated.filter(e => e.type === 'WALL').length} walls, ${generated.filter(e => e.type === 'SLAB').length} slabs)`);
+  }
+}
+
+
+// ============================================================================
+// PHASE 4A: OPENING PLACEMENT VALIDATION (non-TUNNEL)
+// Conservative: wrong visible geometry is worse than missing geometry.
+// ============================================================================
+
+function validateOpeningPlacement(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+
+  const openingTypes = new Set(['DOOR', 'WINDOW', 'OPENING']);
+  const openings = css.elements.filter(e => openingTypes.has((e.type || '').toUpperCase()));
+  if (openings.length === 0) return;
+
+  const walls = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL');
+  if (walls.length === 0) return;
+
+  let valid = 0, rehosted = 0, downgraded = 0;
+  const unresolvedOpenings = [];
+  const removeKeys = new Set();
+
+  for (const opening of openings) {
+    const oo = opening.placement?.origin;
+    if (!oo) { valid++; continue; }
+
+    // Find host wall
+    let hostWall = null;
+    const hostKey = opening.properties?.hostWallKey;
+    if (hostKey) {
+      hostWall = walls.find(w => (w.element_key || w.id) === hostKey);
+    }
+    if (!hostWall) {
+      // Find nearest wall within 2m
+      let bestDist = Infinity;
+      for (const w of walls) {
+        const wo = w.placement?.origin;
+        if (!wo) continue;
+        const d = vecDist(oo, wo);
+        if (d < bestDist) { bestDist = d; hostWall = w; }
+      }
+      if (bestDist > 2.0) hostWall = null;
+    }
+
+    if (!hostWall) {
+      // No host — downgrade
+      unresolvedOpenings.push({ id: opening.id, name: opening.name, type: opening.type, reason: 'no_host_wall' });
+      removeKeys.add(opening.element_key || opening.id);
+      downgraded++;
+      continue;
+    }
+
+    // Check if opening is within host wall bounds (±0.3m tolerance)
+    const wo = hostWall.placement?.origin;
+    if (!wo) { valid++; continue; }
+
+    const wW = hostWall.geometry?.profile?.width || 1;
+    const wH = hostWall.geometry?.profile?.height || 0.25;
+    const wD = hostWall.geometry?.depth || 3;
+    const tolerance = 0.3;
+
+    const dist = vecDist(oo, wo);
+    const isOutside = dist > (Math.max(wW, wD) / 2 + tolerance);
+
+    if (isOutside) {
+      const confidence = opening.confidence || 0.5;
+      if (confidence >= 0.6) {
+        // Try rehosting to nearest wall within 0.5m
+        let bestRehost = null;
+        let bestRehostDist = 0.5;
+        for (const w of walls) {
+          if (w === hostWall) continue;
+          const d = vecDist(oo, w.placement?.origin || { x: 0, y: 0, z: 0 });
+          if (d < bestRehostDist) { bestRehostDist = d; bestRehost = w; }
+        }
+        if (bestRehost) {
+          if (!opening.properties) opening.properties = {};
+          opening.properties.rehosted = true;
+          opening.properties.originalHostWall = hostKey || (hostWall.element_key || hostWall.id);
+          opening.properties.hostWallKey = bestRehost.element_key || bestRehost.id;
+          rehosted++;
+        } else {
+          unresolvedOpenings.push({ id: opening.id, name: opening.name, type: opening.type, reason: 'outside_bounds_no_rehost' });
+          removeKeys.add(opening.element_key || opening.id);
+          downgraded++;
+        }
+      } else {
+        unresolvedOpenings.push({ id: opening.id, name: opening.name, type: opening.type, reason: 'outside_bounds_low_confidence' });
+        removeKeys.add(opening.element_key || opening.id);
+        downgraded++;
+      }
+    } else {
+      valid++;
+    }
+
+    // Door floor-snap: z within 0.3m of floor level
+    if ((opening.type || '').toUpperCase() === 'DOOR' && oo.z !== undefined) {
+      const levels = css.levelsOrSegments || [];
+      const container = opening.container;
+      const level = levels.find(l => l.id === container);
+      const floorZ = level?.elevation_m || 0;
+      if (Math.abs(oo.z - floorZ) < 0.3) {
+        oo.z = floorZ;
+      }
+    }
+  }
+
+  // Remove downgraded openings from elements
+  if (removeKeys.size > 0) {
+    css.elements = css.elements.filter(e => !removeKeys.has(e.element_key || e.id));
+  }
+
+  if (!css.metadata) css.metadata = {};
+  css.metadata.openingValidation = { total: openings.length, valid, rehosted, downgraded };
+  if (unresolvedOpenings.length > 0) {
+    css.metadata.unresolvedOpenings = unresolvedOpenings;
+  }
+  console.log(`validateOpeningPlacement: ${openings.length} total, ${valid} valid, ${rehosted} rehosted, ${downgraded} downgraded`);
+}
+
+
+// ============================================================================
+// PHASE 4B: WALL AXIS CLEANUP (non-TUNNEL)
+// Groups walls by direction and aligns. 10° angular cap + 0.3m positional cap.
+// ============================================================================
+
+function cleanBuildingWallAxes(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+
+  const walls = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL');
+  if (walls.length < 2) return;
+
+  const ANGLE_CAP = 10 * Math.PI / 180; // 10°
+  const POSITION_CAP = 0.3; // 0.3m max movement
+  const LINE_OFFSET_TOL = 0.2; // 0.2m for collinear detection
+
+  // Infer wall run direction: prefer refDirection > wallSide > horizontal axis
+  function inferWallDir(wall) {
+    // Prefer refDirection — this is the wall run direction (horizontal)
+    const ref = wall.placement?.refDirection;
+    if (ref) {
+      const d = vecNormalize(ref);
+      if (d) return d;
+    }
+    // Fallback: infer from wallSide property
+    const side = wall.properties?.wallSide;
+    if (side === 'SOUTH' || side === 'NORTH') return { x: 1, y: 0, z: 0 };
+    if (side === 'EAST' || side === 'WEST') return { x: 0, y: 1, z: 0 };
+    // Last fallback: placement.axis only if clearly horizontal (not Z-up)
+    const ax = wall.placement?.axis;
+    if (ax) {
+      const n = vecNormalize(ax);
+      if (n && Math.abs(n.z || 0) < 0.5) return n;
+    }
+    return null;
+  }
+
+  // Group by approximate direction
+  const groups = [];
+  for (const wall of walls) {
+    const dir = inferWallDir(wall);
+    if (!dir) continue;
+
+    let placed = false;
+    for (const group of groups) {
+      const dot = Math.abs(vecDot(dir, group.avgDir));
+      if (dot > Math.cos(ANGLE_CAP)) {
+        group.walls.push(wall);
+        group.dirs.push(dir);
+        // Update average direction
+        const sum = group.dirs.reduce((acc, d) => vecAdd(acc, d), { x: 0, y: 0, z: 0 });
+        group.avgDir = vecNormalize(sum) || group.avgDir;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      groups.push({ avgDir: dir, dirs: [dir], walls: [wall] });
+    }
+  }
+
+  let snappedCount = 0;
+  let skippedOverCap = 0;
+
+  for (const group of groups) {
+    if (group.walls.length < 2) continue;
+    const avgDir = group.avgDir;
+
+    // Snap wall run direction to group average (with endpoint movement cap)
+    for (const wall of group.walls) {
+      const currentDir = inferWallDir(wall);
+      if (!currentDir) continue;
+      const dot = Math.abs(vecDot(currentDir, avgDir));
+      if (dot >= 0.9998) continue; // already aligned
+
+      // Check endpoint shift from direction change doesn't exceed POSITION_CAP
+      const wallLen = getWallLength(wall);
+      const origin = wall.placement?.origin;
+      if (origin && wallLen > 0) {
+        const oldEnd = vecAdd(origin, vecScale(currentDir, wallLen / 2));
+        const newEnd = vecAdd(origin, vecScale(avgDir, wallLen / 2));
+        const endpointShift = vecDist(oldEnd, newEnd);
+        if (endpointShift > POSITION_CAP) {
+          skippedOverCap++;
+          continue; // don't snap — endpoint would move too far
+        }
+      }
+
+      // Apply snap: update refDirection (preferred) or axis
+      if (wall.placement?.refDirection) {
+        wall.placement.refDirection = { ...avgDir };
+      } else if (wall.placement?.axis) {
+        wall.placement.axis = { ...avgDir };
+      } else {
+        if (!wall.placement) wall.placement = {};
+        wall.placement.refDirection = { ...avgDir };
+      }
+      snappedCount++;
+    }
+
+    // Align nearly-collinear walls (parallel within LINE_OFFSET_TOL)
+    for (let i = 0; i < group.walls.length; i++) {
+      const wA = group.walls[i];
+      const oA = wA.placement?.origin;
+      if (!oA) continue;
+
+      for (let j = i + 1; j < group.walls.length; j++) {
+        const wB = group.walls[j];
+        const oB = wB.placement?.origin;
+        if (!oB) continue;
+
+        // Compute perpendicular offset between wall lines
+        const ab = vecSub(oB, oA);
+        const proj = vecDot(ab, avgDir);
+        const perp = vecSub(ab, vecScale(avgDir, proj));
+        const perpDist = Math.sqrt(perp.x ** 2 + perp.y ** 2 + perp.z ** 2);
+
+        if (perpDist > 0.001 && perpDist < LINE_OFFSET_TOL) {
+          // Move B to A's line (half the offset each)
+          const halfPerp = vecScale(perp, 0.5);
+          const moveA = Math.sqrt(halfPerp.x ** 2 + halfPerp.y ** 2 + halfPerp.z ** 2);
+          if (moveA > POSITION_CAP) {
+            skippedOverCap++;
+            continue;
+          }
+          wA.placement.origin = vecAdd(oA, halfPerp);
+          wB.placement.origin = vecSub(oB, halfPerp);
+          snappedCount += 2;
+        }
+      }
+    }
+  }
+
+  if (!css.metadata) css.metadata = {};
+  css.metadata.wallAxisCleanup = { groupCount: groups.length, snappedCount, skippedOverCap };
+  if (snappedCount > 0) {
+    console.log(`cleanBuildingWallAxes: ${snappedCount} wall axis/position corrections across ${groups.length} groups (${skippedOverCap} skipped over 0.3m cap)`);
+  }
+}
+
+
+// ============================================================================
+// DIMENSION VALIDATION (Universal — all domains)
+// Clamps absurd dimensions with logging.
+// ============================================================================
+
+function clampAbsurdDimensions(css) {
+  if (!css.elements) return;
+
+  const CLAMPS = {
+    WALL: { minW: 0.05, maxW: 200, minH: 0.05, maxH: 2.0, minD: 0.5, maxD: 50 },
+    SLAB: { minW: 0.5, maxW: 200, minH: 0.05, maxH: 3.0, minD: 0.05, maxD: 3.0 },
+    SPACE: { minW: 0.5, maxW: 200, minH: 0.5, maxH: 200, minD: 0.5, maxD: 5000 },
+    EQUIPMENT: { minW: 0.01, maxW: 20, minH: 0.01, maxH: 20, minD: 0.01, maxD: 20 },
+    DEFAULT: { minW: 0.01, maxW: 500, minH: 0.01, maxH: 500, minD: 0.01, maxD: 5000 }
+  };
+
+  let clampCount = 0;
+
+  for (const elem of css.elements) {
+    const g = elem.geometry;
+    if (!g) continue;
+    const type = (elem.type || '').toUpperCase();
+    const limits = CLAMPS[type] || CLAMPS.DEFAULT;
+
+    const p = g.profile;
+    if (p?.width !== undefined) {
+      const orig = p.width;
+      p.width = Math.max(limits.minW, Math.min(limits.maxW, p.width));
+      if (p.width !== orig) { clampCount++; }
+    }
+    if (p?.height !== undefined) {
+      const orig = p.height;
+      p.height = Math.max(limits.minH, Math.min(limits.maxH, p.height));
+      if (p.height !== orig) { clampCount++; }
+    }
+    if (g.depth !== undefined) {
+      const orig = g.depth;
+      g.depth = Math.max(limits.minD, Math.min(limits.maxD, g.depth));
+      if (g.depth !== orig) { clampCount++; }
+    }
+  }
+
+  if (clampCount > 0) {
+    console.log(`clampAbsurdDimensions: ${clampCount} dimension clamps applied`);
+    if (!css.metadata) css.metadata = {};
+    css.metadata.dimensionClamps = clampCount;
+  }
 }
 
 
@@ -1076,7 +2436,22 @@ function setOrigin(elem, coords) {
   }
 }
 
+const AMBIGUOUS_RATIO_TOL = 1.15; // within 15% = ambiguous profile
+let ambiguousProfileCount = 0;
+
 function getDir(elem) {
+  // Prefer refDirection (horizontal wall axis) over geometry.direction (extrusion = Z-up)
+  const ref = elem.placement?.refDirection;
+  if (ref) {
+    const rx = ref.x ?? 0, ry = ref.y ?? 0, rz = ref.z ?? 0;
+    const len = Math.sqrt(rx*rx + ry*ry + rz*rz);
+    if (len > 1e-6) return [rx/len, ry/len, rz/len];
+  }
+  // Fallback: infer from wallSide property
+  const wallSide = elem.properties?.wallSide;
+  if (wallSide === 'SOUTH' || wallSide === 'NORTH') return [1, 0, 0];
+  if (wallSide === 'EAST' || wallSide === 'WEST') return [0, 1, 0];
+  // Last resort: original behavior (geometry.direction)
   const d = elem.geometry?.direction || {};
   const dx = d.x ?? d[0] ?? 1;
   const dy = d.y ?? d[1] ?? 0;
@@ -1086,17 +2461,44 @@ function getDir(elem) {
 }
 
 function getWallLength(elem) {
-  return elem.geometry?.depth || elem.geometry?.length_m || 1;
+  const p = elem.geometry?.profile || {};
+  const w = p.width || 0, h = p.height || 0;
+  if (w > 0 && h > 0) {
+    const ratio = Math.max(w, h) / Math.min(w, h);
+    if (ratio < AMBIGUOUS_RATIO_TOL) {
+      ambiguousProfileCount++;
+      console.log(`getWallLength: ambiguous profile ${w.toFixed(2)}x${h.toFixed(2)} (ratio ${ratio.toFixed(2)}) on ${elem.name || elem.id}`);
+      return w; // convention: width = length dimension
+    }
+    return Math.max(w, h);
+  }
+  return w || h || elem.geometry?.depth || 1;
 }
 
 function setWallLength(elem, len) {
-  if (elem.geometry?.depth !== undefined) elem.geometry.depth = len;
-  if (elem.geometry?.length_m !== undefined) elem.geometry.length_m = len;
+  const p = elem.geometry?.profile;
+  if (!p) return;
+  const w = p.width || 0, h = p.height || 0;
+  const ratio = (w > 0 && h > 0) ? Math.max(w, h) / Math.min(w, h) : 999;
+  if (ratio < AMBIGUOUS_RATIO_TOL) {
+    p.width = len; // ambiguous — update width by convention
+  } else if (w >= h) { p.width = len; }
+  else { p.height = len; }
 }
 
 function getWallThickness(elem) {
   const p = elem.geometry?.profile || {};
-  return p.width || p.width_m || p.height || p.height_m || 0;
+  const w = p.width || 0, h = p.height || 0;
+  if (w > 0 && h > 0) {
+    const ratio = Math.max(w, h) / Math.min(w, h);
+    if (ratio < AMBIGUOUS_RATIO_TOL) {
+      ambiguousProfileCount++;
+      console.log(`getWallThickness: ambiguous profile ${w.toFixed(2)}x${h.toFixed(2)} on ${elem.name || elem.id}`);
+      return h; // convention: height = thickness dimension
+    }
+    return Math.min(w, h);
+  }
+  return w || h || 0;
 }
 
 function dist3(a, b) {
@@ -1832,9 +3234,20 @@ function validateBuildingStructure(css) {
     warnings.push(`${storeyInconsistentCount} elements have z inconsistent with their storey elevation`);
   }
 
+  // Phase 4C: Interior coherence grading (metadata-only)
+  const rooms = css.elements.filter(e => (e.type || '').toUpperCase() === 'SPACE' && !e.properties?.isTransitionHelper);
+  const partitions = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL' && !e.properties?.isExternal && !e.properties?.isFallback);
+  let interiorCoherence = 'ENVELOPE_ONLY';
+  if (rooms.length >= 3 && partitions.length >= 2) {
+    interiorCoherence = 'STRUCTURED_INTERIOR';
+  } else if (rooms.length >= 1 || partitions.length >= 1) {
+    interiorCoherence = 'PARTIAL_INTERIOR';
+  }
+
   if (warnings.length > 0) {
     console.warn(`v6 Building validation: ${warnings.join('; ')}`);
-    if (!css.metadata) css.metadata = {};
-    css.metadata.buildingValidationWarnings = warnings;
   }
+  if (!css.metadata) css.metadata = {};
+  css.metadata.buildingValidationWarnings = warnings.length > 0 ? warnings : undefined;
+  css.metadata.interiorCoherence = interiorCoherence;
 }

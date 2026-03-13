@@ -18,6 +18,311 @@ console.log(`builting-extract version=${EXTRACT_VERSION} built=${BUILD_TIMESTAMP
 // UTILITY: Save CSS to S3 (avoids Step Function 256KB state limit)
 // ============================================================================
 
+// ============================================================================
+// REFINEMENT REGRESSION CHECK + ELEMENT GUARD
+// ============================================================================
+
+const STRUCTURAL_TYPES = new Set([
+  'WALL', 'SLAB', 'SHELL', 'COLUMN', 'BEAM', 'FOUNDATION', 'ROOF',
+  'IfcWall', 'IfcWallStandardCase', 'IfcSlab', 'IfcColumn', 'IfcBeam',
+  'IfcFooting', 'IfcRoof', 'IfcBuildingElementProxy'
+]);
+
+/**
+ * Compare old and new CSS after refinement to detect regression/drift.
+ * Returns a report with change summary and warnings.
+ */
+function buildRefinementReport(previousCSS, newCSS, refinementText) {
+  const prevElements = previousCSS.elements || [];
+  const newElements = newCSS.elements || [];
+
+  // Count by type
+  const countByType = (elems) => {
+    const counts = {};
+    for (const e of elems) {
+      const t = e.type || e.semanticType || 'UNKNOWN';
+      counts[t] = (counts[t] || 0) + 1;
+    }
+    return counts;
+  };
+  const prevCounts = countByType(prevElements);
+  const newCounts = countByType(newElements);
+
+  // Element-level diff by ID
+  const prevById = new Map(prevElements.map(e => [e.id || e.element_key, e]));
+  const newById = new Map(newElements.map(e => [e.id || e.element_key, e]));
+
+  const added = [...newById.keys()].filter(id => !prevById.has(id));
+  const removed = [...prevById.keys()].filter(id => !newById.has(id));
+  const modified = [...newById.keys()].filter(id => {
+    if (!prevById.has(id)) return false;
+    return JSON.stringify(prevById.get(id)) !== JSON.stringify(newById.get(id));
+  });
+
+  const totalChanges = added.length + removed.length + modified.length;
+
+  // Detect structural elements that were silently removed
+  const structuralRemoved = removed.filter(id => {
+    const e = prevById.get(id);
+    return STRUCTURAL_TYPES.has(e?.type) || STRUCTURAL_TYPES.has(e?.semanticType);
+  });
+
+  // Heuristic: detect if refinement text targets equipment vs structure
+  const equipmentKeywords = /equipment|fan|pump|duct|pipe|hvac|ventilat|sensor|light|fixture|tank|valve|meter|cable/i;
+  const structureKeywords = /wall|slab|floor|ceiling|roof|column|beam|shell|foundation|storey|level/i;
+  const targetsEquipment = equipmentKeywords.test(refinementText);
+  const targetsStructure = structureKeywords.test(refinementText);
+
+  // Flag: structural drift when user only asked about equipment
+  const driftDetected = targetsEquipment && !targetsStructure && structuralRemoved.length > 0;
+  // Flag: disproportionate changes
+  const disproportionate = prevElements.length > 0 && totalChanges > prevElements.length * 0.5;
+
+  const warnings = [];
+  if (driftDetected) warnings.push(`DRIFT: ${structuralRemoved.length} structural elements removed but refinement targeted equipment`);
+  if (disproportionate) warnings.push(`DISPROPORTIONATE: ${totalChanges} changes across ${prevElements.length} elements (>50%)`);
+
+  // Include drift rejection flag if metadata indicates it
+  const driftRejected = newCSS.metadata?.driftRejection?.driftScore > 30;
+  const unresolvedTargets = [];
+
+  return {
+    summary: {
+      previousElementCount: prevElements.length,
+      newElementCount: newElements.length,
+      addedCount: added.length,
+      removedCount: removed.length,
+      modifiedCount: modified.length,
+      structuralRemovedCount: structuralRemoved.length,
+      driftDetected,
+      driftRejected,
+      disproportionate,
+      unresolvedTargets,
+      refinementMode: 'PATCH'
+    },
+    added: added.slice(0, 20),
+    removed: removed.slice(0, 20),
+    modified: modified.slice(0, 20),
+    warnings,
+    prevCounts,
+    newCounts
+  };
+}
+
+/**
+ * Structural element guard: restore structural elements that were silently
+ * removed by the LLM when the user's instruction didn't target them.
+ */
+function guardStructuralElements(previousCSS, newCSS, refinementText) {
+  const prevElements = previousCSS.elements || [];
+  const newElements = newCSS.elements || [];
+  const newById = new Map(newElements.map(e => [e.id || e.element_key, e]));
+
+  let restoredCount = 0;
+  for (const elem of prevElements) {
+    const eid = elem.id || elem.element_key;
+    if (newById.has(eid)) continue; // still present
+
+    const isStructural = STRUCTURAL_TYPES.has(elem.type) || STRUCTURAL_TYPES.has(elem.semanticType);
+    if (!isStructural) continue;
+
+    // Check if the user explicitly targeted this element type or name
+    const typeRe = new RegExp(elem.type, 'i');
+    const nameRe = elem.name ? new RegExp(elem.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
+    if (typeRe.test(refinementText)) continue; // user targeted this type
+    if (nameRe && nameRe.test(refinementText)) continue; // user targeted by name
+
+    // Restore — LLM silently dropped it
+    newCSS.elements.push(elem);
+    restoredCount++;
+  }
+
+  if (restoredCount > 0) {
+    console.log(`Structural guard: restored ${restoredCount} silently removed structural elements`);
+  }
+  return restoredCount;
+}
+
+/**
+ * Structure-aware drift rejection (Phase 1A).
+ * Scores drift by weighting structural changes 10x vs equipment 1x.
+ * If drift > 30, rejects LLM output and applies only targeted patches.
+ */
+const EQUIPMENT_TYPES = new Set([
+  'EQUIPMENT', 'IfcFan', 'IfcPump', 'IfcValve', 'IfcDuctSegment', 'IfcPipeSegment',
+  'IfcSensor', 'IfcAlarm', 'IfcActuator', 'IfcLightFixture', 'IfcTank',
+  'IfcCableCarrierSegment', 'IfcCommunicationsAppliance', 'IfcElectricDistributionBoard'
+]);
+
+const STRUCTURAL_DRIFT_TYPES = new Set([
+  'WALL', 'SLAB', 'SPACE', 'TUNNEL_SEGMENT', 'COLUMN',
+  'IfcWall', 'IfcWallStandardCase', 'IfcSlab', 'IfcSpace', 'IfcColumn'
+]);
+
+function checkStructureAwareDrift(previousCSS, newCSS, refinementText) {
+  const prevElements = previousCSS.elements || [];
+  const newElements = newCSS.elements || [];
+  const prevById = new Map(prevElements.map(e => [e.id || e.element_key, e]));
+  const newById = new Map(newElements.map(e => [e.id || e.element_key, e]));
+
+  // Resolve targets from refinement text
+  const { resolved: resolvedTargets, ambiguous: ambiguousTargets } = resolveRefinementTargets(refinementText, prevElements);
+  const targetIds = new Set(resolvedTargets.map(t => t.id));
+
+  // Count untargeted changes by category
+  let structuralDrift = 0;
+  let equipmentDrift = 0;
+
+  // Check removed elements
+  for (const [id, elem] of prevById) {
+    if (newById.has(id)) continue; // still present
+    if (targetIds.has(id)) continue; // explicitly targeted
+    const type = elem.type || elem.semanticType || '';
+    if (STRUCTURAL_DRIFT_TYPES.has(type)) structuralDrift++;
+    else if (EQUIPMENT_TYPES.has(type)) equipmentDrift++;
+  }
+
+  // Check modified elements (significant changes only)
+  for (const [id, newElem] of newById) {
+    const prevElem = prevById.get(id);
+    if (!prevElem) continue; // added, not drift
+    if (targetIds.has(id)) continue; // explicitly targeted
+    if (JSON.stringify(prevElem) === JSON.stringify(newElem)) continue; // unchanged
+
+    const type = prevElem.type || prevElem.semanticType || '';
+    if (STRUCTURAL_DRIFT_TYPES.has(type)) structuralDrift++;
+    else if (EQUIPMENT_TYPES.has(type)) equipmentDrift++;
+  }
+
+  const driftScore = structuralDrift * 5 + equipmentDrift * 1;
+  const rejected = driftScore > 30;
+
+  if (rejected) {
+    console.warn(`DRIFT_REJECTED: structural drift score ${driftScore} (structural: ${structuralDrift}, equipment: ${equipmentDrift})`);
+  }
+
+  return { driftScore, structuralDrift, equipmentDrift, rejected, resolvedTargets, ambiguousTargets };
+}
+
+/**
+ * Target resolution: parse refinement text to identify targeted elements.
+ * Resolution order: element_key > exact name > semanticType+host > fuzzy match
+ */
+function resolveRefinementTargets(refinementText, elements) {
+  if (!refinementText || elements.length === 0) return { resolved: [], ambiguous: [] };
+
+  const resolved = [];
+  const ambiguous = [];
+  const text = refinementText.toLowerCase();
+
+  // Build lookup maps
+  const byKey = new Map();
+  const byName = new Map();
+  const byType = {};
+
+  for (const e of elements) {
+    const id = e.id || e.element_key;
+    if (e.element_key) byKey.set(e.element_key.toLowerCase(), { ...e, _resolvedId: id });
+    if (e.name) {
+      const nameLower = e.name.toLowerCase();
+      if (!byName.has(nameLower)) byName.set(nameLower, []);
+      byName.get(nameLower).push({ ...e, _resolvedId: id });
+    }
+    const t = (e.type || e.semanticType || '').toLowerCase();
+    if (t) {
+      if (!byType[t]) byType[t] = [];
+      byType[t].push({ ...e, _resolvedId: id });
+    }
+  }
+
+  // 1. element_key exact match
+  for (const [key, elem] of byKey) {
+    if (text.includes(key)) {
+      resolved.push({ id: elem._resolvedId, method: 'element_key' });
+    }
+  }
+
+  // 2. Exact name match
+  for (const [name, elems] of byName) {
+    if (name.length < 3) continue; // skip very short names
+    if (text.includes(name)) {
+      if (elems.length === 1) {
+        // Unambiguous
+        if (!resolved.find(r => r.id === elems[0]._resolvedId)) {
+          resolved.push({ id: elems[0]._resolvedId, method: 'exact_name' });
+        }
+      } else {
+        // Ambiguous — do not resolve, track for reporting
+        console.log(`TARGET_AMBIGUOUS: "${name}" matches ${elems.length} elements`);
+        ambiguous.push({ description: name, candidateCount: elems.length, priorityLevel: 'exact_name', reason: 'AMBIGUOUS' });
+      }
+    }
+  }
+
+  // 3. Type + context match (e.g. "remove the fan" → match IfcFan if only 1)
+  const typeKeywords = {
+    'fan': ['equipment', 'IfcFan'], 'pump': ['equipment', 'IfcPump'],
+    'valve': ['equipment', 'IfcValve'], 'sensor': ['equipment', 'IfcSensor'],
+    'light': ['equipment', 'IfcLightFixture'], 'door': ['door', 'IfcDoor'],
+    'window': ['window', 'IfcWindow'], 'duct': ['equipment', 'IfcDuctSegment'],
+    'pipe': ['equipment', 'IfcPipeSegment'], 'wall': ['wall', 'IfcWall'],
+    'slab': ['slab', 'IfcSlab'], 'column': ['column', 'IfcColumn']
+  };
+
+  for (const [keyword, types] of Object.entries(typeKeywords)) {
+    if (!text.includes(keyword)) continue;
+    for (const t of types) {
+      const candidates = byType[t.toLowerCase()];
+      if (candidates && candidates.length === 1) {
+        if (!resolved.find(r => r.id === candidates[0]._resolvedId)) {
+          resolved.push({ id: candidates[0]._resolvedId, method: 'type_context' });
+        }
+      }
+    }
+  }
+
+  return { resolved, ambiguous };
+}
+
+/**
+ * Apply only targeted patches from new CSS when drift is rejected.
+ * Returns the patched CSS (previousCSS with only targeted changes applied).
+ */
+function applyTargetedPatches(previousCSS, newCSS, resolvedTargets) {
+  const result = JSON.parse(JSON.stringify(previousCSS));
+  const targetIds = new Set(resolvedTargets.map(t => t.id));
+
+  const newById = new Map((newCSS.elements || []).map(e => [e.id || e.element_key, e]));
+  const prevIds = new Set((result.elements || []).map(e => e.id || e.element_key));
+
+  // DELETE: remove targeted elements that are gone in newCSS
+  for (const target of resolvedTargets) {
+    if (!newById.has(target.id)) {
+      result.elements = result.elements.filter(e => (e.id || e.element_key) !== target.id);
+    }
+  }
+
+  // MODIFY: update targeted elements that changed in newCSS
+  for (const target of resolvedTargets) {
+    const newElem = newById.get(target.id);
+    if (!newElem) continue;
+    const idx = result.elements.findIndex(e => (e.id || e.element_key) === target.id);
+    if (idx >= 0) {
+      result.elements[idx] = newElem;
+    }
+  }
+
+  // ADD: add new elements from newCSS that aren't in previous
+  for (const [id, elem] of newById) {
+    if (!prevIds.has(id)) {
+      // Only add if it seems targeted by name/type mention in refinement
+      result.elements.push(elem);
+    }
+  }
+
+  return result;
+}
+
 function buildTracingReport(css, processedFiles) {
   const byFile = {};
   const bySource = { LLM: 0, VSM: 0, DEFAULT: 0, DXF: 0 };
@@ -58,13 +363,36 @@ function buildTracingReport(css, processedFiles) {
   const metadataContributors = (processedFiles || []).filter(f => f.enrichedFields).map(f => f.name);
   const ignoredFiles = (processedFiles || []).filter(f => !f.content || f.content.length < 50).map(f => f.name);
 
+  // v10: File contribution classification (geometry/enrichment/validation/unused)
+  const fileContributions = {};
+  for (const pf of (processedFiles || [])) {
+    const fname = pf.name;
+    if (!fname) continue;
+    const hasElements = byFile[fname] && byFile[fname].count > 0;
+    const hasContent = pf.content && pf.content.length >= 50;
+    const isEnrichment = (pf.enrichedFields || 0) > 0;
+    let role = 'unused';
+    if (hasElements) role = 'geometry';
+    else if (isEnrichment) role = 'enrichment';
+    else if (hasContent) role = 'enrichment';
+    fileContributions[fname] = {
+      role,
+      contribution: role === 'geometry' ? 'Structural/equipment elements extracted' :
+                     role === 'enrichment' ? 'Metadata and property enrichment' : 'No extractable content',
+      elementCount: byFile[fname]?.count || 0,
+      sourceRole: pf.sourceRole || 'UNKNOWN',
+      sizeBytes: pf.content?.length || 0
+    };
+  }
+
   return {
     byFile, bySource, byRole, confidence,
     totalElements: (css.elements || []).length,
     parsedFiles,
     geometryContributors,
     metadataContributors,
-    ignoredFiles
+    ignoredFiles,
+    fileContributions
   };
 }
 
@@ -1098,7 +1426,10 @@ function buildTunnelCSS(spec, sourceFiles) {
 
     const equipTypeMap = {
       'FAN': 'IfcFan', 'GENERATOR': 'IfcElectricGenerator', 'PUMP': 'IfcPump',
-      'COMPRESSOR': 'IfcCompressor', 'TRANSFORMER': 'IfcTransformer', 'BOILER': 'IfcBoiler'
+      'COMPRESSOR': 'IfcCompressor', 'TRANSFORMER': 'IfcTransformer', 'BOILER': 'IfcBoiler',
+      'CHILLER': 'IfcChiller', 'AHU': 'IfcUnitaryEquipment', 'BATTERY': 'IfcElectricGenerator',
+      'CONVERTER': 'IfcTransformer', 'MOTOR': 'IfcMotorConnection', 'HEATER': 'IfcSpaceHeater',
+      'SENSOR': 'IfcSensor', 'VALVE': 'IfcValve', 'TANK': 'IfcTank'
     };
 
     addEl({
@@ -1112,7 +1443,8 @@ function buildTunnelCSS(spec, sourceFiles) {
       container, relationships: [],
       properties: { equipmentType: equip.type || 'OTHER', equipmentAnchorConfidence: anchorConf, segment_name: equip.segment_name || null },
       material: { name: 'steel', color: [0.5, 0.5, 0.55], transparency: 0 },
-      confidence: 0.80, source: 'LLM', explicitOrInferred: anchoredSeg ? 'EXPLICIT' : 'INFERRED'
+      confidence: 0.80, source: 'LLM', explicitOrInferred: anchoredSeg ? 'EXPLICIT' : 'INFERRED',
+      metadata: { sourceExcerpt: equip.sourceExcerpt ? equip.sourceExcerpt.substring(0, 100) : null }
     });
   }
 
@@ -1375,7 +1707,16 @@ function buildingSpecToCSS(spec, sourceFiles) {
       const levelId = `level-${floor}`;
       const baseZ = floorLevel + ((floor - 1) * floorToFloor);
 
+      // Compute refDirection from wall direction vector for correct profile orientation
       const placement = { origin: { x: wall.x_start_m || 0, y: wall.y_start_m || 0, z: baseZ } };
+      if (wallLength >= 0.1) {
+        const wallDirX = dx / wallLength;
+        const wallDirY = dy / wallLength;
+        placement.axis = { x: 0, y: 0, z: 1 };
+        placement.refDirection = { x: wallDirX, y: wallDirY, z: 0 };
+      } else {
+        console.warn(`Interior wall "${wall.name || 'unnamed'}": near-zero length ${wallLength.toFixed(3)}m, skipping refDirection`);
+      }
       const geometry = {
         method: 'EXTRUSION',
         profile: { type: 'RECTANGLE', width: wallLength, height: thickness },
@@ -1608,7 +1949,9 @@ function buildingSpecToCSS(spec, sourceFiles) {
     const equipTypeMap = {
       'GENERATOR': 'IfcElectricGenerator', 'PUMP': 'IfcPump', 'FAN': 'IfcFan',
       'COMPRESSOR': 'IfcCompressor', 'TRANSFORMER': 'IfcTransformer', 'BOILER': 'IfcBoiler',
-      'CHILLER': 'IfcChiller', 'AHU': 'IfcAirToAirHeatRecovery'
+      'CHILLER': 'IfcChiller', 'AHU': 'IfcUnitaryEquipment', 'BATTERY': 'IfcElectricGenerator',
+      'CONVERTER': 'IfcTransformer', 'MOTOR': 'IfcMotorConnection', 'HEATER': 'IfcSpaceHeater',
+      'SENSOR': 'IfcSensor', 'VALVE': 'IfcValve', 'TANK': 'IfcTank'
     };
 
     for (const equip of spec.equipment) {
@@ -1648,7 +1991,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
       const levelId = `level-${floor}`;
       const baseZ = floorLevel + ((floor - 1) * floorToFloor);
 
-      addElement(makeElement('EQUIPMENT', equipTypeMap[equip.type] || 'IfcBuildingElementProxy',
+      const equipElem = makeElement('EQUIPMENT', equipTypeMap[equip.type] || 'IfcBuildingElementProxy',
         equip.name || equip.type || 'Equipment',
         { origin: { x: ex, y: ey, z: baseZ } },
         { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: eLen, height: eWid }, direction: { x: 0, y: 0, z: 1 }, depth: eHeight },
@@ -1656,7 +1999,11 @@ function buildingSpecToCSS(spec, sourceFiles) {
         { equipmentType: equip.type || 'OTHER' },
         { name: 'steel', color: [0.5, 0.5, 0.55], transparency: 0 },
         anchorConfidence
-      ));
+      );
+      if (equip.sourceExcerpt) {
+        equipElem.metadata.sourceExcerpt = equip.sourceExcerpt.substring(0, 100);
+      }
+      addElement(equipElem);
     }
   }
 
@@ -1845,65 +2192,147 @@ function buildingSpecToCSS(spec, sourceFiles) {
   // Build bbox
   const totalHeight = floorLevel + (numFloors * floorToFloor) + 0.15;
 
-  // v6: Envelope fallback — if building extraction is too fragmented, downgrade to skeleton
+  // v6: Interior suppression — remove implausible rooms before envelope check
   const wallCount = elements.filter(e => e.type === 'WALL').length;
   const slabCount = elements.filter(e => e.type === 'SLAB').length;
   let envelopeFallbackApplied = false;
+  let interiorSuppression = null;
 
-  if (wallCount < 4 || slabCount < 2) {
-    console.warn(`v6 Envelope fallback: only ${wallCount} walls, ${slabCount} slabs — rebuilding as envelope-only`);
+  if (wallCount >= 4 && slabCount >= 2) {
+    const rooms = elements.filter(e => e.type === 'SPACE');
+    if (rooms.length > 0) {
+      const implausibleRooms = rooms.filter(r => {
+        const w = r.geometry?.profile?.width || 0;
+        const h = r.geometry?.profile?.height || 0;
+        const d = r.geometry?.depth || 0;
+        const conf = r.confidence || 0.5;
+        return w > 50 || h > 50 || d > 10 || w < 0.5 || h < 0.5 || conf < 0.5;
+      });
+      if (implausibleRooms.length > rooms.length * 0.3) {
+        console.warn(`Building safe-mode: ${implausibleRooms.length}/${rooms.length} rooms implausible — suppressing`);
+        const implausibleIds = new Set(implausibleRooms.map(r => r.id));
+        const before = elements.length;
+        // Remove implausible rooms only, keep good ones
+        for (let i = elements.length - 1; i >= 0; i--) {
+          if (elements[i].type === 'SPACE' && implausibleIds.has(elements[i].id)) elements.splice(i, 1);
+        }
+        interiorSuppression = { totalRooms: rooms.length, suppressed: implausibleRooms.length, retained: rooms.length - implausibleRooms.length };
+      }
+    }
+  }
+
+  // v6: Envelope fallback — if building extraction is too fragmented, downgrade to skeleton
+  // Domain-aware structural confidence: only structural carrier types contribute to confidence check
+  const STRUCTURAL_CARRIERS = {
+    ARCH: new Set(['WALL', 'SLAB', 'COLUMN', 'BEAM', 'ROOF', 'STAIR', 'RAMP']),
+    TUNNEL: new Set(['WALL', 'SLAB', 'TUNNEL_SEGMENT', 'COLUMN']),
+    INDUSTRIAL: new Set(['WALL', 'SLAB', 'COLUMN', 'BEAM', 'FOOTING']),
+    CIVIL: new Set(['WALL', 'SLAB', 'COLUMN', 'BEAM', 'FOOTING', 'PILE']),
+    STRUCTURAL: new Set(['WALL', 'SLAB', 'COLUMN', 'BEAM', 'FOOTING', 'PILE']),
+  };
+  const normalizedDomain = (domain || 'ARCH').toUpperCase();
+  const carrierSet = STRUCTURAL_CARRIERS[normalizedDomain] || STRUCTURAL_CARRIERS.ARCH;
+  const structuralElems = elements.filter(e => carrierSet.has(e.type));
+  const structuralConfidence = structuralElems.length > 0
+    ? structuralElems.reduce((s, e) => s + (e.confidence || 0.5), 0) / structuralElems.length
+    : 0;
+
+  if (wallCount < 4 || slabCount < 2 || structuralConfidence < 0.4) {
+    console.warn(`v6 Envelope fallback (PRESERVING): ${wallCount} walls, ${slabCount} slabs, structConf=${structuralConfidence.toFixed(2)} (domain=${normalizedDomain}) — adding missing envelope pieces only`);
     envelopeFallbackApplied = true;
-    // Clear all elements and rebuild minimal envelope
-    elements.length = 0;
+    const preservedCount = elements.length;
+
+    // Building-specific color defaults based on structure class
+    const structureClass2 = (spec.buildingType || '').toLowerCase();
+    const structColors = {
+      residential: { wall: [0.72, 0.36, 0.22], wallMat: 'brick', roof: [0.35, 0.30, 0.25], roofMat: 'tile' },
+      commercial:  { wall: [0.70, 0.82, 0.92], wallMat: 'glass', roof: [0.40, 0.40, 0.45], roofMat: 'metal' },
+      industrial:  { wall: [0.55, 0.58, 0.60], wallMat: 'metal', roof: [0.40, 0.45, 0.50], roofMat: 'metal' },
+      warehouse:   { wall: [0.55, 0.58, 0.60], wallMat: 'metal', roof: [0.40, 0.45, 0.50], roofMat: 'metal' },
+    };
+    const sc = structColors[structureClass2] || { wall: [0.75, 0.75, 0.75], wallMat: 'concrete', roof: [0.4, 0.4, 0.45], roofMat: 'metal' };
+
+    // Identify which cardinal directions already have exterior walls
+    const coveredSides = new Set();
+    for (const el of elements) {
+      if (el.type === 'WALL' && el.properties?.wallSide) {
+        coveredSides.add(el.properties.wallSide.toUpperCase());
+      }
+    }
+
+    // Compute bbox from existing elements for missing wall placement
+    let bMinX = Infinity, bMaxX = -Infinity, bMinY = Infinity, bMaxY = -Infinity;
+    for (const el of elements) {
+      const o = el.placement?.origin;
+      if (!o) continue;
+      if (o.x < bMinX) bMinX = o.x; if (o.x > bMaxX) bMaxX = o.x;
+      if (o.y < bMinY) bMinY = o.y; if (o.y > bMaxY) bMaxY = o.y;
+    }
+    // Fall back to spec dimensions if no valid placements
+    if (!isFinite(bMinX)) { bMinX = 0; bMaxX = length; bMinY = 0; bMaxY = width; }
+    const bW = Math.max(bMaxX - bMinX, 3.0);
+    const bD = Math.max(bMaxY - bMinY, 3.0);
     const wt = wallThickness;
     const baseZ = floorLevel;
 
-    // 4 exterior walls
-    addElement(makeElement('WALL', 'IfcWallStandardCase', 'South Wall',
-      { origin: { x: length / 2, y: wt / 2, z: baseZ } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
-      'level-1', { isExternal: true, wallSide: 'SOUTH' },
-      { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
-    ));
-    addElement(makeElement('WALL', 'IfcWallStandardCase', 'North Wall',
-      { origin: { x: length / 2, y: width - wt / 2, z: baseZ } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
-      'level-1', { isExternal: true, wallSide: 'NORTH' },
-      { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
-    ));
-    addElement(makeElement('WALL', 'IfcWallStandardCase', 'West Wall',
-      { origin: { x: wt / 2, y: width / 2, z: baseZ } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wt, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
-      'level-1', { isExternal: true, wallSide: 'WEST' },
-      { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
-    ));
-    addElement(makeElement('WALL', 'IfcWallStandardCase', 'East Wall',
-      { origin: { x: length - wt / 2, y: width / 2, z: baseZ } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wt, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
-      'level-1', { isExternal: true, wallSide: 'EAST' },
-      { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
-    ));
-    // Floor slab
-    addElement(makeElement('SLAB', 'IfcSlab', 'Floor Slab',
-      { origin: { x: length / 2, y: width / 2, z: baseZ } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.2 },
-      'level-1', { slabType: 'FLOOR' },
-      { name: 'concrete', color: [0.6, 0.6, 0.6], transparency: 0 }
-    ));
-    // Roof slab
-    addElement(makeElement('SLAB', 'IfcSlab', 'Roof Slab',
-      { origin: { x: length / 2, y: width / 2, z: baseZ + floorToFloor } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
-      'level-1', { slabType: 'ROOF' },
-      { name: 'metal', color: [0.4, 0.4, 0.45], transparency: 0 }
-    ));
-    // One door
-    addElement(makeElement('DOOR', 'IfcDoor', 'Main Entrance',
-      { origin: { x: length / 2, y: wt / 2, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: 0.9, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: 2.1 },
-      'level-1', { wallSide: 'SOUTH', sillHeight: 0 },
-      { name: 'wood', color: [0.55, 0.35, 0.2], transparency: 0 }, 0.6
-    ));
+    // Add only missing cardinal envelope walls
+    const wallDefs = {
+      SOUTH: { ox: bMinX + bW / 2, oy: bMinY,          profW: bW, profH: wt, refDir: { x: 1, y: 0, z: 0 } },
+      NORTH: { ox: bMinX + bW / 2, oy: bMaxY,          profW: bW, profH: wt, refDir: { x: 1, y: 0, z: 0 } },
+      WEST:  { ox: bMinX,          oy: bMinY + bD / 2,  profW: wt, profH: bD, refDir: { x: 0, y: 1, z: 0 } },
+      EAST:  { ox: bMaxX,          oy: bMinY + bD / 2,  profW: wt, profH: bD, refDir: { x: 0, y: 1, z: 0 } },
+    };
+
+    let addedWalls = 0;
+    for (const side of ['NORTH', 'SOUTH', 'EAST', 'WEST']) {
+      if (coveredSides.has(side)) continue;
+      const wd = wallDefs[side];
+      addElement(makeElement('WALL', 'IfcWallStandardCase', `${side.charAt(0) + side.slice(1).toLowerCase()} Wall (Fallback)`,
+        { origin: { x: wd.ox, y: wd.oy, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: wd.refDir },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wd.profW, height: wd.profH }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+        'level-1', { isExternal: true, wallSide: side, isFallback: true },
+        { name: sc.wallMat, color: sc.wall, transparency: 0 }
+      ));
+      addedWalls++;
+    }
+
+    // Add floor slab only if no FLOOR slab exists
+    const hasFloor = elements.some(e => e.type === 'SLAB' && (e.properties?.slabType || '').toUpperCase() === 'FLOOR');
+    let addedSlabs = 0;
+    if (!hasFloor) {
+      addElement(makeElement('SLAB', 'IfcSlab', 'Floor Slab (Fallback)',
+        { origin: { x: bMinX + bW / 2, y: bMinY + bD / 2, z: baseZ } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: bW, height: bD }, direction: { x: 0, y: 0, z: 1 }, depth: 0.2 },
+        'level-1', { slabType: 'FLOOR', isFallback: true },
+        { name: 'concrete', color: [0.6, 0.6, 0.6], transparency: 0 }
+      ));
+      addedSlabs++;
+    }
+
+    // Add roof slab only if no ROOF slab exists
+    const hasRoof = elements.some(e => e.type === 'SLAB' && (e.properties?.slabType || '').toUpperCase() === 'ROOF');
+    if (!hasRoof) {
+      addElement(makeElement('SLAB', 'IfcSlab', 'Roof Slab (Fallback)',
+        { origin: { x: bMinX + bW / 2, y: bMinY + bD / 2, z: baseZ + floorToFloor } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: bW, height: bD }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
+        'level-1', { slabType: 'ROOF', isFallback: true },
+        { name: sc.roofMat, color: sc.roof, transparency: 0 }
+      ));
+      addedSlabs++;
+    }
+
+    // Add door only if no doors exist and south wall was added
+    const hasDoor = elements.some(e => e.type === 'DOOR');
+    if (!hasDoor && !coveredSides.has('SOUTH')) {
+      addElement(makeElement('DOOR', 'IfcDoor', 'Main Entrance (Fallback)',
+        { origin: { x: bMinX + bW / 2, y: bMinY, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: 0.9, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: 2.1 },
+        'level-1', { wallSide: 'SOUTH', sillHeight: 0, isFallback: true },
+        { name: 'wood', color: [0.55, 0.35, 0.2], transparency: 0 }, 0.6
+      ));
+    }
+
+    console.warn(`Envelope fallback: preserved ${preservedCount} elements, added ${addedWalls} walls + ${addedSlabs} slabs (covered sides: ${[...coveredSides].join(',')})`);
   }
 
   const css = {
@@ -1929,6 +2358,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
       elementCounts,
       structureClass,
       envelopeFallbackApplied,
+      interiorSuppression,
       skippedRooms: skippedRooms.length > 0 ? skippedRooms : undefined,
       skippedOpenings: skippedOpenings.length > 0 ? skippedOpenings : undefined,
       bbox: {
@@ -2015,7 +2445,7 @@ function classifySourceFile(file) {
 function buildPriorityFileContent(files, refinementText = null) {
   const MAX_PRIMARY = 50000;
   const MAX_SECONDARY = 12000;
-  const MAX_TERTIARY = 2000;
+  const MAX_TERTIARY = 10000;  // v9: raised from 2KB — VentSim data is structured, 10KB captures full medium networks
   const parts = [];
   let totalChars = 0;
   const MAX_TOTAL = 150000;
@@ -2347,6 +2777,11 @@ ${suppText.slice(0, 20000)}`;
     if (!jsonMatch) return [];
 
     const findings = JSON.parse(jsonMatch[0]);
+    console.log(`Document findings extracted: ${findings.length} items from ${sourceFileNames.length} files`);
+    if (findings.length > 0) {
+      console.log(`  Finding types: ${[...new Set(findings.map(f => f.type))].join(', ')}`);
+      console.log(`  Finding names: ${findings.slice(0, 5).map(f => f.name).join(', ')}${findings.length > 5 ? '...' : ''}`);
+    }
     // Tag with source files
     return findings.map(f => ({ ...f, sourceFiles: sourceFileNames }));
   } catch (err) {
@@ -2369,7 +2804,22 @@ function attemptSafeSourceFusion(css, documentFindings, sourceFiles) {
   if (!css.elements || !documentFindings || documentFindings.length === 0) return;
 
   const existingNames = new Set(css.elements.map(e => `${e.name}:${e.type}:${e.container}`));
-  const spaces = css.elements.filter(e => (e.type || '').toUpperCase() === 'SPACE');
+  // Build equipment name set for duplicate suppression against existing VentSim/extracted equipment
+  const existingEquipNames = new Set(
+    css.elements
+      .filter(e => (e.type || '').toUpperCase() === 'EQUIPMENT')
+      .map(e => (e.name || '').toLowerCase())
+  );
+
+  // Expanded anchor types: SPACE + TUNNEL_SEGMENT + WALL (not just SPACE)
+  const ANCHOR_TYPES = new Set(['SPACE', 'TUNNEL_SEGMENT', 'WALL']);
+  const anchors = css.elements.filter(e => {
+    const t = (e.type || '').toUpperCase();
+    if (!ANCHOR_TYPES.has(t)) return false;
+    // Must have valid placement
+    if (!e.placement?.origin) return false;
+    return true;
+  });
   const segments = (css.levelsOrSegments || []);
 
   let fusedCount = 0;
@@ -2395,24 +2845,35 @@ function attemptSafeSourceFusion(css, documentFindings, sourceFiles) {
       continue;
     }
 
-    // Rule 2: Must anchor to existing segment or space
+    // Rule 2: Must anchor to existing segment, space, or wall
     let anchorElem = null;
     if (finding.segmentName) {
-      anchorElem = spaces.find(s => s.name && s.name.toLowerCase().includes(finding.segmentName.toLowerCase()));
+      // Try matching anchor by name
+      anchorElem = anchors.find(a => a.name && a.name.toLowerCase().includes(finding.segmentName.toLowerCase()));
       if (!anchorElem) {
-        // Try matching by segment/level
+        // Try matching by segment/level, then find closest anchor in that segment
         const seg = segments.find(s => s.name && s.name.toLowerCase().includes(finding.segmentName.toLowerCase()));
         if (seg) {
-          anchorElem = spaces.find(s => s.container === seg.id);
+          anchorElem = anchors.find(a => a.container === seg.id);
         }
       }
     }
     if (!anchorElem && finding.container) {
-      anchorElem = spaces.find(s => s.container === finding.container || s.id === finding.container);
+      anchorElem = anchors.find(a => a.container === finding.container || a.id === finding.container);
     }
-    if (!anchorElem && spaces.length > 0) {
-      // Fall back to first space if only one option
-      if (spaces.length === 1) anchorElem = spaces[0];
+    if (!anchorElem && anchors.length > 0) {
+      // Fall back to first anchor if only one option, or pick longest TUNNEL_SEGMENT
+      if (anchors.length === 1) {
+        anchorElem = anchors[0];
+      } else {
+        // Prefer TUNNEL_SEGMENT with most depth (longest branch) for tunnel domains
+        const tunnelAnchors = anchors.filter(a => (a.type || '').toUpperCase() === 'TUNNEL_SEGMENT');
+        if (tunnelAnchors.length > 0) {
+          anchorElem = tunnelAnchors.reduce((best, a) => (a.geometry?.depth || 0) > (best.geometry?.depth || 0) ? a : best, tunnelAnchors[0]);
+        } else {
+          anchorElem = anchors[0];
+        }
+      }
     }
     if (!anchorElem) {
       fusionLog.push({ name: finding.name, type: findingType, reason: 'no_anchor' });
@@ -2420,24 +2881,33 @@ function attemptSafeSourceFusion(css, documentFindings, sourceFiles) {
       continue;
     }
 
-    // Rule 3: Duplicate check
+    // Rule 3: Duplicate check — by key AND by equipment name
     const dupKey = `${finding.name}:${findingType}:${anchorElem.container}`;
     if (existingNames.has(dupKey)) {
       fusionLog.push({ name: finding.name, type: findingType, reason: 'duplicate' });
       rejectedCount++;
       continue;
     }
+    if (finding.name && existingEquipNames.has(finding.name.toLowerCase())) {
+      fusionLog.push({ name: finding.name, type: findingType, reason: 'duplicate_equipment_name' });
+      rejectedCount++;
+      continue;
+    }
 
-    // Deterministic placement from template
+    // Deterministic placement from template within anchor's geometry volume
     const template = FUSION_PLACEMENT_TEMPLATES[findingType] || FUSION_PLACEMENT_TEMPLATES.SENSOR;
     const ao = anchorElem.placement?.origin || { x: 0, y: 0, z: 0 };
     const ag = anchorElem.geometry || {};
     const aw = ag.profile?.width || 5;
     const ah = ag.profile?.height || 5;
-    const ad = ag.depth || 3;
+    const ad = ag.depth || 10;
+    const anchorAxis = anchorElem.placement?.axis || ag.direction || { x: 1, y: 0, z: 0 };
 
-    // Index-based stagger along axis to avoid overlap
-    const staggerOffset = (i * 0.8) % (aw * 0.8);
+    // Index-based stagger along anchor's primary axis to avoid overlap
+    // Progress along depth (10%-90% range), wrap with modulo
+    const axisProgress = ((fusedCount * 1.5) % (ad * 0.8)) + ad * 0.1;
+    const lateralOffset = aw * template.lateralFraction;
+    const verticalOffset = ah * template.verticalFraction;
 
     // Map fusion types to proper IFC semantic classes
     const FUSION_SEMANTIC_MAP = {
@@ -2451,17 +2921,20 @@ function attemptSafeSourceFusion(css, documentFindings, sourceFiles) {
     };
     const fusionSemanticType = FUSION_SEMANTIC_MAP[findingType] || 'IfcBuildingElementProxy';
 
+    // Compute placement within anchor's volume along its axis
+    const placementOrigin = {
+      x: ao.x + anchorAxis.x * axisProgress + lateralOffset * (anchorAxis.y !== 0 ? 0 : 1),
+      y: ao.y + anchorAxis.y * axisProgress + lateralOffset * (anchorAxis.x !== 0 ? 0 : 1),
+      z: ao.z + verticalOffset
+    };
+
     const newElem = {
-      id: elemId({ depth: template.defaultLength || 0.5 }, { origin: { x: ao.x + staggerOffset, y: ao.y + ah * template.lateralFraction, z: ao.z + ad * template.verticalFraction } }),
+      id: elemId({ depth: template.defaultLength || 0.5 }, { origin: placementOrigin }),
       type: 'EQUIPMENT',
       semanticType: fusionSemanticType,
       name: finding.name || findingType,
       placement: {
-        origin: {
-          x: ao.x + staggerOffset,
-          y: ao.y + ah * template.lateralFraction,
-          z: ao.z + ad * template.verticalFraction
-        }
+        origin: placementOrigin
       },
       geometry: {
         method: 'EXTRUSION',
@@ -2490,11 +2963,15 @@ function attemptSafeSourceFusion(css, documentFindings, sourceFiles) {
     fusedCount++;
   }
 
-  if (fusedCount > 0 || rejectedCount > 0) {
-    console.log(`v6 Source fusion: ${fusedCount} elements created, ${rejectedCount} rejected`);
-    if (!css.metadata) css.metadata = {};
-    css.metadata.sourceFusion = { fusedCount, rejectedCount, log: fusionLog.slice(0, 20) };
+  // Always log and store fusion results (even all-rejected)
+  console.log(`v6 Source fusion: ${fusedCount} elements created, ${rejectedCount} rejected out of ${documentFindings.length} findings`);
+  if (fusionLog.length > 0) {
+    const reasonCounts = {};
+    fusionLog.forEach(l => { reasonCounts[l.reason] = (reasonCounts[l.reason] || 0) + 1; });
+    console.log(`  Rejection reasons: ${JSON.stringify(reasonCounts)}`);
   }
+  if (!css.metadata) css.metadata = {};
+  css.metadata.sourceFusion = { fusedCount, rejectedCount, totalFindings: documentFindings.length, log: fusionLog.slice(0, 30) };
 }
 
 // ============================================================================
@@ -2976,8 +3453,35 @@ async function extractFromScannedPDF(pdfBuffer, fileName, bedrockClient) {
 export const handler = async (event) => {
   console.log('ExtractBuildingSpec input:', JSON.stringify(event, null, 2));
   const { userId, renderId, bucket, files, description, render } = event;
+  let previousCSS = event.previousCSS || null;
   const refinementText = render?.refinement || null;
   if (refinementText) console.log(`Refinement context present: "${refinementText.slice(0, 120)}..."`);
+
+  // If refinement is requested but previousCSS wasn't passed through Step Function,
+  // load it directly from S3 (the processed/validated version)
+  if (refinementText && !previousCSS) {
+    console.log('previousCSS not in event — loading from S3 for refinement...');
+    const cssKey = `uploads/${userId}/${renderId}/css/css_processed.json`;
+    try {
+      const cssResponse = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: cssKey }));
+      const cssBuffer = await cssResponse.Body.transformToByteArray();
+      previousCSS = JSON.parse(Buffer.from(cssBuffer).toString('utf-8'));
+      console.log(`Loaded previous CSS from S3: ${cssKey} (${JSON.stringify(previousCSS).length} bytes)`);
+    } catch (err) {
+      console.warn(`Could not load previous CSS from S3 (${cssKey}): ${err.message}`);
+      // Fall back to css_raw.json
+      const rawKey = `uploads/${userId}/${renderId}/css/css_raw.json`;
+      try {
+        const rawResp = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: rawKey }));
+        const rawBuf = await rawResp.Body.transformToByteArray();
+        previousCSS = JSON.parse(Buffer.from(rawBuf).toString('utf-8'));
+        console.log(`Loaded previous CSS from raw fallback: ${rawKey}`);
+      } catch (err2) {
+        console.warn(`Could not load CSS from either path, refinement will use full re-extraction: ${err2.message}`);
+      }
+    }
+  }
+  if (previousCSS) console.log(`Previous CSS available for refinement (${JSON.stringify(previousCSS).length} bytes)`);
 
   try {
     // Track per-file parse status
@@ -3082,15 +3586,29 @@ export const handler = async (event) => {
         // Narrative files enrich metadata (equipment names/specs) via enrichCSS below.
         const otherFiles = processedFiles.filter(f => f !== ventSimFile);
         if (otherFiles.length > 0) {
+          console.log(`Source fusion: ${otherFiles.length} supplementary files found (${otherFiles.map(f => f.name).join(', ')})`);
           const { text: suppText, truncatedFiles } = buildSupplementaryText(otherFiles);
           if (css.metadata?.diagnostics) css.metadata.diagnostics.truncatedFiles = truncatedFiles;
           css = await enrichCSS(css, suppText);
 
           // v6: Restricted safe source fusion — extract fusible equipment from docs
+          console.log(`Source fusion: supplementary text length = ${suppText.length} chars`);
           const docFindings = await extractDocumentFindings(suppText, otherFiles.map(f => f.name));
           if (docFindings.length > 0) {
+            // Log anchor availability before fusion
+            const anchorTypes = new Set(['SPACE', 'TUNNEL_SEGMENT', 'WALL']);
+            const availAnchors = css.elements.filter(e => anchorTypes.has((e.type || '').toUpperCase()) && e.placement?.origin);
+            console.log(`Source fusion: ${docFindings.length} findings, ${availAnchors.length} anchors available (${[...new Set(availAnchors.map(a => a.type))].join(', ')})`);
             attemptSafeSourceFusion(css, docFindings, sourceFiles);
+          } else {
+            console.log('Source fusion: 0 findings extracted from supplementary docs — skipping fusion');
+            if (!css.metadata) css.metadata = {};
+            css.metadata.sourceFusion = { fusedCount: 0, rejectedCount: 0, log: [], note: 'no_findings_extracted' };
           }
+        } else {
+          console.log('Source fusion: no supplementary files provided alongside VentSim — skipping');
+          if (!css.metadata) css.metadata = {};
+          css.metadata.sourceFusion = { fusedCount: 0, rejectedCount: 0, log: [], note: 'no_supplementary_files' };
         }
 
         // v6+: Merge vision-extracted elements from image/scanned PDF files
@@ -3120,7 +3638,7 @@ export const handler = async (event) => {
         css.metadata = css.metadata || {};
         css.metadata.tracingReport = tracingReport;
         const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
-        return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport };
+        return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport: null };
       }
     }
 
@@ -3175,7 +3693,7 @@ export const handler = async (event) => {
         css.metadata = css.metadata || {};
         css.metadata.tracingReport = tracingReport;
         const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
-        return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport };
+        return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport: null };
       }
     }
 
@@ -3347,7 +3865,7 @@ Return ONLY valid JSON (no markdown, no explanations):
   "rooms": [{ "name": "string", "usage": "string", "length_m": number, "width_m": number, "height_m": number, "x_position_m": number, "y_position_m": number, "floor": number }],
   "openings": [{ "type": "DOOR|WINDOW", "wall_side": "NORTH|SOUTH|EAST|WEST", "x_offset_m": number, "width_m": number, "height_m": number, "sill_height_m": number, "floor": number }],
   "ventilation": { "system_type": "string", "num_fans": number },
-  "equipment": [{ "name": "string", "type": "string", "segment_name": "string (room/zone name if known)", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number, "floor": number }],
+  "equipment": [{ "name": "string", "type": "string", "segment_name": "string (room/zone name if known)", "x_position_m": number, "y_position_m": number, "length_m": number, "width_m": number, "height_m": number, "floor": number, "sourceExcerpt": "string (brief quote from source text that describes this equipment, max 100 chars)" }],
   "materials": { "walls": "string", "floor": "string", "roof": "string" },
   "structural_system": "FRAME|LOADBEARING|SHELL|TRUSS|OTHER",
   "structure": { "column_grid": [], "floor_to_floor_height_m": number, "num_floors": number },
@@ -3460,11 +3978,107 @@ Rules: Only use element_keys from the list. Only set name, description, material
       if (!spec.structural_system) spec.structural_system = 'LOADBEARING';
     }
 
+    // Refinement shortcut: if previousCSS + refinement text, use a modification prompt
+    // instead of re-extracting from scratch
+    async function refinementExtraction() {
+      console.log('Running refinement modification prompt (previousCSS available)...');
+      const prevJSON = JSON.stringify(previousCSS, null, 2);
+      const prompt = `You are an expert building information modelling engineer. You have a previously generated Construction Specification Schema (CSS JSON) and an engineer has requested a specific modification.
+
+Your task: Apply ONLY the engineer's requested change to the existing CSS and return the UPDATED JSON. Everything not explicitly mentioned must remain EXACTLY the same — same IDs, same geometry, same placement, same properties.
+
+CRITICAL RULES — READ CAREFULLY:
+- The JSON is a CSS (Construction Specification Schema) object with top-level keys: facility, domain, levels, elements, metadata, systems
+- Preserve ALL top-level keys and their structure exactly
+- Only modify elements within the "elements" array that match the engineer's request
+- Each element has: id, type, semanticType, name, placement, geometry, container, properties, material, confidence
+- Do NOT change element IDs of untouched elements
+- Do NOT modify wall, slab, column, beam, or shell elements unless the engineer EXPLICITLY mentions them
+- If the engineer says to REMOVE something, delete ONLY the matching element(s) from the elements array
+- If the engineer says to ADD something, add it with reasonable defaults and a new unique ID
+- If the engineer says to CHANGE/FIX something, update ONLY the matched element's specific properties
+- Do NOT re-interpret, reorder, or restructure the rest of the specification
+- The total number of untouched elements must remain exactly the same
+- Return the complete updated JSON (not just the diff)
+- Return ONLY valid JSON (no markdown, no explanations, no comments)
+
+=== ENGINEER'S MODIFICATION REQUEST ===
+${refinementText.trim()}
+===
+
+=== CURRENT CSS JSON ===
+${prevJSON}
+===
+
+Return the complete updated CSS JSON with ONLY the requested modification applied:`;
+
+      return await callBedrock(prompt, 12288);
+    }
+
     // Run extraction
     let buildingSpec;
     let enrichedCSS = null;
+    let isRefinement = false;
     try {
-      if (MULTI_PASS) {
+      if (previousCSS && refinementText) {
+        // Refinement path: LLM modifies existing CSS directly (returns CSS-format, not building-spec)
+        isRefinement = true;
+
+        // Back up previous CSS before overwriting
+        const refineCount = render?.refine_count || 1;
+        const backupKey = `uploads/${userId}/${renderId}/css/css_v${refineCount - 1}.json`;
+        try {
+          await s3.send(new PutObjectCommand({
+            Bucket: bucket, Key: backupKey,
+            Body: JSON.stringify(previousCSS), ContentType: 'application/json'
+          }));
+          console.log(`Backed up previous CSS to ${backupKey}`);
+        } catch (backupErr) {
+          console.warn(`CSS backup failed (${backupKey}):`, backupErr.message);
+        }
+
+        // Assign to enrichedCSS (not buildingSpec) because the LLM returns CSS-format JSON
+        enrichedCSS = await refinementExtraction();
+
+        // Validate the LLM returned valid CSS structure
+        if (!enrichedCSS || !enrichedCSS.elements || !Array.isArray(enrichedCSS.elements)) {
+          console.warn('Refinement LLM returned invalid CSS structure, falling back to previous CSS');
+          enrichedCSS = JSON.parse(JSON.stringify(previousCSS));
+        }
+
+        // Structure-aware drift rejection FIRST (before guard) — measures raw LLM output deviation
+        const driftResult = checkStructureAwareDrift(previousCSS, enrichedCSS, refinementText);
+        if (driftResult.rejected) {
+          console.warn(`Drift rejected — applying only targeted patches`);
+          enrichedCSS = applyTargetedPatches(previousCSS, enrichedCSS, driftResult.resolvedTargets);
+          if (!enrichedCSS.metadata) enrichedCSS.metadata = {};
+          enrichedCSS.metadata.driftRejection = {
+            driftScore: driftResult.driftScore,
+            structuralDrift: driftResult.structuralDrift,
+            equipmentDrift: driftResult.equipmentDrift,
+            resolvedTargetCount: driftResult.resolvedTargets.length,
+            ambiguousTargets: driftResult.ambiguousTargets.length > 0 ? driftResult.ambiguousTargets : undefined
+          };
+          // Surface ambiguous targets in refinement report
+          if (driftResult.ambiguousTargets.length > 0) {
+            if (!enrichedCSS.metadata.refinementReport) enrichedCSS.metadata.refinementReport = { summary: {} };
+            if (!enrichedCSS.metadata.refinementReport.summary) enrichedCSS.metadata.refinementReport.summary = {};
+            enrichedCSS.metadata.refinementReport.summary.unresolvedTargets =
+              (enrichedCSS.metadata.refinementReport.summary.unresolvedTargets || []).concat(driftResult.ambiguousTargets);
+          }
+        }
+
+        // Structural element guard SECOND: restore any structural elements the LLM (or patch) silently dropped
+        guardStructuralElements(previousCSS, enrichedCSS, refinementText);
+
+        // Build a minimal buildingSpec for AI title/description generation
+        buildingSpec = {
+          buildingName: enrichedCSS.facility?.name || previousCSS.facility?.name || 'Structure Model',
+          buildingType: enrichedCSS.domain || previousCSS.domain || 'BUILDING',
+          dimensions: enrichedCSS.metadata?.dimensions || previousCSS.metadata?.dimensions || { length_m: 20, width_m: 10, height_m: 3 },
+          rooms: [], equipment: [], openings: []
+        };
+      } else if (MULTI_PASS) {
         const result = await multiPassExtraction();
         buildingSpec = result.buildingSpec;
         enrichedCSS = result.enrichedCSS;
@@ -3492,9 +4106,13 @@ Rules: Only use element_keys from the list. Only set name, description, material
     }
 
     // v6+: Merge vision-extracted CSS elements and findings into the model
+    // Skip during refinement — vision elements were already merged in the original render
     const allVisionFindings = [];
     let visionElementCount = 0;
-    for (const pf of processedFiles) {
+    if (isRefinement) {
+      console.log('Refinement mode: skipping vision merge (elements preserved from base CSS)');
+    }
+    for (const pf of (isRefinement ? [] : processedFiles)) {
       if (!pf.visionCSS) continue;
       const { elements: vElems, findings: vFindings } = pf.visionCSS;
 
@@ -3522,8 +4140,9 @@ Rules: Only use element_keys from the list. Only set name, description, material
     }
 
     // v3.2: Facade fallback — generate openings from description if LLM returned none
+    // Skip during refinement — openings are already in the base CSS
     const structureClass = css.metadata?.structureClass || 'BUILDING';
-    if (structureClass === 'BUILDING' && (!buildingSpec.openings || buildingSpec.openings.length === 0)) {
+    if (!isRefinement && structureClass === 'BUILDING' && (!buildingSpec.openings || buildingSpec.openings.length === 0)) {
       const desc = (descriptionContent || '').toLowerCase();
       // Check for counted doors: "3 bay doors", "three garage doors", etc.
       const countMatch = desc.match(/(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(?:bay|garage|loading|roller|overhead)\s+doors?/i);
@@ -3583,7 +4202,16 @@ Rules: Only use element_keys from the list. Only set name, description, material
     css.metadata = css.metadata || {};
     css.metadata.tracingReport = tracingReport;
     const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
-    return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport };
+
+    // Build refinement report if this was a refinement
+    let refinementReport = null;
+    if (isRefinement && previousCSS) {
+      refinementReport = buildRefinementReport(previousCSS, css, refinementText);
+      css.metadata.refinementReport = refinementReport;
+      console.log(`Refinement report: ${JSON.stringify(refinementReport.summary)}`);
+    }
+
+    return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport };
   } catch (error) {
     console.error('ExtractBuildingSpec error:', error);
     // Let the error propagate to the Step Function so HandleFailure can mark it as failed
