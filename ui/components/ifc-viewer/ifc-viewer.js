@@ -39,7 +39,6 @@ const ifcViewer = {
             this.viewer.camera.look = [0, 0, 0];
             this.viewer.camera.up = [0, 0, 1];
 
-            console.log('xeokit Viewer initialized successfully');
         } catch (error) {
             console.error('Failed to initialize xeokit Viewer:', error);
             throw error;
@@ -57,7 +56,6 @@ const ifcViewer = {
         if (!this.ifcAPI.wasmModule) {
             throw new Error('web-ifc WASM module failed to initialize');
         }
-        console.log('web-ifc WASM initialized successfully');
     },
 
     /**
@@ -73,7 +71,6 @@ const ifcViewer = {
 
             // Re-init IfcAPI if WASM module is missing (can happen after errors)
             if (!this.ifcAPI?.wasmModule) {
-                console.warn('web-ifc WASM not ready, re-initializing...');
                 await this._initIfcAPI();
                 // Recreate loader with fresh IfcAPI
                 this.ifcLoader = new WebIFCLoaderPlugin(this.viewer, {
@@ -87,8 +84,6 @@ const ifcViewer = {
                 this.currentModel.destroy();
                 this.currentModel = null;
             }
-
-            console.log('Loading IFC file:', typeof srcOrArrayBuffer === 'string' ? srcOrArrayBuffer : `ArrayBuffer (${srcOrArrayBuffer.byteLength} bytes)`);
 
             // Prepare loader config based on input type
             const loaderConfig = { edges: true };
@@ -109,8 +104,6 @@ const ifcViewer = {
                 // Safety timeout — if neither event fires in 30s, resolve anyway
                 setTimeout(() => resolve(model), 30000);
             });
-
-            console.log('IFC file loaded successfully');
 
             // Fit model to view with orientation-aware camera placement
             try {
@@ -145,9 +138,8 @@ const ifcViewer = {
                         this.viewer.camera.up = [0, 0, 1];
                     }
                 }
-                console.log('Camera positioned to fit model');
             } catch (cameraError) {
-                console.warn('Camera positioning error (non-fatal):', cameraError);
+                // Non-fatal — viewer will still work with default camera position
             }
 
         } catch (error) {
@@ -178,7 +170,6 @@ const ifcViewer = {
         if (this.currentModel) {
             this.currentModel.destroy();
             this.currentModel = null;
-            console.log('Model cleared');
         }
     },
 
@@ -196,7 +187,6 @@ const ifcViewer = {
                 srcCanvas = document.getElementById('ifc-viewer-canvas');
             }
             if (!srcCanvas || srcCanvas.width === 0 || srcCanvas.height === 0) {
-                console.warn('[Snapshot] No canvas found or canvas has zero size');
                 return null;
             }
 
@@ -234,7 +224,6 @@ const ifcViewer = {
 
             return offscreen.toDataURL('image/jpeg', 0.72);
         } catch (e) {
-            console.warn('Snapshot capture failed:', e);
             return null;
         }
     },
@@ -397,7 +386,6 @@ const ifcViewer = {
                 this.viewer = null;
             }
             this.ifcLoader = null;
-            console.log('xeokit Viewer destroyed');
         } catch (error) {
             console.error('Error destroying viewer:', error);
         }

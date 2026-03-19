@@ -13,7 +13,7 @@ const messages = {
                 });
             };
         } catch (error) {
-            console.log('BroadcastChannel not available, using fallback');
+            // BroadcastChannel not available — local listeners still work
         }
     },
 

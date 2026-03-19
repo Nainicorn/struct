@@ -5,7 +5,7 @@ set -e
 
 LAMBDA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="builting-json-to-ifc"
-AWS_REGION="${AWS_REGION:-us-east-1}"
+AWS_REGION="${AWS_REGION:-us-gov-east-1}"
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:?AWS_ACCOUNT_ID not set}"
 
 # Build the Docker image for arm64 (required for Lambda)

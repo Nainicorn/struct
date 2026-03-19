@@ -678,7 +678,7 @@ const details = {
             section.classList.remove('hidden');
             this._renderSensorCards(content, sensors);
         } catch (e) {
-            console.warn('Failed to load sensors:', e);
+
             section.classList.add('hidden');
         }
     },
@@ -791,8 +791,6 @@ const details = {
 
         try {
             const renderId = this.currentRender.render_id;
-            console.log('Deleting render:', renderId);
-
             await rendersService.deleteRender(renderId);
 
             // Redirect to welcome screen (same as new render)
@@ -801,7 +799,6 @@ const details = {
             // Refresh renders list in sidebar
             document.dispatchEvent(new CustomEvent('rendersUpdated'));
 
-            console.log('Render deleted successfully');
         } catch (error) {
             console.error('Error deleting render:', error);
             await modalService.alert('Error', `Failed to delete render: ${error.message}`);

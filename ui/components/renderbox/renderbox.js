@@ -111,14 +111,6 @@ const renderbox = {
     },
 
     /**
-     * Display render metadata (title, description, source files)
-     */
-    _displayMetadata() {
-        // Title and description are now displayed in the details card
-        // No longer needed in renderbox
-    },
-
-    /**
      * Show error message to user
      */
     _showError(message) {
@@ -144,7 +136,6 @@ const renderbox = {
             // Initialize xeokit viewer (async - waits for WASM to load)
             await ifcViewer.init(this.viewerCanvas);
 
-            console.log('Viewer initialized in renderbox');
         } catch (error) {
             console.error('Failed to initialize viewer:', error);
             this._showError('Failed to initialize viewer');
@@ -157,13 +148,9 @@ const renderbox = {
      */
     async loadIFCFromUrl(url) {
         try {
-            console.log('Fetching IFC from signed URL...');
-
             const response = await fetch(url);
             if (!response.ok) throw new Error(`Failed to fetch IFC: ${response.status}`);
             const arrayBuffer = await response.arrayBuffer();
-
-            console.log('Fetched IFC ArrayBuffer:', arrayBuffer.byteLength, 'bytes');
 
             // Load via ArrayBuffer (xeokit will handle it directly without HTTP fetch)
             await ifcViewer.loadIFC(arrayBuffer);
@@ -189,7 +176,6 @@ const renderbox = {
                 }
             }
 
-            console.log('IFC file loaded successfully');
         } catch (error) {
             console.error('Failed to load IFC file:', error);
             throw error;
@@ -201,7 +187,6 @@ const renderbox = {
      * Handle "New Render" button click
      */
     _handleNewRender() {
-        console.log('New render requested');
         this._stopPolling();
         this._hideLoadingState();
         this.element.dataset.state = 'new-render';
@@ -232,8 +217,6 @@ const renderbox = {
      * Handle render selection from sidebar
      */
     async _handleRenderSelected(renderId) {
-        console.log('Render selected:', renderId);
-
         try {
             const render = await rendersService.getRender(renderId);
 
@@ -256,7 +239,7 @@ const renderbox = {
                 this._updateInputPlaceholder('Describe refinements to apply...');
                 this._updateInputLabel('Refinement');
                 this._clearDescriptionInput();
-                this._displayMetadata(render);
+
                 this._showTelemetryControls();
                 this._updateExportFormats(render);
 
@@ -315,7 +298,6 @@ const renderbox = {
 
             // Check if this is a parsing/corruption error from web-ifc
             if (errorMsg.includes('unexpected token') || errorMsg.includes('GetSetArgument') || errorMsg.includes('Invalid IFC')) {
-                console.warn('Corrupted IFC detected. Attempting to delete...');
                 const shouldDelete = await modalService.confirm(
                     'Corrupted Render',
                     'This render file is corrupted and cannot be loaded.\n\nWould you like to delete it?',
@@ -326,7 +308,6 @@ const renderbox = {
                 if (shouldDelete) {
                     try {
                         await rendersService.deleteRender(renderId);
-                        console.log('Corrupted render deleted');
                         // Refresh sidebar to remove deleted entry
                         document.dispatchEvent(new CustomEvent('rendersUpdated'));
                         // Reset to welcome screen
@@ -366,8 +347,6 @@ const renderbox = {
             // Add new files to staged files
             this.stagedFiles.push(...newFiles);
         }
-
-        console.log('Files staged:', this.stagedFiles.map(f => f.name));
 
         // Show file preview
         this._updateFilePreview();
@@ -1031,7 +1010,6 @@ const renderbox = {
             this.currentRenderTitle = render.ai_generated_title || render.title || null;
             this._updateInputPlaceholder('Describe refinements to apply...');
             this._updateInputLabel('Refinement');
-            this._displayMetadata(render);
             this._showTelemetryControls();
             this._updateExportFormats(render);
 
@@ -1049,8 +1027,6 @@ const renderbox = {
             // Load IFC in viewer (async, but UI is already showing)
             try {
                 await this.loadIFCFromUrl(downloadUrl);
-                console.log('Render completed and IFC loaded:', render.render_id);
-
                 // Extra capture for refinements: schedule a second capture at 4s as insurance
                 if (wasRefinement) {
                     setTimeout(() => {
@@ -1094,15 +1070,12 @@ const renderbox = {
                 requestAnimationFrame(() => {
                     if (this.element.dataset.renderId !== renderId) return;
                     const snap = ifcViewer.getSnapshot();
-                    console.log(`[Thumbnail] retry ${attempt}/${maxAttempts} for ${renderId}: ${snap ? 'captured (' + Math.round(snap.length / 1024) + 'KB)' : 'blank'}`);
                     if (snap) {
                         document.dispatchEvent(new CustomEvent('thumbnailCaptured', {
                             detail: { renderId, dataUrl: snap }
                         }));
                     } else if (attempt < maxAttempts - 1) {
                         this._captureThumbnail(renderId, attempt + 1);
-                    } else {
-                        console.warn('[Thumbnail] all attempts failed for', renderId);
                     }
                 });
             });
@@ -1127,7 +1100,6 @@ const renderbox = {
         const poll = () => {
             // Abort if a different render is now active (prevents cross-contamination)
             if (this.element.dataset.renderId !== renderId) {
-                console.log(`[Thumbnail] aborted for ${renderId} — render switched`);
                 return;
             }
 
@@ -1147,7 +1119,6 @@ const renderbox = {
 
             if (stableChecks >= 2 && currentCount > 0) {
                 // Settled — force render and capture
-                console.log(`[Thumbnail] scene settled after ${checkCount} checks (${currentCount} objects)`);
                 try { ifcViewer.viewer.scene.render(true); } catch (_) {}
                 requestAnimationFrame(() => {
                     // Final check: still the active render?
@@ -1167,7 +1138,6 @@ const renderbox = {
 
             if (checkCount >= maxChecks) {
                 // Timeout — fall back to progressive retry
-                console.log(`[Thumbnail] settle timeout after ${checkCount} checks, falling back`);
                 this._captureThumbnail(renderId, 1);
                 return;
             }

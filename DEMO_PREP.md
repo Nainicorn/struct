@@ -12,6 +12,16 @@ Builting takes messy, unstructured building data — text descriptions, PDFs, sp
 
 ## How Does the Full Pipeline Work?
 
+1. **User uploads files** (text, PDF, blueprints, spreadsheets, images, etc.) — the frontend requests presigned URLs from the backend, then uploads files directly to the S3 bucket (`builting-data`). No file data passes through the API server.
+2. **Frontend calls `POST /api/renders/{id}/finalize`** — this tells the backend "all files are uploaded, start processing." The router Lambda kicks off the Step Function (`builting-state-machine`).
+3. **builting-read** — fetches the render record from DynamoDB and lists all uploaded files from S3. Passes the file manifest to the next step.
+4. **builting-extract** — downloads every uploaded file from S3 and parses them based on format (PDF pages via vision, DXF geometry, XLSX tables, VentSim simulation files, DOCX text, plain text). Uses Claude Sonnet 4.5 on Amazon Bedrock with multi-pass extraction to convert unstructured content into a structured JSON format called CSS (Construction Specification Schema). Also generates an AI title and description for the render.
+5. **builting-resolve** — reads the raw extracted claims, normalizes units and naming conventions, groups claims by subject identity, resolves field-level conflicts (e.g., two sources disagree on a wall's height), assigns canonical IDs, and writes out clean normalized data.
+6. **builting-topology-engine** — the heaviest step. Takes the normalized CSS and runs structural inference: snaps wall endpoints together, infers slabs and roof elevations, builds a spatial topology graph, generates the building envelope, mounts equipment to host elements, computes connection angles (mitre/butt/tee), runs safety checks, and produces a validation/readiness score (0–100).
+7. **builting-generate** — converts the validated CSS into a real IFC4 file using IfcOpenShell (Python). Maps each element to its correct IFC class based on confidence level — high-confidence data gets full semantic BIM elements (IfcWall, IfcDoor, IfcDuctSegment, etc.), low-confidence data gets proxy geometry. Includes self-healing: if semantic generation fails for an element, it automatically falls back to a proxy box. Also exports glTF (.glb) and OBJ formats via trimesh.
+8. **builting-store** — writes the results back to DynamoDB: IFC file path in S3, element counts, validation scores, output mode, and all quality metadata.
+9. **builting-sensors** — seeds simulated sensor data for the digital twin. Maps IFC element types to appropriate sensor types (spaces get temperature sensors, ducts get airflow sensors, fans/pumps get equipment status sensors, columns/beams get structural load sensors). Stores readings in a dedicated DynamoDB table.
+10. **Frontend polls for completion** — the sidebar checks every 8 seconds for in-progress renders. When the Step Function finishes, the render status flips to "completed," the frontend fetches the IFC file (base64-encoded), decodes it, and loads it into the xeokit 3D viewer.
 
 ---
 
@@ -39,9 +49,84 @@ The sidebar also auto-polls every 8 seconds if it detects any in-progress render
 
 ## What Are the API Routes?
 
+All routes go through the `builting-router` Lambda via API Gateway (AWS_PROXY integration). Every route except `/api/auth` requires a Bearer token in the Authorization header.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `POST` | `/api/auth` | Login or signup — returns an HMAC-signed session token |
+| `GET` | `/api/renders` | List all renders for the authenticated user |
+| `POST` | `/api/renders` | Create a new render record (returns render ID + presigned upload info) |
+| `GET` | `/api/renders/{id}` | Get full details for a specific render |
+| `DELETE` | `/api/renders/{id}` | Delete a render and its associated S3 files |
+| `GET` | `/api/renders/{id}/download?format=ifc\|glb\|obj` | Download the generated model in IFC, glTF, or OBJ format |
+| `GET` | `/api/renders/{id}/report` | Download the validation report for a render |
+| `POST` | `/api/renders/{id}/finalize` | Start the render pipeline (triggers the Step Function) |
+| `POST` | `/api/renders/{id}/refine` | Re-process a render with user corrections |
+| `GET` | `/api/renders/{id}/sensors` | Get live sensor readings for the render's digital twin |
+| `POST` | `/api/renders/{id}/sensors/refresh` | Trigger a sensor data refresh |
+| `GET` | `/api/renders/{id}/sources/{fileName}` | Download an original source file the user uploaded |
+| `POST` | `/api/uploads/presigned` | Get presigned S3 URLs for direct browser-to-S3 file uploads |
+| `GET` | `/api/users/{id}` | Get user profile information |
+
+Every route also has an `OPTIONS` handler for CORS preflight requests.
+
 ---
 
 ## Full Architecture Diagram (Text)
+
+```
+User Browser (Vanilla JS + Handlebars + xeokit + web-ifc WASM)
+     │
+     ▼
+API Gateway (builting-api)
+     │
+     ▼
+builting-router (Lambda — Node.js)
+     │
+     ├── POST /auth ──────────────► DynamoDB (builting-users)
+     │
+     ├── POST /uploads/presigned ──► S3 (builting-data) ◄── browser uploads directly
+     │
+     ├── GET/POST/DELETE /renders ─► DynamoDB (builting-renders)
+     │
+     ├── GET /renders/{id}/sensors ► DynamoDB (builting-sensors)
+     │
+     └── POST /finalize ──────────► Step Functions (builting-state-machine)
+                                         │
+                                         ▼
+                              ┌─────────────────────────┐
+                              │     Pipeline (7 steps)   │
+                              │                          │
+                              │  1. builting-read        │
+                              │     (DynamoDB + S3 list) │
+                              │          ▼               │
+                              │  2. builting-extract     │
+                              │     (Bedrock / Claude    │
+                              │      Sonnet 4.5 + parsers)│
+                              │          ▼               │
+                              │  3. builting-resolve     │
+                              │     (normalize + merge)  │
+                              │          ▼               │
+                              │  4. builting-topology-   │
+                              │     engine (structure +  │
+                              │     geometry + validate) │
+                              │          ▼               │
+                              │  5. builting-generate    │
+                              │     (CSS → IFC4 + glTF   │
+                              │      + OBJ via Python)   │
+                              │          ▼               │
+                              │  6. builting-store       │
+                              │     (DynamoDB update)    │
+                              │          ▼               │
+                              │  7. builting-sensors     │
+                              │     (seed sensor data)   │
+                              └─────────────────────────┘
+                                         │
+                                         ▼
+                              S3 (builting-ifc) — generated models
+                              DynamoDB (builting-renders) — metadata
+                              DynamoDB (builting-sensors) — sensor readings
+```
 
 ---
 
@@ -59,7 +144,7 @@ The sidebar also auto-polls every 8 seconds if it detects any in-progress render
 - **Lambda separation** follows single-responsibility: each step does one thing well. This makes debugging easy — check the CloudWatch log group for the specific Lambda that failed.
 - **DynamoDB** is simple, fast, and scales automatically. The data model is straightforward (users + renders), so a NoSQL key-value store is a perfect fit.
 - **S3** handles file storage naturally — presigned URLs let the browser upload directly without the backend being a bottleneck.
-- **Bedrock** (Claude 3.5 Sonnet) provides the AI extraction without managing model infrastructure. It's an API call, not a deployed model.
+- **Bedrock** (Claude Sonnet 4.5) provides the AI extraction without managing model infrastructure. It's an API call, not a deployed model.
 - **Single IAM role** with least-privilege custom policies keeps security tight without role sprawl.
 
 ### Why Not [Alternative]?
@@ -87,7 +172,7 @@ Claude Code (Anthropic's CLI tool) was used as the primary development partner t
 
 - **Text-to-3D pipeline works end-to-end**: Upload a description of a building → get a valid IFC4 file
 - **Multi-format ingestion**: Handles .txt, .pdf, .xlsx, .docx, .dxf, VentSim files, and images
-- **AI-powered extraction**: Claude 3.5 Sonnet extracts building specs from unstructured text with multi-pass refinement
+- **AI-powered extraction**: Claude Sonnet 4.5 extracts building specs from unstructured text with multi-pass refinement
 - **Standards-compliant IFC4**: Output opens in Revit, BIM viewers, and web viewers
 - **Confidence-based output modes**: High-confidence data → full semantic BIM; low-confidence → proxy geometry with graceful degradation
 - **Quality scoring**: 0-100 score combining semantic coverage, validation, structural completeness, and Revit compatibility
@@ -95,7 +180,7 @@ Claude Code (Anthropic's CLI tool) was used as the primary development partner t
 - **Tunnel/infrastructure support**: Specialized pipeline for VentSim data with shell decomposition, duct segments, MEP systems, and spatial containment
 - **Self-healing generation**: If semantic generation fails, automatically falls back to proxy mode
 - **In-browser 3D viewing**: IFC files render in the browser with xeokit — no external tools needed
-- **Clean, minimal codebase**: ~7 frontend components, 6 Lambda functions, no unnecessary dependencies
+- **Clean, minimal codebase**: ~7 frontend components, 8 Lambda functions, no unnecessary dependencies
 
 ---
 
@@ -144,12 +229,12 @@ Claude Code (Anthropic's CLI tool) was used as the primary development partner t
 
 ## Future Improvements
 
-1. **Edit/retry failed renders** — let users fix input and re-run without re-uploading
+1. ~~**Edit/retry failed renders**~~ — **Done.** Users can refine renders via the `POST /api/renders/{id}/refine` endpoint, allowing corrections without re-uploading files.
 2. **Complex curved geometries** — tunnels with arcs, variable cross-sections
 3. **Revit round-trip proof** — formal validation that exported IFC imports cleanly into Revit
 4. **Real-time sensor ingestion** — IoT data feeding into the digital twin
 5. **CAD-quality geometry from blueprints** — advanced OCR and symbol recognition for architectural drawings
-6. **Native glTF/OBJ export** — export 3D models in game-engine-friendly formats
+6. ~~**Native glTF/OBJ export**~~ — **Done.** The generate Lambda now exports glTF (.glb) and OBJ formats via trimesh alongside the IFC file. Users can download any format via `GET /api/renders/{id}/download?format=ifc|glb|obj`.
 7. **Real-time collaboration** — multiple users working on the same model
 8. **Render versioning** — history of changes, diff between versions
 9. **Mobile-responsive viewer** — touch controls for 3D navigation
