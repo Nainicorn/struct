@@ -1,14 +1,18 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { createHash } from 'crypto';
 
 const dynamoClient = new DynamoDBClient({});
 const dynamo = DynamoDBDocumentClient.from(dynamoClient);
+const s3 = new S3Client({});
 const RENDERS_TABLE = process.env.RENDERS_TABLE || 'builting-renders';
 const IFC_BUCKET = process.env.IFC_BUCKET || 'builting-ifc';
+const DATA_BUCKET = process.env.DATA_BUCKET || 'builting-data';
 
 export const handler = async (event) => {
   console.log('StoreIFC input:', JSON.stringify(event, null, 2));
-  const { userId, renderId, ifcS3Path, ai_generated_title, ai_generated_description, elementCounts, outputMode, cssHash, tracingReport, validationSummary } = event;
+  const { userId, renderId, bucket, ifcS3Path, ai_generated_title, ai_generated_description, elementCounts, outputMode, cssHash, tracingReport, validationSummary, sourceFusion, structuralWarnings, refinementReport, refinementReportS3Key, readinessScore, exportReadiness, authoringSuitability, criticalIssueCount, validationWarningCount, validationProxyRatio, validationReportS3Key, generationModeRecommendation, readinessDelta, geometryFidelity, exportFormats, exportFiles } = event;
 
   try {
     // Handle failure mode — called by Step Function Catch to mark render as failed
@@ -38,46 +42,46 @@ export const handler = async (event) => {
     console.log(`Recording IFC path: ${ifc_s3_path}`);
 
     // Build update expression dynamically
-    let updateExpr = 'SET ifc_s3_path = :path, #status = :status';
+    let updateExpr = 'SET ifc_s3_path = :path, #status = :status, pipelineVersion = :pv';
     const exprValues = {
       ':path': ifc_s3_path,
-      ':status': 'completed'
+      ':status': 'completed',
+      ':pv': '2.0'
     };
     const exprNames = { '#status': 'status' };
 
-    if (ai_generated_title) {
-      updateExpr += ', ai_generated_title = :title';
-      exprValues[':title'] = ai_generated_title;
-    }
+    // Add optional fields dynamically
+    const optionalFields = {
+      ai_generated_title: ['title', ai_generated_title],
+      ai_generated_description: ['desc', ai_generated_description],
+      elementCounts: ['counts', elementCounts],
+      outputMode: ['mode', outputMode],
+      cssHash: ['hash', cssHash],
+      tracingReport: ['tr', tracingReport],
+      validationSummary: ['vs', validationSummary],
+      sourceFusion: ['sf', sourceFusion],
+      structuralWarnings: ['sw', structuralWarnings && structuralWarnings.length > 0 ? structuralWarnings : undefined],
+      refinementReport: ['rr', refinementReport],
+      refinementReportS3Key: ['rrsk', refinementReportS3Key],
+      readinessScore: ['rs', readinessScore],
+      exportReadiness: ['er', exportReadiness],
+      authoringSuitability: ['as', authoringSuitability],
+      criticalIssueCount: ['cic', criticalIssueCount],
+      validationWarningCount: ['vwc', validationWarningCount],
+      validationProxyRatio: ['vpr', validationProxyRatio],
+      validationReportS3Key: ['vrsk', validationReportS3Key],
+      generationModeRecommendation: ['gmr', generationModeRecommendation],
+      readinessDelta: ['rd', readinessDelta],
+      geometryFidelity: ['gf', geometryFidelity],
+      exportFormats: ['ef', exportFormats],
+      exportFiles: ['efl', exportFiles],
+    };
 
-    if (ai_generated_description) {
-      updateExpr += ', ai_generated_description = :desc';
-      exprValues[':desc'] = ai_generated_description;
-    }
-
-    if (elementCounts) {
-      updateExpr += ', elementCounts = :counts';
-      exprValues[':counts'] = elementCounts;
-    }
-
-    if (outputMode) {
-      updateExpr += ', outputMode = :mode';
-      exprValues[':mode'] = outputMode;
-    }
-
-    if (cssHash) {
-      updateExpr += ', cssHash = :hash';
-      exprValues[':hash'] = cssHash;
-    }
-
-    if (tracingReport) {
-      updateExpr += ', tracingReport = :tr';
-      exprValues[':tr'] = tracingReport;
-    }
-
-    if (validationSummary) {
-      updateExpr += ', validationSummary = :vs';
-      exprValues[':vs'] = validationSummary;
+    for (const [field, [alias, value]] of Object.entries(optionalFields)) {
+      if (value !== undefined && value !== null) {
+        updateExpr += `, ${field} = :${alias}`;
+        exprValues[`:${alias}`] = value;
+      }
     }
 
     if (elementCounts) {
@@ -109,6 +113,55 @@ export const handler = async (event) => {
     );
 
     console.log('DynamoDB updated with IFC path and metadata');
+
+    // Phase 6: Write artifact_manifest.json with v2 pipeline artifacts and lineage
+    const dataBucket = bucket || DATA_BUCKET;
+    const revision = event.renderRevision || 1;
+    const manifestKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/artifact_manifest.json`;
+
+    // Build artifact list dynamically from available S3 keys
+    const artifacts = [
+      { name: 'css_raw.json', s3Key: `uploads/${userId}/${renderId}/css/css_raw.json`, producedByStage: 'extract' },
+      { name: 'extract_debug.json', s3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/extract_debug.json`, producedByStage: 'extract' },
+      { name: 'claims.json', s3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/claims.json`, producedByStage: 'extract' },
+      { name: 'normalized_claims.json', s3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/normalized_claims.json`, producedByStage: 'resolve' },
+      { name: 'canonical_observed.json', s3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/canonical_observed.json`, producedByStage: 'resolve' },
+      { name: 'resolution_report.json', s3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/resolution_report.json`, producedByStage: 'resolve' },
+      { name: 'identity_map.json', s3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/identity_map.json`, producedByStage: 'resolve' },
+      { name: 'css_structure.json', s3Key: `uploads/${userId}/${renderId}/css/css_structure.json`, producedByStage: 'structure' },
+      { name: 'inferred.json', s3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/inferred.json`, producedByStage: 'structure' },
+      { name: 'css_processed.json', s3Key: `uploads/${userId}/${renderId}/css/css_processed.json`, producedByStage: 'geometry' },
+      { name: 'resolved.json', s3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/resolved.json`, producedByStage: 'geometry' },
+      validationReportS3Key ? { name: 'validation_report.json', s3Key: validationReportS3Key, producedByStage: 'validate' } : null,
+      refinementReportS3Key ? { name: 'refinement_report.json', s3Key: refinementReportS3Key, producedByStage: 'extract' } : null,
+      { name: 'model.ifc', s3Key: `${userId}/${renderId}/model.ifc`, producedByStage: 'generate' },
+      exportFiles?.glb ? { name: 'model.glb', s3Key: exportFiles.glb.s3Key, producedByStage: 'generate', format: 'glTF' } : null,
+      exportFiles?.obj ? { name: 'model.obj', s3Key: exportFiles.obj.s3Key, producedByStage: 'generate', format: 'OBJ' } : null,
+    ].filter(Boolean);
+
+    const manifest = {
+      pipelineVersion: '2.0',
+      renderRevision: revision,
+      generatedAt: new Date().toISOString(),
+      stageOrder: ['read', 'extract', 'resolve', 'structure', 'geometry', 'validate', 'generate', 'store'],
+      priorRevisionArtifactManifestS3Key: revision > 1
+        ? `uploads/${userId}/${renderId}/pipeline/v${revision - 1}/artifact_manifest.json`
+        : null,
+      refinementLineage: revision > 1
+        ? { revision, previousRevision: revision - 1 }
+        : null,
+      artifacts,
+      featureFlags: { PIPELINE_V2: true },
+      generatorCompatibilityMode: 'v2_css'
+    };
+
+    await s3.send(new PutObjectCommand({
+      Bucket: dataBucket,
+      Key: manifestKey,
+      Body: JSON.stringify(manifest),
+      ContentType: 'application/json'
+    }));
+    console.log(`Artifact manifest saved: s3://${dataBucket}/${manifestKey}`);
 
     return {
       ...event,

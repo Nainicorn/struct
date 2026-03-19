@@ -5,6 +5,7 @@ import uploadService from '../../services/uploadService.js';
 import usersService from '../../services/usersService.js';
 import rendersService from '../../services/rendersService.js';
 import modalService from '../../services/modalService.js';
+import sensorService from '../../services/sensorService.js';
 
 const renderbox = {
     element: null,
@@ -19,6 +20,8 @@ const renderbox = {
     currentRenderTitle: null, // AI-generated title of the active render (for download filename)
     _onElementPicked: null,   // Stored handler refs for deduplication
     _onElementPickCleared: null,
+    _telemetryActive: false,  // Whether sensor overlay is currently on
+    _currentSensors: [],      // Latest sensor data from polling
 
     // Initialize the renderbox component
     async init() {
@@ -142,9 +145,6 @@ const renderbox = {
             await ifcViewer.init(this.viewerCanvas);
 
             console.log('Viewer initialized in renderbox');
-
-            // Load sample IFC after viewer is ready
-            this._loadSampleIFC();
         } catch (error) {
             console.error('Failed to initialize viewer:', error);
             this._showError('Failed to initialize viewer');
@@ -152,34 +152,21 @@ const renderbox = {
     },
 
     /**
-     * Load IFC file from base64 data (called when user selects a completed render)
-     * @param {string} base64Data - Base64 encoded IFC file data
+     * Load IFC file from a signed S3 URL
+     * @param {string} url - Presigned S3 URL for the IFC file
      */
-    async loadIFCFromBase64(base64Data) {
+    async loadIFCFromUrl(url) {
         try {
-            const loadingIndicator = this.element.querySelector('.__renderbox-loading');
-            if (loadingIndicator) {
-                loadingIndicator.style.display = 'flex';
-            }
+            console.log('Fetching IFC from signed URL...');
 
-            console.log('Loading IFC from base64 data...');
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Failed to fetch IFC: ${response.status}`);
+            const arrayBuffer = await response.arrayBuffer();
 
-            // Convert base64 to ArrayBuffer (binary data)
-            const binaryString = atob(base64Data);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            const arrayBuffer = bytes.buffer;
-
-            console.log('Converted base64 to ArrayBuffer:', arrayBuffer.byteLength, 'bytes');
+            console.log('Fetched IFC ArrayBuffer:', arrayBuffer.byteLength, 'bytes');
 
             // Load via ArrayBuffer (xeokit will handle it directly without HTTP fetch)
             await ifcViewer.loadIFC(arrayBuffer);
-
-            if (loadingIndicator) {
-                loadingIndicator.style.display = 'none';
-            }
 
             // Resize viewer after layout change and focus canvas for interaction
             ifcViewer.resize();
@@ -190,12 +177,14 @@ const renderbox = {
             ifcViewer.setupPickEvents();
             this._bindPickEvents();
 
-            // Capture thumbnail only if one doesn't already exist in the cache.
-            // This keeps sidebar thumbnails static once captured.
+            // Only capture thumbnail if one doesn't already exist for this render.
+            // This keeps thumbnails static after initial capture — clicking an old render
+            // in the sidebar won't overwrite its thumbnail with a different camera angle.
             const renderId = this.element.dataset.renderId;
             if (renderId) {
                 const sidebar = (await import('../sidebar/sidebar.js')).default;
-                if (!sidebar.thumbnailCache.get(renderId)) {
+                const existingThumb = sidebar.thumbnailCache.get(renderId);
+                if (!existingThumb) {
                     this._captureThumbnail(renderId);
                 }
             }
@@ -203,30 +192,10 @@ const renderbox = {
             console.log('IFC file loaded successfully');
         } catch (error) {
             console.error('Failed to load IFC file:', error);
-
-            const loadingIndicator = this.element.querySelector('.__renderbox-loading');
-            if (loadingIndicator) {
-                loadingIndicator.style.display = 'none';
-            }
-
-            // Re-throw error to let caller handle it
             throw error;
         }
     },
 
-    /**
-     * Load sample IFC file for testing
-     */
-    async _loadSampleIFC() {
-        try {
-            console.log('Loading tunnel IFC for testing...');
-            await ifcViewer.loadIFC('/tunnel.ifc');
-            console.log('Tunnel IFC loaded successfully');
-        } catch (error) {
-            console.warn('Failed to load sample IFC:', error);
-            console.log('Initial state: waiting for render selection');
-        }
-    },
 
     /**
      * Handle "New Render" button click
@@ -240,18 +209,23 @@ const renderbox = {
         this._updateMessage('Select a render from the sidebar or create a new one');
         this._updateInputPlaceholder('Describe the structure you want to generate...');
         this._updateInputLabel('Describe your structure');
-        // Clear input content so placeholder reappears
-        const descriptionInput = this.element.querySelector('.__renderbox-description');
-        if (descriptionInput) {
-            descriptionInput.textContent = '';
-            descriptionInput.classList.add('is-empty');
-        }
+        this._clearDescriptionInput();
+        this._hideTelemetryControls();
         // Show welcome message again
         const messageEl = this.element.querySelector('.__renderbox-message');
         if (messageEl) {
             messageEl.style.display = 'block';
         }
         ifcViewer.clear();
+    },
+
+    // Clear the description input and restore placeholder
+    _clearDescriptionInput() {
+        const descriptionInput = this.element.querySelector('.__renderbox-description');
+        if (descriptionInput) {
+            descriptionInput.textContent = '';
+            descriptionInput.classList.add('is-empty');
+        }
     },
 
     /**
@@ -275,19 +249,16 @@ const renderbox = {
                 this.element.dataset.state = 'viewing-render';
 
                 // Load IFC from backend
-                const { fileData } = await rendersService.getDownloadUrl(renderId);
-                await this.loadIFCFromBase64(fileData);
+                const { downloadUrl } = await rendersService.getDownloadUrl(renderId);
+                await this.loadIFCFromUrl(downloadUrl);
                 this.currentRenderTitle = render.ai_generated_title || render.title || null;
                 this._updateMessage('');
                 this._updateInputPlaceholder('Describe refinements to apply...');
                 this._updateInputLabel('Refinement');
-                // Clear input content so placeholder reappears
-                const descriptionInput = this.element.querySelector('.__renderbox-description');
-                if (descriptionInput) {
-                    descriptionInput.textContent = '';
-                    descriptionInput.classList.add('is-empty');
-                }
+                this._clearDescriptionInput();
                 this._displayMetadata(render);
+                this._showTelemetryControls();
+                this._updateExportFormats(render);
 
                 // Notify details sidebar with full render object
                 document.dispatchEvent(new CustomEvent('renderSelected', {
@@ -295,16 +266,30 @@ const renderbox = {
                 }));
             } else if (render.status === 'failed') {
                 const errorMsg = render.error_message || 'Unknown error occurred during rendering';
-                const shouldDelete = await modalService.confirm(
+                const action = await modalService.choice(
                     'Render Failed',
-                    `This render failed to process.\n\nError: ${errorMsg}\n\nWould you like to delete it?`,
-                    'Delete',
-                    'Keep'
+                    `This render failed to process.\n\nError: ${errorMsg}`,
+                    [
+                        { text: 'Keep', value: 'keep' },
+                        { text: 'Delete', value: 'delete' },
+                        { text: 'Retry', value: 'retry', primary: true }
+                    ]
                 );
-                if (shouldDelete) {
+                if (action === 'delete') {
                     await rendersService.deleteRender(renderId);
                     document.dispatchEvent(new CustomEvent('rendersUpdated'));
                     document.dispatchEvent(new CustomEvent('newRenderRequested'));
+                } else if (action === 'retry') {
+                    try {
+                        await rendersService.retryRender(renderId);
+                        this.currentRenderId = renderId;
+                        this._showLoadingState();
+                        this._startPolling();
+                        document.dispatchEvent(new CustomEvent('rendersUpdated'));
+                    } catch (err) {
+                        console.error('Retry failed:', err);
+                        await modalService.alert('Retry Failed', err.message || 'Could not retry this render.');
+                    }
                 }
             } else if (render.status === 'processing' || render.status === 'pending') {
                 const ageMinutes = (Date.now() / 1000 - (render.created_at || 0)) / 60;
@@ -405,7 +390,7 @@ const renderbox = {
         const attachBtn = this.element.querySelector('.__renderbox-attach');
 
         if (this.stagedFiles.length === 0) {
-            stagingSection.style.display = 'none';
+            stagingSection.classList.add('hidden');
             if (attachBtn) {
                 attachBtn.disabled = false;
                 attachBtn.style.opacity = '1';
@@ -413,7 +398,7 @@ const renderbox = {
             return;
         }
 
-        stagingSection.style.display = 'block';
+        stagingSection.classList.remove('hidden');
 
         // Build file grid with box style
         fileGrid.innerHTML = this.stagedFiles.map((file, index) => {
@@ -477,7 +462,7 @@ const renderbox = {
             }
             const stagingSection = this.element.querySelector('.__renderbox-file-staging');
             if (stagingSection) {
-                stagingSection.style.display = 'none';
+                stagingSection.classList.add('hidden');
             }
 
             // Show loading state
@@ -511,10 +496,7 @@ const renderbox = {
 
             // Clear UI
             this.stagedFiles = [];
-            if (descriptionInput) {
-                descriptionInput.textContent = '';
-                descriptionInput.classList.add('is-empty');
-            }
+            this._clearDescriptionInput();
 
             // Start polling for render status
             this._startPolling(renderId);
@@ -530,7 +512,7 @@ const renderbox = {
             // Show file staging again on error
             const stagingSection = this.element.querySelector('.__renderbox-file-staging');
             if (stagingSection && this.stagedFiles.length > 0) {
-                stagingSection.style.display = 'block';
+                stagingSection.classList.remove('hidden');
             }
             this._showError(`Failed to upload: ${error.message}`);
         }
@@ -564,11 +546,11 @@ const renderbox = {
                 chipId.textContent = type;
                 chipId.style.display = 'block';
             }
-            chip.style.display = 'flex';
+            chip.classList.remove('hidden');
         };
 
         this._onElementPickCleared = () => {
-            if (chip) chip.style.display = 'none';
+            if (chip) chip.classList.add('hidden');
         };
 
         document.addEventListener('elementPicked', this._onElementPicked);
@@ -591,15 +573,16 @@ const renderbox = {
 
         try {
             this._showLoadingState('Submitting refinement...');
-            if (descriptionInput) {
-                descriptionInput.textContent = '';
-                descriptionInput.classList.add('is-empty');
-            }
+            this._clearDescriptionInput();
 
-            const { renderId: newRenderId } = await rendersService.refineRender(renderId, refinement);
+            await rendersService.refineRender(renderId, refinement);
 
-            // Start polling on the new render ID
-            this._startPolling(newRenderId);
+            // Clear stale thumbnail so sidebar shows placeholder until new capture
+            const sidebar = (await import('../sidebar/sidebar.js')).default;
+            sidebar.thumbnailCache.remove(renderId);
+
+            // Poll on the same render ID (refinement updates in-place)
+            this._startPolling(renderId);
         } catch (error) {
             console.error('Refinement failed:', error);
             this._hideLoadingState();
@@ -689,11 +672,57 @@ const renderbox = {
             updateEmptyState();
         }
 
-        // Download button inside viewer
+        // Download button inside viewer (primary = IFC)
         const downloadBtn = this.element.querySelector('.__renderbox-viewer-download');
         if (downloadBtn) {
             downloadBtn.addEventListener('click', async () => {
-                await this._handleDownload();
+                await this._handleDownload('ifc');
+            });
+        }
+
+        // Download format chevron + dropdown
+        const chevronBtn = this.element.querySelector('.__renderbox-download-chevron');
+        const dropdown = this.element.querySelector('.__renderbox-download-dropdown');
+        if (chevronBtn && dropdown) {
+            chevronBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const isOpen = !dropdown.classList.contains('hidden');
+                dropdown.classList.toggle('hidden');
+            });
+
+            dropdown.querySelectorAll('.__renderbox-download-option').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    dropdown.classList.add('hidden');
+                    const format = btn.dataset.format;
+                    await this._handleDownload(format);
+                });
+            });
+
+            // Click-away to close dropdown
+            document.addEventListener('click', (e) => {
+                if (!e.target.closest('.__renderbox-download-group')) {
+                    dropdown.classList.add('hidden');
+                }
+            });
+        }
+
+        // Telemetry overlay controls
+        const telemetryToggle = this.element.querySelector('.__renderbox-telemetry-toggle');
+        const telemetryType = this.element.querySelector('.__renderbox-telemetry-type');
+
+        if (telemetryToggle) {
+            telemetryToggle.addEventListener('click', () => {
+                this._toggleTelemetry();
+            });
+        }
+
+        if (telemetryType) {
+            telemetryType.addEventListener('change', () => {
+                if (this._telemetryActive && this._currentSensors.length > 0) {
+                    ifcViewer.applyTelemetryOverlay(this._currentSensors, telemetryType.value);
+                    this._updateLegend(telemetryType.value);
+                }
             });
         }
     },
@@ -705,7 +734,7 @@ const renderbox = {
     _showLoadingState(message) {
         const uploadLoadingEl = this.element.querySelector('.__renderbox-upload-loading');
         if (uploadLoadingEl) {
-            uploadLoadingEl.style.display = 'flex';
+            uploadLoadingEl.classList.remove('hidden');
             const textEl = uploadLoadingEl.querySelector('.__renderbox-loading-text');
             if (textEl) textEl.textContent = message;
         }
@@ -724,7 +753,7 @@ const renderbox = {
      */
     _hideLoadingState() {
         const uploadLoadingEl = this.element.querySelector('.__renderbox-upload-loading');
-        if (uploadLoadingEl) uploadLoadingEl.style.display = 'none';
+        if (uploadLoadingEl) uploadLoadingEl.classList.add('hidden');
         // Restore the empty-state logo
         const emptyIcon = this.element.querySelector('.__renderbox-empty-icon');
         if (emptyIcon) emptyIcon.style.display = '';
@@ -791,12 +820,29 @@ const renderbox = {
                 const errorMsg = render.error_message || 'Unknown error occurred during rendering';
                 console.error('Render failed with status:', errorMsg);
 
-                await modalService.alert(
+                const action = await modalService.choice(
                     'Render Failed',
-                    `Your render failed to process.\n\nError: ${errorMsg}\n\nYou can try again with different files or settings.`
+                    `Your render failed to process.\n\nError: ${errorMsg}`,
+                    [
+                        { text: 'New Render', value: 'new' },
+                        { text: 'Retry', value: 'retry', primary: true }
+                    ]
                 );
 
-                this._handleNewRender();
+                if (action === 'retry') {
+                    try {
+                        await rendersService.retryRender(this.currentRenderId);
+                        this._showLoadingState();
+                        this._startPolling();
+                        document.dispatchEvent(new CustomEvent('rendersUpdated'));
+                    } catch (err) {
+                        console.error('Retry failed:', err);
+                        await modalService.alert('Retry Failed', err.message || 'Could not retry this render.');
+                        this._handleNewRender();
+                    }
+                } else {
+                    this._handleNewRender();
+                }
                 document.dispatchEvent(new CustomEvent('rendersUpdated'));
                 return;
             } else if (render.status === 'pending' && elapsed > 180000) {
@@ -807,12 +853,29 @@ const renderbox = {
 
                 console.error('Render stalled in pending state after 3 minutes');
 
-                await modalService.alert(
-                    'Render Failed',
-                    'Your render appears to have failed. The pipeline did not respond within the expected time.\n\nPlease try again with different files or settings.'
+                const action = await modalService.choice(
+                    'Render Stalled',
+                    'Your render appears to have stalled. The pipeline did not respond within the expected time.',
+                    [
+                        { text: 'New Render', value: 'new' },
+                        { text: 'Retry', value: 'retry', primary: true }
+                    ]
                 );
 
-                this._handleNewRender();
+                if (action === 'retry') {
+                    try {
+                        await rendersService.retryRender(this.currentRenderId);
+                        this._showLoadingState();
+                        this._startPolling();
+                        document.dispatchEvent(new CustomEvent('rendersUpdated'));
+                    } catch (err) {
+                        console.error('Retry failed:', err);
+                        await modalService.alert('Retry Failed', err.message || 'Could not retry this render.');
+                        this._handleNewRender();
+                    }
+                } else {
+                    this._handleNewRender();
+                }
                 document.dispatchEvent(new CustomEvent('rendersUpdated'));
                 return;
             }
@@ -876,30 +939,46 @@ const renderbox = {
     },
 
     /**
-     * Handle download IFC file
+     * Show a brief toast notification
      */
-    async _handleDownload() {
+    _showToast(message) {
+        let toast = document.querySelector('.__toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.className = '__toast';
+            toast.innerHTML = '<span class="__toast-icon">&#10003;</span><span class="__toast-text"></span>';
+            document.body.appendChild(toast);
+        }
+        toast.querySelector('.__toast-text').textContent = message;
+        // Trigger reflow for animation restart
+        toast.classList.remove('--visible');
+        void toast.offsetWidth;
+        toast.classList.add('--visible');
+        clearTimeout(this._toastTimer);
+        this._toastTimer = setTimeout(() => toast.classList.remove('--visible'), 2500);
+    },
+
+    /**
+     * Handle download in requested format (ifc, glb, obj)
+     */
+    async _handleDownload(format = 'ifc') {
         if (!this.element.dataset.renderId) return;
 
         try {
             const renderId = this.element.dataset.renderId;
-            const { fileData } = await rendersService.getDownloadUrl(renderId);
+            const { downloadUrl } = await rendersService.getDownloadUrl(renderId, format);
 
-            // Convert base64 to blob
-            const binaryString = atob(fileData);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            const blob = new Blob([bytes], { type: 'application/octet-stream' });
-
-            // Build a clean filename from the AI-generated title, fallback to render ID
+            // Build a clean filename from the AI-generated title with correct extension
+            const ext = format === 'gltf' ? 'glb' : format;
             const title = this.currentRenderTitle;
             const filename = title
-                ? title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '.ifc'
-                : `render_${renderId}.ifc`;
+                ? title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '.' + ext
+                : `render_${renderId}.${ext}`;
 
-            // Create blob URL and trigger download
+            // Fetch from signed URL and trigger download
+            const response = await fetch(downloadUrl);
+            if (!response.ok) throw new Error(`Download failed: ${response.status}`);
+            const blob = await response.blob();
             const blobUrl = URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = blobUrl;
@@ -907,14 +986,31 @@ const renderbox = {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-
-            // Clean up blob URL
             URL.revokeObjectURL(blobUrl);
 
-            console.log('Download started');
+            this._showToast(`Downloaded ${ext.toUpperCase()} file`);
         } catch (error) {
             console.error('Error downloading render:', error);
             this._showError('Failed to download render: ' + error.message);
+        }
+    },
+
+    /**
+     * Show/hide export format dropdown chevron based on available formats
+     */
+    _updateExportFormats(render) {
+        const chevron = this.element.querySelector('.__renderbox-download-chevron');
+        if (!chevron) return;
+
+        const formats = render.exportFormats || render.export_formats || ['IFC4'];
+        const hasMultiple = formats.length > 1;
+        chevron.classList.toggle('hidden', !hasMultiple);
+
+        // Hide unavailable format options
+        const dropdown = this.element.querySelector('.__renderbox-download-dropdown');
+        if (dropdown) {
+            dropdown.querySelector('[data-format="glb"]').classList.toggle('hidden', !formats.includes('glTF'));
+            dropdown.querySelector('[data-format="obj"]').classList.toggle('hidden', !formats.includes('OBJ'));
         }
     },
 
@@ -926,6 +1022,9 @@ const renderbox = {
         this._hideLoadingState();
 
         try {
+            // Check if this is a refinement before changing state
+            const wasRefinement = this.element.dataset.state === 'viewing-render';
+
             // Update UI state FIRST so viewer is visible
             this.element.dataset.state = 'viewing-render';
             this.element.dataset.renderId = render.render_id;
@@ -933,6 +1032,8 @@ const renderbox = {
             this._updateInputPlaceholder('Describe refinements to apply...');
             this._updateInputLabel('Refinement');
             this._displayMetadata(render);
+            this._showTelemetryControls();
+            this._updateExportFormats(render);
 
             // Notify details sidebar with full render object
             document.dispatchEvent(new CustomEvent('renderSelected', {
@@ -943,12 +1044,19 @@ const renderbox = {
             document.dispatchEvent(new CustomEvent('rendersUpdated'));
 
             // Get IFC file data from backend
-            const { fileData } = await rendersService.getDownloadUrl(render.render_id);
+            const { downloadUrl } = await rendersService.getDownloadUrl(render.render_id);
 
             // Load IFC in viewer (async, but UI is already showing)
             try {
-                await this.loadIFCFromBase64(fileData);
+                await this.loadIFCFromUrl(downloadUrl);
                 console.log('Render completed and IFC loaded:', render.render_id);
+
+                // Extra capture for refinements: schedule a second capture at 4s as insurance
+                if (wasRefinement) {
+                    setTimeout(() => {
+                        this._captureThumbnail(render.render_id, 1);
+                    }, 4000);
+                }
             } catch (ifcError) {
                 console.error('IFC loading error:', ifcError);
                 this._showError('Failed to load 3D model: ' + ifcError.message);
@@ -960,22 +1068,33 @@ const renderbox = {
     },
 
     /**
-     * Capture thumbnail from viewer canvas with retry.
-     * Waits for xeokit to paint, retries if canvas is still blank.
+     * Capture thumbnail from viewer canvas with render-settled detection.
+     * Polls scene object count until stable, then captures.
+     * Falls back to progressive retry if settling fails.
      */
     _captureThumbnail(renderId, attempt = 0) {
         const maxAttempts = 4;
-        const delays = [800, 1800, 3500, 6000]; // progressive delays
+        const delays = [800, 1800, 3500, 6000];
 
+        // First attempt: use render-settled detection
+        if (attempt === 0) {
+            this._captureWhenSettled(renderId);
+            return;
+        }
+
+        // Fallback: progressive retry
         setTimeout(() => {
-            // Force xeokit to render a frame before capturing
+            // Abort if render switched
+            if (this.element.dataset.renderId !== renderId) return;
+
             if (ifcViewer.viewer) {
                 try { ifcViewer.viewer.scene.render(true); } catch (_) {}
             }
             requestAnimationFrame(() => {
                 requestAnimationFrame(() => {
+                    if (this.element.dataset.renderId !== renderId) return;
                     const snap = ifcViewer.getSnapshot();
-                    console.log(`[Thumbnail] attempt ${attempt + 1}/${maxAttempts} for ${renderId}: ${snap ? 'captured (' + Math.round(snap.length / 1024) + 'KB)' : 'blank'}`);
+                    console.log(`[Thumbnail] retry ${attempt}/${maxAttempts} for ${renderId}: ${snap ? 'captured (' + Math.round(snap.length / 1024) + 'KB)' : 'blank'}`);
                     if (snap) {
                         document.dispatchEvent(new CustomEvent('thumbnailCaptured', {
                             detail: { renderId, dataUrl: snap }
@@ -988,6 +1107,177 @@ const renderbox = {
                 });
             });
         }, delays[attempt]);
+    },
+
+    /**
+     * Render-settled detection: poll scene object count every 500ms.
+     * When count stabilizes for 2 consecutive checks, capture.
+     * Falls back after 5 seconds.
+     */
+    _captureWhenSettled(renderId) {
+        // Cancel any previous thumbnail capture
+        if (this._thumbPollTimer) clearTimeout(this._thumbPollTimer);
+
+        let lastCount = -1;
+        let stableChecks = 0;
+        let checkCount = 0;
+        const maxChecks = 10; // 5 seconds max
+        const pollInterval = 500;
+
+        const poll = () => {
+            // Abort if a different render is now active (prevents cross-contamination)
+            if (this.element.dataset.renderId !== renderId) {
+                console.log(`[Thumbnail] aborted for ${renderId} — render switched`);
+                return;
+            }
+
+            checkCount++;
+            let currentCount = 0;
+            try {
+                const objects = ifcViewer.viewer?.scene?.objects;
+                currentCount = objects ? Object.keys(objects).length : 0;
+            } catch (_) {}
+
+            if (currentCount > 0 && currentCount === lastCount) {
+                stableChecks++;
+            } else {
+                stableChecks = 0;
+            }
+            lastCount = currentCount;
+
+            if (stableChecks >= 2 && currentCount > 0) {
+                // Settled — force render and capture
+                console.log(`[Thumbnail] scene settled after ${checkCount} checks (${currentCount} objects)`);
+                try { ifcViewer.viewer.scene.render(true); } catch (_) {}
+                requestAnimationFrame(() => {
+                    // Final check: still the active render?
+                    if (this.element.dataset.renderId !== renderId) return;
+                    const snap = ifcViewer.getSnapshot();
+                    if (snap) {
+                        document.dispatchEvent(new CustomEvent('thumbnailCaptured', {
+                            detail: { renderId, dataUrl: snap }
+                        }));
+                    } else {
+                        // Settled but blank — fall back to retry
+                        this._captureThumbnail(renderId, 1);
+                    }
+                });
+                return;
+            }
+
+            if (checkCount >= maxChecks) {
+                // Timeout — fall back to progressive retry
+                console.log(`[Thumbnail] settle timeout after ${checkCount} checks, falling back`);
+                this._captureThumbnail(renderId, 1);
+                return;
+            }
+
+            this._thumbPollTimer = setTimeout(poll, pollInterval);
+        };
+
+        // Start polling after initial 500ms delay
+        this._thumbPollTimer = setTimeout(poll, pollInterval);
+    },
+
+    // ==================== Telemetry Overlay ====================
+
+    /**
+     * Show telemetry controls (called when viewing a completed render)
+     */
+    _showTelemetryControls() {
+        const controls = this.element.querySelector('.__renderbox-telemetry');
+        if (controls) controls.classList.remove('hidden');
+    },
+
+    /**
+     * Hide telemetry controls and clean up overlay
+     */
+    _hideTelemetryControls() {
+        const controls = this.element.querySelector('.__renderbox-telemetry');
+        if (controls) controls.classList.add('hidden');
+
+        if (this._telemetryActive) {
+            this._telemetryActive = false;
+            this._currentSensors = [];
+            sensorService.stopPolling();
+            ifcViewer.clearTelemetryOverlay();
+
+            const toggle = this.element.querySelector('.__renderbox-telemetry-toggle');
+            if (toggle) toggle.classList.remove('active');
+
+            const typeSelect = this.element.querySelector('.__renderbox-telemetry-type');
+            if (typeSelect) typeSelect.classList.add('hidden');
+
+            const legend = this.element.querySelector('.__renderbox-telemetry-legend');
+            if (legend) legend.classList.add('hidden');
+        }
+    },
+
+    /**
+     * Toggle telemetry overlay on/off
+     */
+    _toggleTelemetry() {
+        const renderId = this.element.dataset.renderId;
+        if (!renderId) return;
+
+        const toggle = this.element.querySelector('.__renderbox-telemetry-toggle');
+        const typeSelect = this.element.querySelector('.__renderbox-telemetry-type');
+        const legend = this.element.querySelector('.__renderbox-telemetry-legend');
+
+        if (this._telemetryActive) {
+            // Turn off
+            this._telemetryActive = false;
+            sensorService.stopPolling();
+            ifcViewer.clearTelemetryOverlay();
+            if (toggle) toggle.classList.remove('active');
+            if (typeSelect) typeSelect.classList.add('hidden');
+            if (legend) legend.classList.add('hidden');
+            this._currentSensors = [];
+
+            // Notify details panel
+            document.dispatchEvent(new CustomEvent('telemetryToggled', { detail: { active: false } }));
+        } else {
+            // Turn on
+            this._telemetryActive = true;
+            if (toggle) toggle.classList.add('active');
+            if (typeSelect) { typeSelect.classList.remove('hidden'); typeSelect.value = 'all'; }
+            if (legend) legend.classList.remove('hidden');
+
+            sensorService.startPolling(renderId, (sensors) => {
+                this._currentSensors = sensors;
+                if (this._telemetryActive) {
+                    const filterType = typeSelect?.value || 'all';
+                    ifcViewer.applyTelemetryOverlay(sensors, filterType);
+                    this._updateLegend(filterType);
+
+                    // Notify details panel with sensor data
+                    document.dispatchEvent(new CustomEvent('telemetryToggled', {
+                        detail: { active: true, sensors }
+                    }));
+                }
+            });
+        }
+    },
+
+    /**
+     * Update legend labels based on selected sensor type
+     */
+    _updateLegend(filterType) {
+        const minLabel = this.element.querySelector('.__renderbox-legend-min');
+        const maxLabel = this.element.querySelector('.__renderbox-legend-max');
+        if (!minLabel || !maxLabel) return;
+
+        const ranges = {
+            TEMPERATURE:    { min: '18C', max: '26C' },
+            AIRFLOW:        { min: '0.5', max: '5.0 m/s' },
+            STRUCTURAL_LOAD:{ min: '50%', max: '95%' },
+            EQUIPMENT_STATUS: { min: 'OK', max: 'Fault' },
+            all:            { min: 'Low', max: 'High' }
+        };
+
+        const r = ranges[filterType] || ranges.all;
+        minLabel.textContent = r.min;
+        maxLabel.textContent = r.max;
     }
 };
 

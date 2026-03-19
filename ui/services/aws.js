@@ -27,6 +27,13 @@ const aws = {
       ...options,
     });
 
+    // Session expired or token invalid — clear cookie and redirect to login
+    if (response.status === 401) {
+      cookieService.delete('builting-user');
+      window.location.href = '/';
+      throw new Error('Session expired. Please log in again.');
+    }
+
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       throw new Error(error.message || `API error: ${response.status}`);

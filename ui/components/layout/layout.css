@@ -17,6 +17,9 @@ body {
     display: flex;
     flex: 1;
     overflow: hidden;
+    max-width: 1920px;
+    margin: 0 auto;
+    width: 100%;
 }
 
 .__sidebar {
@@ -26,7 +29,7 @@ body {
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    transition: width 0.2s ease-out;
+    transition: width var(--transition-layout);
     flex-shrink: 0;
 }
 
@@ -54,7 +57,7 @@ body[data-collapsed="true"] .__sidebar {
     align-items: stretch;
     justify-content: flex-start;
     padding: 0;
-    transition: width 0.25s ease, border-color 0.25s ease;
+    transition: width var(--transition-layout), border-color var(--transition-layout);
     flex-shrink: 0;
 }
 
@@ -219,7 +222,7 @@ body[data-collapsed="true"] .__sidebar {
         width: 250px;
         z-index: 200;
         transform: translateX(-100%);
-        transition: transform 0.25s ease-out;
+        transition: transform var(--transition-layout);
         box-shadow: none;
     }
 

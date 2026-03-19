@@ -18,7 +18,7 @@
     gap: 12px;
     width: 250px;
     padding: 12px 16px;
-    transition: all 0.2s ease-out;
+    transition: all var(--transition-layout);
     flex-shrink: 0;
     background: var(--bg-surface);
     border-right: 1px solid var(--border-subtle);
@@ -75,7 +75,7 @@ body[data-collapsed="true"] .__header-toggle {
     letter-spacing: 0.06em;
     color: var(--text-primary);
     white-space: nowrap;
-    transition: opacity 0.2s ease;
+    transition: opacity var(--transition-layout);
 }
 
 body[data-collapsed="true"] .__header-logo-text {

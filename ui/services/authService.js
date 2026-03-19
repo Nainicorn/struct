@@ -43,9 +43,10 @@ const authenticateService = {
         }
     },
 
-    // Check if user is authenticated
+    // Check if user is authenticated (token must exist and be non-empty)
     isAuthenticated() {
-        return cookieService.get('builting-user') !== null;
+        const token = cookieService.get('builting-user');
+        return token !== null && token !== '';
     },
 
     // Logout - clear cookie and redirect

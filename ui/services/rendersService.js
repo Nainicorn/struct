@@ -13,8 +13,9 @@ const rendersService = {
     return await aws.call(`/api/renders/${renderId}`, { method: 'DELETE' });
   },
 
-  async getDownloadUrl(renderId) {
-    return await aws.call(`/api/renders/${renderId}/download`, { method: 'GET' });
+  async getDownloadUrl(renderId, format = 'ifc') {
+    const query = format !== 'ifc' ? `?format=${format}` : '';
+    return await aws.call(`/api/renders/${renderId}/download${query}`, { method: 'GET' });
   },
 
   async getSourceFile(renderId, fileName) {
@@ -23,6 +24,10 @@ const rendersService = {
 
   async getVerificationReport(renderId) {
     return await aws.call(`/api/renders/${renderId}/report`, { method: 'GET' });
+  },
+
+  async retryRender(renderId) {
+    return await aws.call(`/api/renders/${renderId}/retry`, { method: 'POST' });
   },
 
   async refineRender(renderId, refinement) {

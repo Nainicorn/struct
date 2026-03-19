@@ -47,6 +47,8 @@ const thumbnailCache = {
 const sidebar = {
     element: null,
     thumbnailCache, // Expose for renderbox to use
+    _pollTimer: null,
+    _trackedInProgress: new Set(), // render IDs that are processing/pending
 
     // Initialize the sidebar component
     async init() {
@@ -72,7 +74,7 @@ const sidebar = {
     _bindListeners() {
         // Listen for renders list updates
         document.addEventListener('rendersUpdated', () => {
-            this.loadRenders();
+            this.loadRenders(true);
         });
 
         // Listen for thumbnail captures from the viewer
@@ -108,14 +110,17 @@ const sidebar = {
 
     /**
      * Load all renders for current user
+     * @param {boolean} silent - If true, don't show loading spinner (used for poll refreshes)
      */
-    async loadRenders() {
+    async loadRenders(silent = false) {
         try {
             const rendersContainer = this.element.querySelector('.__sidebar-renders');
             if (!rendersContainer) return;
 
-            // Show loading state
-            rendersContainer.innerHTML = '<div class="__renders-loading"><div class="__spinner"></div></div>';
+            // Show loading state only on first load, not during poll refreshes
+            if (!silent && rendersContainer.children.length === 0) {
+                rendersContainer.innerHTML = '<div class="__renders-loading"><div class="__spinner"></div></div>';
+            }
 
             const data = await rendersService.getRenders();
             const renders = data.renders || [];
@@ -143,11 +148,11 @@ const sidebar = {
         const rendersContainer = this.element.querySelector('.__sidebar-renders');
         if (!rendersContainer) return;
 
-        // Filter out failed renders - show completed and processing
-        const successfulRenders = renders.filter(r => r.status !== 'failed');
+        // Filter out failed renders
+        const visibleRenders = renders.filter(r => r.status !== 'failed');
         const emptyEl = this.element.querySelector('.__sidebar-empty');
 
-        if (successfulRenders.length === 0) {
+        if (visibleRenders.length === 0) {
             rendersContainer.innerHTML = '';
             if (emptyEl) emptyEl.style.display = '';
             return;
@@ -155,7 +160,33 @@ const sidebar = {
         if (emptyEl) emptyEl.style.display = 'none';
 
         // Sort renders by created_at (newest first)
-        const sorted = successfulRenders.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+        const sorted = visibleRenders.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+
+        // Track in-progress renders for auto-polling
+        const inProgress = new Set();
+        sorted.forEach(r => {
+            if (r.status === 'processing' || r.status === 'pending' || r.status === 'uploading') {
+                inProgress.add(r.render_id);
+            }
+        });
+
+        // Check if any previously in-progress renders just completed
+        for (const rid of this._trackedInProgress) {
+            if (!inProgress.has(rid)) {
+                const render = sorted.find(r => r.render_id === rid);
+                if (render && render.status === 'completed') {
+                    this._notifyRenderCompleted(render);
+                }
+            }
+        }
+        this._trackedInProgress = inProgress;
+
+        // Start or stop polling based on whether there are in-progress renders
+        if (inProgress.size > 0) {
+            this._startInProgressPolling();
+        } else {
+            this._stopInProgressPolling();
+        }
 
         rendersContainer.innerHTML = sorted.map(render => {
             const fullTitle = render.ai_generated_title || render.title || 'Untitled Render';
@@ -180,10 +211,11 @@ const sidebar = {
                    </svg>`;
 
             return `
-                <div class="__render-item" data-render-id="${render.render_id}" tabindex="0" role="button" aria-label="${fullTitle}">
+                <div class="__render-item" data-render-id="${render.render_id}" tabindex="0" role="button" aria-label="${fullTitle} — ${statusLabel}">
                     <div class="__render-thumb">
                         ${thumbContent}
-                        <span class="__render-item-status-dot ${dotClass}"></span>
+                        <span class="__render-item-status-dot ${dotClass}" title="${statusLabel}"></span>
+                        ${status !== 'completed' ? `<span class="__render-item-status-label __render-item-status-label--${status}">${statusLabel}</span>` : ''}
                     </div>
                     <div class="__render-item-info">
                         <div class="__render-item-content">
@@ -236,6 +268,46 @@ const sidebar = {
             img.alt = '';
             img.draggable = false;
             thumb.prepend(img);
+        }
+    },
+
+    /**
+     * Start polling sidebar for in-progress render updates
+     */
+    _startInProgressPolling() {
+        if (this._pollTimer) return; // already polling
+        this._pollTimer = setInterval(() => {
+            this.loadRenders(true); // silent refresh — no spinner flash
+        }, 8000); // poll every 8 seconds
+    },
+
+    /**
+     * Stop polling for in-progress renders
+     */
+    _stopInProgressPolling() {
+        if (this._pollTimer) {
+            clearInterval(this._pollTimer);
+            this._pollTimer = null;
+        }
+    },
+
+    /**
+     * Show notification when a render completes
+     */
+    async _notifyRenderCompleted(render) {
+        const title = render.ai_generated_title || render.title || 'Untitled Render';
+        const action = await modalService.choice(
+            'Render Complete',
+            `"${title}" has finished processing.`,
+            [
+                { text: 'Dismiss', value: 'dismiss' },
+                { text: 'View', value: 'view', primary: true }
+            ]
+        );
+        if (action === 'view') {
+            document.dispatchEvent(new CustomEvent('renderSelected', {
+                detail: { id: render.render_id }
+            }));
         }
     },
 

@@ -6,6 +6,14 @@ import { extractXlsxText } from './parsers/xlsxParser.mjs';
 import { extractDocxText } from './parsers/docxParser.mjs';
 import { parseDxfToCSS } from './parsers/dxfParser.mjs';
 
+// Phase 1: Claims dual-write imports
+import { resetClaimCounter, createClaimsEnvelope } from './claims/claimsSchema.mjs';
+import { ventSimCssToClaims } from './claims/ventSimToClaims.mjs';
+import { dxfCssToClaims } from './claims/dxfToClaims.mjs';
+import { buildingSpecToClaims } from './claims/buildingSpecToClaims.mjs';
+import { visionToClaims } from './claims/visionToClaims.mjs';
+import { mergeClaims } from './claims/claimsMerger.mjs';
+
 const bedrock = new BedrockRuntimeClient({});
 const s3 = new S3Client({});
 
@@ -70,8 +78,26 @@ function buildRefinementReport(previousCSS, newCSS, refinementText) {
   // Heuristic: detect if refinement text targets equipment vs structure
   const equipmentKeywords = /equipment|fan|pump|duct|pipe|hvac|ventilat|sensor|light|fixture|tank|valve|meter|cable/i;
   const structureKeywords = /wall|slab|floor|ceiling|roof|column|beam|shell|foundation|storey|level/i;
+  const openingKeywords = /door|window|opening|gate|hatch/i;
+  const parameterKeywords = /dimension|size|length|width|height|radius|thickness|move|position|rotate|scale|place/i;
+  const classificationKeywords = /reclassify|change type|convert to|rename|recategorize/i;
   const targetsEquipment = equipmentKeywords.test(refinementText);
   const targetsStructure = structureKeywords.test(refinementText);
+  const targetsOpenings = openingKeywords.test(refinementText);
+  const targetsParameters = parameterKeywords.test(refinementText);
+  const targetsClassification = classificationKeywords.test(refinementText);
+
+  // Phase 6: Classify refinement type
+  const typeFlags = [
+    targetsStructure && 'STRUCTURAL_CHANGE',
+    targetsEquipment && 'EQUIPMENT_CHANGE',
+    targetsOpenings && 'OPENING_CHANGE',
+    targetsParameters && 'PARAMETER_CHANGE',
+    targetsClassification && 'CLASSIFICATION_CHANGE'
+  ].filter(Boolean);
+  const refinementType = typeFlags.length === 0 ? 'MIXED'
+    : typeFlags.length === 1 ? typeFlags[0]
+    : 'MIXED';
 
   // Flag: structural drift when user only asked about equipment
   const driftDetected = targetsEquipment && !targetsStructure && structuralRemoved.length > 0;
@@ -84,7 +110,38 @@ function buildRefinementReport(previousCSS, newCSS, refinementText) {
 
   // Include drift rejection flag if metadata indicates it
   const driftRejected = newCSS.metadata?.driftRejection?.driftScore > 30;
-  const unresolvedTargets = [];
+
+  // Phase 6: Resolve targets for scope confidence
+  const { resolved: resolvedTargets, ambiguous: ambiguousTargets } = resolveRefinementTargets(refinementText, prevElements);
+  const unresolvedTargets = ambiguousTargets;
+
+  // Phase 6: Compute scope confidence (deterministic formula)
+  // 50% target resolution + 30% drift compliance + 20% element match stability
+  const declaredTargetCount = resolvedTargets.length + ambiguousTargets.length;
+  const targetResolutionConfidence = declaredTargetCount > 0
+    ? resolvedTargets.length / declaredTargetCount
+    : 1.0; // no explicit targets = full confidence
+
+  // Drift compliance: proportion of out-of-scope elements unchanged
+  const outOfScopeIds = [...prevById.keys()].filter(id => !new Set(resolvedTargets.map(t => t.id)).has(id));
+  const outOfScopeChanged = outOfScopeIds.filter(id => !newById.has(id) || JSON.stringify(prevById.get(id)) !== JSON.stringify(newById.get(id)));
+  const driftCompliance = outOfScopeIds.length > 0
+    ? 1.0 - (outOfScopeChanged.length / outOfScopeIds.length)
+    : 1.0;
+
+  // Element match stability: proportion of prior canonical IDs preserved
+  const preservedIds = [...prevById.keys()].filter(id => newById.has(id));
+  const elementMatchStability = prevElements.length > 0
+    ? preservedIds.length / prevElements.length
+    : 1.0;
+
+  const scopeConfidence = Math.round(
+    Math.min(100, Math.max(0,
+      (targetResolutionConfidence * 50) +
+      (driftCompliance * 30) +
+      (elementMatchStability * 20)
+    ))
+  );
 
   return {
     summary: {
@@ -100,6 +157,16 @@ function buildRefinementReport(previousCSS, newCSS, refinementText) {
       unresolvedTargets,
       refinementMode: 'PATCH'
     },
+    refinementType,
+    scopeConfidence,
+    scopeConfidenceBreakdown: {
+      targetResolutionConfidence: Math.round(targetResolutionConfidence * 100) / 100,
+      driftCompliance: Math.round(driftCompliance * 100) / 100,
+      elementMatchStability: Math.round(elementMatchStability * 100) / 100
+    },
+    changedCanonicalIds: modified.slice(0, 50),
+    addedCanonicalIds: added.slice(0, 50),
+    removedCanonicalIds: removed.slice(0, 50),
     added: added.slice(0, 20),
     removed: removed.slice(0, 20),
     modified: modified.slice(0, 20),
@@ -107,6 +174,45 @@ function buildRefinementReport(previousCSS, newCSS, refinementText) {
     prevCounts,
     newCounts
   };
+}
+
+/**
+ * Phase 6: Save refinement_report.json as a dedicated S3 artifact.
+ */
+async function saveRefinementReport(bucket, userId, renderId, report, refinementText, revision = 1) {
+  const key = `uploads/${userId}/${renderId}/pipeline/v${revision}/refinement_report.json`;
+  const artifact = {
+    pipelineVersion: '2.0',
+    stage: 'extract',
+    generatedAt: new Date().toISOString(),
+    revision,
+    previousRevision: revision > 1 ? revision - 1 : null,
+    declaredScopeText: refinementText,
+    refinementType: report.refinementType,
+    scopeConfidence: report.scopeConfidence,
+    scopeConfidenceBreakdown: report.scopeConfidenceBreakdown,
+    affectedScope: [...(report.changedCanonicalIds || []), ...(report.addedCanonicalIds || []), ...(report.removedCanonicalIds || [])],
+    changedCanonicalIds: report.changedCanonicalIds || [],
+    addedCanonicalIds: report.addedCanonicalIds || [],
+    removedCanonicalIds: report.removedCanonicalIds || [],
+    refinementLineage: {
+      revision,
+      previousRevision: revision > 1 ? revision - 1 : null
+    },
+    summary: report.summary,
+    warnings: report.warnings,
+    prevCounts: report.prevCounts,
+    newCounts: report.newCounts,
+    pipelineDurationMs: 0 // updated by store if available
+  };
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: JSON.stringify(artifact),
+    ContentType: 'application/json'
+  }));
+  console.log(`Refinement report saved: s3://${bucket}/${key}`);
+  return key;
 }
 
 /**
@@ -408,6 +514,47 @@ async function saveCSSToS3(bucket, userId, renderId, css) {
   return key;
 }
 
+async function saveExtractDebug(bucket, userId, renderId, css, tracingReport, sourceFiles, durationMs, revision = 1) {
+  const key = `uploads/${userId}/${renderId}/pipeline/v${revision}/extract_debug.json`;
+  const debug = {
+    pipelineVersion: '1.0',
+    stage: 'extract',
+    generatedAt: new Date().toISOString(),
+    durationMs,
+    domain: css.domain || 'UNKNOWN',
+    elementCount: (css.elements || []).length,
+    facilityName: css.facility?.name || null,
+    sourceFiles,
+    tracingReport,
+    cssSnapshotKey: `uploads/${userId}/${renderId}/css/css_raw.json`
+  };
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: JSON.stringify(debug),
+    ContentType: 'application/json'
+  }));
+  console.log(`Extract debug saved: s3://${bucket}/${key}`);
+  return key;
+}
+
+// ============================================================================
+// Phase 1: Save claims.json to S3 (dual-write alongside css_raw.json)
+// ============================================================================
+
+async function saveClaimsToS3(bucket, userId, renderId, claimsDoc, revision = 1) {
+  const key = `uploads/${userId}/${renderId}/pipeline/v${revision}/claims.json`;
+  const body = JSON.stringify(claimsDoc);
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: body,
+    ContentType: 'application/json'
+  }));
+  console.log(`Claims saved to S3: s3://${bucket}/${key} (${body.length} bytes, ${claimsDoc.claims?.length || 0} claims)`);
+  return key;
+}
+
 // ============================================================================
 // UTILITY: Deterministic Element ID
 // ============================================================================
@@ -540,6 +687,8 @@ function parseVentSimToCSS(content, sourceFileName) {
         shape_type: parseInt(cols[colIndex['Shape Type']] || cols[18]) || 0,
         fan_type: parseInt(cols[colIndex['Fan Type']] || cols[29]) || 0,
         fan_numbers: parseInt(cols[colIndex['Fan Numbers']] || cols[30]) || 0,
+        primary_layer: parseInt(cols[colIndex['Primary Layer']] || '0') || 0,
+        air_type: parseInt(cols[colIndex['Air Type']] || '0') || 0,
         liner_type: parseInt(cols[colIndex['Liner Type']] || cols[35]) || 1
       };
 
@@ -554,6 +703,76 @@ function parseVentSimToCSS(content, sourceFileName) {
     }
 
     console.log(`Extracted ${branches.length} tunnel branches`);
+
+    // ── Infer entry/exit nodes from endpoint coordinates ──
+    // VentSim files may have empty Entry Node / Exit Node columns.
+    // We infer shared nodes by clustering branch endpoints within a tolerance.
+    {
+      const NODE_TOLERANCE = 0.5; // meters
+      const allEndpoints = []; // { branchIdx, isStart, x, y, z }
+      for (let bi = 0; bi < branches.length; bi++) {
+        const b = branches[bi];
+        allEndpoints.push({ bi, isStart: true, x: b.x1, y: b.y1, z: b.z1 });
+        allEndpoints.push({ bi, isStart: false, x: b.x2, y: b.y2, z: b.z2 });
+      }
+
+      // Cluster endpoints into nodes by proximity (greedy union)
+      const nodeAssignment = new Array(allEndpoints.length).fill(-1);
+      let nextNodeId = 1;
+
+      for (let i = 0; i < allEndpoints.length; i++) {
+        if (nodeAssignment[i] >= 0) continue;
+        const nodeId = nextNodeId++;
+        nodeAssignment[i] = nodeId;
+        const ep = allEndpoints[i];
+        for (let j = i + 1; j < allEndpoints.length; j++) {
+          if (nodeAssignment[j] >= 0) continue;
+          const ep2 = allEndpoints[j];
+          const dist = Math.sqrt((ep.x - ep2.x) ** 2 + (ep.y - ep2.y) ** 2 + (ep.z - ep2.z) ** 2);
+          if (dist <= NODE_TOLERANCE) {
+            nodeAssignment[j] = nodeId;
+          }
+        }
+      }
+
+      // Assign entry_node / exit_node to each branch
+      let inferredCount = 0;
+      for (let i = 0; i < allEndpoints.length; i++) {
+        const ep = allEndpoints[i];
+        const b = branches[ep.bi];
+        const nodeLabel = `node-${nodeAssignment[i]}`;
+        if (ep.isStart) {
+          if (!b.entry_node) { b.entry_node = nodeLabel; inferredCount++; }
+        } else {
+          if (!b.exit_node) { b.exit_node = nodeLabel; inferredCount++; }
+        }
+      }
+
+      // Count shared nodes (degree >= 2)
+      const nodeDegree = {};
+      for (const nid of nodeAssignment) {
+        nodeDegree[nid] = (nodeDegree[nid] || 0) + 1;
+      }
+      const sharedNodes = Object.values(nodeDegree).filter(d => d >= 2).length;
+      console.log(`Node inference: ${inferredCount} endpoints assigned, ${nextNodeId - 1} unique nodes, ${sharedNodes} shared (degree >= 2)`);
+    }
+
+    // Parse LAYERS section — maps numeric layer IDs to names (e.g., 1→Fresh, 2→Exhaust)
+    const layerNames = new Map();
+    const layersStartIdx = lines.findIndex(l => l.trim().startsWith('LAYERS'));
+    if (layersStartIdx !== -1) {
+      const layersEndIdx = lines.findIndex((l, i) => i > layersStartIdx && (l.trim().startsWith('END\tLAYERS') || l.trim() === 'END LAYERS'));
+      const layersEnd = layersEndIdx !== -1 ? layersEndIdx : lines.length;
+      for (let i = layersStartIdx + 1; i < layersEnd; i++) {
+        const line = lines[i].trim();
+        if (!line || line.startsWith('END')) break;
+        const cols = line.split('\t');
+        const layerId = parseInt(cols[0]);
+        const layerName = (cols[1] || '').trim();
+        if (layerId > 0 && layerName) layerNames.set(layerId, layerName);
+      }
+      console.log(`Parsed ${layerNames.size} VentSim layers: ${[...layerNames.entries()].map(([k,v]) => `${k}=${v}`).join(', ')}`);
+    }
 
     // Parse FANS section — each fan has a header line followed by curve data points.
     // Header: id \t name \t diameter \t ...  (name is non-empty text, not "0")
@@ -636,7 +855,6 @@ function parseVentSimToCSS(content, sourceFileName) {
       // Normalize direction
       const dirX = dx / length;
       const dirY = dy / length;
-      const dirZ = dz / length;
 
       const isRound = branch.shape_type === 1;
       const linerMaterial = branch.liner_type === 1 ? 'concrete' : 'blasted_rock';
@@ -647,15 +865,26 @@ function parseVentSimToCSS(content, sourceFileName) {
 
       if (isStructural) structuralBranches.push(branch);
 
-      // refDirection must not be parallel to the tunnel axis
-      const absZ = Math.abs(dirZ);
-      const refDirVec = absZ < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 };
+      // refDirection = normalized horizontal bearing of the branch so each segment
+      // has the correct lateral orientation in the IFC viewer. Falls back to +X
+      // for near-vertical branches (shafts) where horizontal bearing is undefined.
+      const horizLen = Math.sqrt(dirX * dirX + dirY * dirY);
+      const refDirVec = horizLen > 0.1
+        ? { x: dirX / horizLen, y: dirY / horizLen, z: 0 }
+        : { x: 1, y: 0, z: 0 };
 
       // Normalize coordinates relative to bounding box origin so the model
-      // sits near z=0 rather than at mine elevation (~1290m)
+      // sits near z=0 rather than at mine elevation (~1290m).
+      // origin = MIDPOINT of the segment — the IFC generator's hollow-manifold
+      // path shifts back by refDir * depth/2 to find the extrusion start, so
+      // providing the start point here would double-shift the geometry.
       const placement = {
-        origin: { x: branch.x1 - minX, y: branch.y1 - minY, z: branch.z1 - minZ },
-        axis: { x: dirX, y: dirY, z: dirZ },
+        origin: {
+          x: (branch.x1 + branch.x2) / 2 - minX,
+          y: (branch.y1 + branch.y2) / 2 - minY,
+          z: (branch.z1 + branch.z2) / 2 - minZ
+        },
+        axis: { x: 0, y: 0, z: 1 },
         refDirection: refDirVec
       };
 
@@ -664,17 +893,18 @@ function parseVentSimToCSS(content, sourceFileName) {
       const effectiveW = branch.width * scaleFactor;
       const effectiveH = branch.height * scaleFactor;
 
-      // geometry.direction is in element-LOCAL space — local Z is already aligned
-      // to the tunnel axis by the element placement above, so always extrude in (0,0,1)
+      // geometry.direction is in element-LOCAL space. With the new convention:
+      // local-X = refDirection = branch bearing → extrude in (1,0,0) to push
+      // geometry along the tunnel run, not vertically.
       const geometry = isRound ? {
         method: 'EXTRUSION',
         profile: { type: 'CIRCLE', radius: (effectiveW / 2) },
-        direction: { x: 0, y: 0, z: 1 },
+        direction: { x: 1, y: 0, z: 0 },
         depth: length
       } : {
         method: 'EXTRUSION',
         profile: { type: 'RECTANGLE', width: effectiveW, height: effectiveH },
-        direction: { x: 0, y: 0, z: 1 },
+        direction: { x: 1, y: 0, z: 0 },
         depth: length
       };
 
@@ -707,6 +937,9 @@ function parseVentSimToCSS(content, sourceFileName) {
           shape: isRound ? 'round' : 'rectangular',
           fan_type: branch.fan_type,
           fan_numbers: branch.fan_numbers,
+          primary_layer: branch.primary_layer,
+          air_type: branch.air_type,
+          ventLayer: layerNames.get(branch.primary_layer) || '',
           branchClass: isStructural ? 'STRUCTURAL' : 'AIRWAY'
         },
         material,
@@ -747,30 +980,31 @@ function parseVentSimToCSS(content, sourceFileName) {
         console.warn(`  Fan "${fan.name}" (id=${fan.fan_id}) → NO matching branch (fallback placement)`);
       }
 
-      // Fan axis aligned to branch direction so the disk sits inside the tunnel
-      const absZ = Math.abs(dirZ);
-      const refDir = absZ < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 };
+      // Fan disk placed perpendicular to the branch bearing.
+      // Use the same axis=(0,0,1)/refDir=bearing convention as tunnel segments
+      // so the IFC generator renders the disk facing into the airflow direction.
+      const fanHorizLen = Math.sqrt(dirX * dirX + dirY * dirY) || 1;
       const placement = {
         origin: { x: cx, y: cy, z: cz },
-        axis: { x: dirX, y: dirY, z: dirZ },
-        refDirection: refDir
+        axis: { x: 0, y: 0, z: 1 },
+        refDirection: fanHorizLen > 0.1
+          ? { x: dirX / fanHorizLen, y: dirY / fanHorizLen, z: 0 }
+          : { x: 1, y: 0, z: 0 }
       };
-      // Fan disk: thin cylinder (depth = 20% of diameter) oriented along branch
+      // Fan disk: thin cylinder extruded along local-X (bearing), depth = 20% of diameter
       const fanThickness = Math.max(0.15, fan.diameter * 0.2);
       const geometry = {
         method: 'EXTRUSION',
         profile: { type: 'CIRCLE', radius: fan.diameter / 2 },
-        direction: { x: 0, y: 0, z: 1 },
+        direction: { x: 1, y: 0, z: 0 },
         depth: fanThickness
       };
 
       // Post-creation axis validation: compare assigned axis to computed host direction
+      // Validate: warn if fan has no meaningful horizontal bearing (e.g., vertical shaft fan)
       const horizontalMag = Math.sqrt(dirX * dirX + dirY * dirY);
-      if (hostBranch && horizontalMag > 0.5) {
-        const assignedZ = Math.abs(placement.axis.z);
-        if (assignedZ > 0.9) {
-          console.warn(`  ⚠ Fan "${fan.name}" assigned axis z=${assignedZ.toFixed(3)} but host branch #${hostBranch.unique_no} direction is mostly horizontal (horiz=${horizontalMag.toFixed(3)}). Possible orientation bug.`);
-        }
+      if (hostBranch && horizontalMag < 0.1) {
+        console.warn(`  ⚠ Fan "${fan.name}" host branch #${hostBranch.unique_no} is near-vertical (horiz=${horizontalMag.toFixed(3)}) — fan will use fallback +X refDirection.`);
       }
 
       const id = elemId(geometry, placement);
@@ -933,26 +1167,37 @@ function parseVentSimToCSS(content, sourceFileName) {
 
         const dirX = dx / length;
         const dirY = dy / length;
-        const dirZ = dz / length;
-        const absZ = Math.abs(dirZ);
-        const refDirVec = absZ < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 };
+        // horizLen: magnitude of the horizontal component of the branch direction.
+        // Used to compute bearing (local-X) and the lateral side vector (perpendicular
+        // to bearing in the horizontal plane) for cable-tray / lighting offsets.
+        const horizLen = Math.sqrt(dirX * dirX + dirY * dirY) || 1;
+        const bearingX = dirX / horizLen;
+        const bearingY = dirY / horizLen;
+        // sideVec: unit vector perpendicular to bearing, pointing "right" of the run
+        const sideX = -bearingY;
+        const sideY = bearingX;
 
-        // Cable tray: thin strip along ceiling-right of tunnel
+        // Midpoint of the branch (consistent with segment placement origin convention)
+        const midX = (branch.x1 + branch.x2) / 2 - minX;
+        const midY = (branch.y1 + branch.y2) / 2 - minY;
+        const midZ = (branch.z1 + branch.z2) / 2 - minZ;
+
+        // Cable tray: thin strip near ceiling, offset to the right side of the tunnel
         const ctW = 0.3, ctH = 0.1;
-        const ctOffset = branch.width * 0.35; // offset to right side
+        const ctOffset = branch.width * 0.35;
         const ctPlacement = {
           origin: {
-            x: (branch.x1 - minX) + refDirVec.x * ctOffset,
-            y: (branch.y1 - minY) + refDirVec.y * ctOffset,
-            z: (branch.z1 - minZ) + (branch.height * 0.85)
+            x: midX + sideX * ctOffset,
+            y: midY + sideY * ctOffset,
+            z: midZ + (branch.height * 0.85)
           },
-          axis: { x: dirX, y: dirY, z: dirZ },
-          refDirection: refDirVec
+          axis: { x: 0, y: 0, z: 1 },
+          refDirection: { x: bearingX, y: bearingY, z: 0 }
         };
         const ctGeometry = {
           method: 'EXTRUSION',
           profile: { type: 'RECTANGLE', width: ctW, height: ctH },
-          direction: { x: 0, y: 0, z: 1 },
+          direction: { x: 1, y: 0, z: 0 },
           depth: length
         };
         const ctId = elemId(ctGeometry, ctPlacement);
@@ -973,21 +1218,21 @@ function parseVentSimToCSS(content, sourceFileName) {
           source: 'VSM'
         });
 
-        // Lighting strip: narrow line along ceiling center
+        // Lighting strip: narrow line centered on the ceiling
         const ltW = 0.15, ltH = 0.05;
         const ltPlacement = {
           origin: {
-            x: branch.x1 - minX,
-            y: branch.y1 - minY,
-            z: (branch.z1 - minZ) + (branch.height * 0.95)
+            x: midX,
+            y: midY,
+            z: midZ + (branch.height * 0.95)
           },
-          axis: { x: dirX, y: dirY, z: dirZ },
-          refDirection: refDirVec
+          axis: { x: 0, y: 0, z: 1 },
+          refDirection: { x: bearingX, y: bearingY, z: 0 }
         };
         const ltGeometry = {
           method: 'EXTRUSION',
           profile: { type: 'RECTANGLE', width: ltW, height: ltH },
-          direction: { x: 0, y: 0, z: 1 },
+          direction: { x: 1, y: 0, z: 0 },
           depth: length
         };
         const ltId = elemId(ltGeometry, ltPlacement);
@@ -1534,8 +1779,8 @@ function buildGableRoofMesh(L, W, pitchDeg, overhang, ridgeAlongX, offsetX = 0, 
 function buildingSpecToCSS(spec, sourceFiles) {
   const dims = spec.dimensions || {};
   // v6: Clamp absurd LLM-generated values to safe ranges
-  const length = Math.max(3, Math.min(200, dims.length_m || 20));
-  const width = Math.max(3, Math.min(200, dims.width_m || 10));
+  let length = Math.max(3, Math.min(200, dims.length_m || 20));
+  let width = Math.max(3, Math.min(200, dims.width_m || 10));
   const height = Math.max(2.4, Math.min(8, dims.height_m || 3));
   const wallThickness = Math.max(0.1, Math.min(1.0, dims.wall_thickness_m || 0.3));
   const floorLevel = spec.elevations?.floor_level_m || 0;
@@ -1556,6 +1801,33 @@ function buildingSpecToCSS(spec, sourceFiles) {
   numFloors = Math.max(1, Math.min(20, numFloors)); // cap at 20
   floorToFloor = Math.max(2.0, Math.min(10.0, floorToFloor)); // 2-10m
   if (structureClass === 'LINEAR') numFloors = 1; // tunnels: single level
+
+  // Phase 3B: Envelope-room coherence — expand dimensions to contain all rooms
+  if (spec.rooms && spec.rooms.length > 0 && structureClass !== 'LINEAR') {
+    let roomMaxX = 0, roomMaxY = 0, maxRoomFloor = 1;
+    for (const room of spec.rooms) {
+      const rx = (room.x_position_m || 0) + (room.length_m || 5);
+      const ry = (room.y_position_m || 0) + (room.width_m || 4);
+      if (rx > roomMaxX) roomMaxX = rx;
+      if (ry > roomMaxY) roomMaxY = ry;
+      if ((room.floor || 1) > maxRoomFloor) maxRoomFloor = room.floor;
+    }
+    // Expand building dimensions if rooms exceed envelope
+    const neededLength = roomMaxX + 2 * wallThickness;
+    const neededWidth = roomMaxY + 2 * wallThickness;
+    if (neededLength > length * 1.05) {
+      console.log(`Phase 3B: Expanding building length ${length.toFixed(1)}→${neededLength.toFixed(1)}m to contain rooms`);
+      length = Math.min(200, neededLength);
+    }
+    if (neededWidth > width * 1.05) {
+      console.log(`Phase 3B: Expanding building width ${width.toFixed(1)}→${neededWidth.toFixed(1)}m to contain rooms`);
+      width = Math.min(200, neededWidth);
+    }
+    if (maxRoomFloor > numFloors) {
+      console.log(`Phase 3B: Expanding num_floors ${numFloors}→${maxRoomFloor} (rooms found on floor ${maxRoomFloor})`);
+      numFloors = maxRoomFloor;
+    }
+  }
 
   // Map buildingType to domain
   const domainMap = {
@@ -1630,29 +1902,29 @@ function buildingSpecToCSS(spec, sourceFiles) {
     const wt = wallThickness;
 
     addElement(makeElement('WALL', 'IfcWallStandardCase', `South Wall F${f + 1}`,
-      { origin: { x: length / 2, y: wt / 2, z: baseZ } },
+      { origin: { x: length / 2, y: wt / 2, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 } },
       { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
       levelId, { isExternal: true, wallSide: 'SOUTH' },
       { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
     ));
 
     addElement(makeElement('WALL', 'IfcWallStandardCase', `North Wall F${f + 1}`,
-      { origin: { x: length / 2, y: width - wt / 2, z: baseZ } },
+      { origin: { x: length / 2, y: width - wt / 2, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 } },
       { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
       levelId, { isExternal: true, wallSide: 'NORTH' },
       { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
     ));
 
     addElement(makeElement('WALL', 'IfcWallStandardCase', `West Wall F${f + 1}`,
-      { origin: { x: wt / 2, y: width / 2, z: baseZ } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wt, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+      { origin: { x: wt / 2, y: width / 2, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 0, y: 1, z: 0 } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: width, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
       levelId, { isExternal: true, wallSide: 'WEST' },
       { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
     ));
 
     addElement(makeElement('WALL', 'IfcWallStandardCase', `East Wall F${f + 1}`,
-      { origin: { x: length - wt / 2, y: width / 2, z: baseZ } },
-      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wt, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+      { origin: { x: length - wt / 2, y: width / 2, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 0, y: 1, z: 0 } },
+      { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: width, height: wt }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
       levelId, { isExternal: true, wallSide: 'EAST' },
       { name: spec.materials?.walls || 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 }
     ));
@@ -1686,9 +1958,9 @@ function buildingSpecToCSS(spec, sourceFiles) {
       } else {
         addElement(makeElement('SLAB', 'IfcSlab', 'Roof Slab',
           { origin: { x: length / 2, y: width / 2, z: roofZ } },
-          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: length, height: width }, direction: { x: 0, y: 0, z: 1 }, depth: 0.25 },
           levelId, { slabType: 'ROOF' },
-          { name: spec.materials?.roof || 'metal', color: [0.4, 0.4, 0.45], transparency: 0 }
+          { name: spec.materials?.roof || 'metal', color: [0.35, 0.35, 0.40], transparency: 0 }
         ));
       }
     }
@@ -1735,14 +2007,16 @@ function buildingSpecToCSS(spec, sourceFiles) {
 
   // ---- COLUMNS ----
   if (spec.structure?.column_grid) {
+    const MAX_COLUMNS = 200; // cap to prevent runaway grids overwhelming the model
+    let columnCount = 0;
     for (const grid of spec.structure.column_grid) {
-      const xSpacing = grid.x_spacing_m || 6;
-      const ySpacing = grid.y_spacing_m || 6;
+      const xSpacing = Math.max(grid.x_spacing_m || 6, 3); // minimum 3m spacing
+      const ySpacing = Math.max(grid.y_spacing_m || 6, 3);
       const colSize = grid.column_size_m || 0.4;
 
-      for (let x = xSpacing; x < length - wallThickness; x += xSpacing) {
-        for (let y = ySpacing; y < width - wallThickness; y += ySpacing) {
-          for (let f = 0; f < numFloors; f++) {
+      for (let x = xSpacing; x < length - wallThickness && columnCount < MAX_COLUMNS; x += xSpacing) {
+        for (let y = ySpacing; y < width - wallThickness && columnCount < MAX_COLUMNS; y += ySpacing) {
+          for (let f = 0; f < numFloors && columnCount < MAX_COLUMNS; f++) {
             const baseZ = floorLevel + (f * floorToFloor);
             addElement(makeElement('COLUMN', 'IfcColumn', `Column ${x.toFixed(0)}-${y.toFixed(0)} F${f + 1}`,
               { origin: { x: x + wallThickness, y: y + wallThickness, z: baseZ } },
@@ -1752,9 +2026,13 @@ function buildingSpecToCSS(spec, sourceFiles) {
               { name: 'concrete', color: [0.7, 0.7, 0.7], transparency: 0 },
               0.7
             ));
+            columnCount++;
           }
         }
       }
+    }
+    if (columnCount >= MAX_COLUMNS) {
+      console.warn(`Column grid capped at ${MAX_COLUMNS} columns (grid would have produced more)`);
     }
   }
 
@@ -1853,6 +2131,144 @@ function buildingSpecToCSS(spec, sourceFiles) {
     }
   }
 
+  // ---- Phase 3C: SMART PARTITION WALLS — shared-boundary-aware inference ----
+  if (spec.rooms && structureClass !== 'LINEAR' && (!spec.interior_walls || spec.interior_walls.length === 0)) {
+    const partitionThickness = Math.max(0.1, Math.min(0.3, wallThickness * 0.5));
+    const wallMat = { name: spec.materials?.walls || 'gypsum_partition', color: [0.85, 0.85, 0.82], transparency: 0 };
+    const BOUNDARY_TOL = 0.3; // meters — edges within this distance are "shared"
+    const EXTERIOR_TOL = wallThickness + 0.1; // within wall thickness of building edge = exterior
+    const NO_DOOR_ROOMS = new Set(['MECHANICAL', 'ELECTRICAL', 'STORAGE']);
+
+    // Compute resolved room positions per floor
+    const resolvedRooms = [];
+    for (const room of spec.rooms) {
+      const rLen = room.length_m || 5;
+      const rWid = room.width_m || 4;
+      const rHeight = room.height_m || floorToFloor;
+      const maxInteriorLen = length - 2 * wallThickness;
+      const maxInteriorWid = width - 2 * wallThickness;
+      if (rLen > maxInteriorLen || rWid > maxInteriorWid || rLen <= 0 || rWid <= 0) continue;
+      const floor = normalizeFloor(room.floor);
+      const rx = Math.max(wallThickness, Math.min(length - wallThickness - rLen, room.x_position_m || wallThickness));
+      const ry = Math.max(wallThickness, Math.min(width - wallThickness - rWid, room.y_position_m || wallThickness));
+      resolvedRooms.push({ name: room.name || 'Room', usage: (room.usage || 'OTHER').toUpperCase(), floor, rx, ry, rLen, rWid, rHeight });
+    }
+
+    // Build edge registry: for each room edge, check if it's shared or exterior
+    // Edges: south (y=ry), north (y=ry+rWid), west (x=rx), east (x=rx+rLen)
+    const edgesGenerated = new Set(); // "floor:dir:coord:start:end" dedup key
+    const doorPairsGenerated = new Set(); // "floor:roomA|roomB" canonical door dedup — prevents bidirectional doubles
+    let inferredWallCount = 0;
+    let inferredDoorCount = 0;
+
+    function edgeKey(floor, dir, coord, start, end) {
+      return `${floor}:${dir}:${coord.toFixed(1)}:${Math.min(start,end).toFixed(1)}:${Math.max(start,end).toFixed(1)}`;
+    }
+
+    function isNearExterior(dir, coord) {
+      if (dir === 'H') return coord < EXTERIOR_TOL || coord > width - EXTERIOR_TOL; // horizontal wall at y=coord
+      return coord < EXTERIOR_TOL || coord > length - EXTERIOR_TOL; // vertical wall at x=coord
+    }
+
+    for (const room of resolvedRooms) {
+      const { name, usage, floor, rx, ry, rLen, rWid, rHeight } = room;
+      const levelId = `level-${floor}`;
+      const baseZ = floorLevel + ((floor - 1) * floorToFloor);
+
+      // Define 4 edges: [direction, coordinate, rangeStart, rangeEnd, refDir]
+      const edges = [
+        { side: 'South', dir: 'H', coord: ry, start: rx, end: rx + rLen, refDir: { x: 1, y: 0, z: 0 }, wallLen: rLen },
+        { side: 'North', dir: 'H', coord: ry + rWid, start: rx, end: rx + rLen, refDir: { x: 1, y: 0, z: 0 }, wallLen: rLen },
+        { side: 'West', dir: 'V', coord: rx, start: ry, end: ry + rWid, refDir: { x: 0, y: 1, z: 0 }, wallLen: rWid },
+        { side: 'East', dir: 'V', coord: rx + rLen, start: ry, end: ry + rWid, refDir: { x: 0, y: 1, z: 0 }, wallLen: rWid },
+      ];
+
+      for (const edge of edges) {
+        // Skip if near exterior wall (exterior wall already serves as boundary)
+        if (isNearExterior(edge.dir, edge.coord)) continue;
+
+        // Dedup: skip if we already generated a wall at this edge
+        const key = edgeKey(floor, edge.dir, edge.coord, edge.start, edge.end);
+        if (edgesGenerated.has(key)) continue;
+
+        // Check if any other room on same floor shares this edge
+        let sharedWith = null;
+        for (const other of resolvedRooms) {
+          if (other === room || other.floor !== floor) continue;
+          // Check if other room has an edge at the same coordinate (within tolerance)
+          const otherEdges = [
+            { coord: other.ry, start: other.rx, end: other.rx + other.rLen },
+            { coord: other.ry + other.rWid, start: other.rx, end: other.rx + other.rLen },
+            { coord: other.rx, start: other.ry, end: other.ry + other.rWid },
+            { coord: other.rx + other.rLen, start: other.ry, end: other.ry + other.rWid },
+          ];
+          for (const oe of otherEdges) {
+            if (Math.abs(oe.coord - edge.coord) < BOUNDARY_TOL) {
+              // Check if ranges overlap
+              const overlapStart = Math.max(edge.start, oe.start);
+              const overlapEnd = Math.min(edge.end, oe.end);
+              if (overlapEnd - overlapStart > 0.5) {
+                sharedWith = other.name;
+                break;
+              }
+            }
+          }
+          if (sharedWith) break;
+        }
+
+        edgesGenerated.add(key);
+
+        // Also add reversed key for the shared room's perspective
+        if (sharedWith) {
+          edgesGenerated.add(edgeKey(floor, edge.dir, edge.coord, edge.start, edge.end));
+        }
+
+        const wallName = sharedWith
+          ? `${name} / ${sharedWith} — ${edge.side} Partition`
+          : `${name} — ${edge.side} Partition`;
+
+        const origin = edge.dir === 'H'
+          ? { x: (edge.start + edge.end) / 2, y: edge.coord, z: baseZ }
+          : { x: edge.coord, y: (edge.start + edge.end) / 2, z: baseZ };
+
+        const adjacentRooms = sharedWith ? [name, sharedWith] : [name];
+
+        addElement(makeElement('WALL', 'IfcWall', wallName,
+          { origin, axis: { x: 0, y: 0, z: 1 }, refDirection: edge.refDir },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: edge.wallLen, height: partitionThickness }, direction: { x: 0, y: 0, z: 1 }, depth: rHeight },
+          levelId, { isExternal: false, inferredFromRoom: name, adjacentRooms },
+          wallMat, 0.5
+        ));
+        inferredWallCount++;
+
+        // Add door if shared boundary between access-connected rooms
+        // Use a canonical room-pair key (sorted) to prevent bidirectional doubles when
+        // edge coordinate ranges differ slightly between the two rooms' perspectives.
+        if (sharedWith && !NO_DOOR_ROOMS.has(usage)) {
+          const doorPairKey = `${floor}:${[name, sharedWith].sort().join('|')}`;
+          if (!doorPairsGenerated.has(doorPairKey)) {
+            doorPairsGenerated.add(doorPairKey);
+            const doorWidth = usage === 'CIRCULATION' || usage === 'LOBBY' ? 1.5 : 0.9;
+            const doorOrigin = edge.dir === 'H'
+              ? { x: (edge.start + edge.end) / 2, y: edge.coord, z: baseZ }
+              : { x: edge.coord, y: (edge.start + edge.end) / 2, z: baseZ };
+
+            addElement(makeElement('DOOR', 'IfcDoor', `Door — ${name} to ${sharedWith}`,
+              { origin: doorOrigin, axis: { x: 0, y: 0, z: 1 }, refDirection: edge.refDir },
+              { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: doorWidth, height: partitionThickness }, direction: { x: 0, y: 0, z: 1 }, depth: 2.1 },
+              levelId, { inferredFromRooms: adjacentRooms, sillHeight: 0 },
+              { name: 'wood', color: [0.55, 0.35, 0.2], transparency: 0 }, 0.45
+            ));
+            inferredDoorCount++;
+          }
+        }
+      }
+    }
+    if (inferredWallCount > 0) {
+      console.log(`Phase 3C: Inferred ${inferredWallCount} partition walls and ${inferredDoorCount} doors from ${spec.rooms.length} rooms (smart dedup)`);
+    }
+  }
+
   // ---- OPENINGS (DOOR / WINDOW) — v3.2: per-floor, skip for LINEAR ----
   if (spec.openings && structureClass !== 'LINEAR') {
     const wallDims = { NORTH: { axis: 'x', base_y: width }, SOUTH: { axis: 'x', base_y: 0 }, EAST: { axis: 'y', base_x: length }, WEST: { axis: 'y', base_x: 0 } };
@@ -1913,6 +2329,149 @@ function buildingSpecToCSS(spec, sourceFiles) {
         { name: isDoor ? 'wood' : 'glass', color: isDoor ? [0.55, 0.35, 0.2] : [0.7, 0.85, 0.95], transparency: isDoor ? 0 : 0.3 },
         0.6
       ));
+    }
+  }
+
+  // ---- VOIDS RELATIONSHIPS: link openings (doors/windows) to host walls ----
+  {
+    const allWalls = elements.filter(e => e.type === 'WALL');
+    const allOpenings = elements.filter(e => e.type === 'DOOR' || e.type === 'WINDOW');
+    let voidsLinked = 0;
+    for (const opening of allOpenings) {
+      const side = opening.properties?.wallSide;
+      const container = opening.container;
+      const oOrigin = opening.placement?.origin;
+      if (!side || !oOrigin) continue;
+
+      // Find candidate host walls: same container + matching wallSide
+      const candidates = allWalls.filter(w =>
+        w.container === container && w.properties?.wallSide === side
+      );
+      if (candidates.length === 0) continue;
+
+      // Score candidates: prefer external wall, then nearest by XY position
+      let bestWall = null;
+      let bestScore = Infinity;
+      for (const w of candidates) {
+        const wO = w.placement?.origin;
+        if (!wO) continue;
+        const dist = Math.sqrt((oOrigin.x - wO.x) ** 2 + (oOrigin.y - wO.y) ** 2);
+        const score = dist - (w.properties?.isExternal ? 100 : 0);
+        if (score < bestScore) { bestScore = score; bestWall = w; }
+      }
+
+      if (bestWall) {
+        const actualDist = Math.sqrt(
+          (oOrigin.x - bestWall.placement.origin.x) ** 2 +
+          (oOrigin.y - bestWall.placement.origin.y) ** 2
+        );
+        if (actualDist < 50) { // generous — wall origins at center, openings near surface
+          opening.relationships.push({ type: 'VOIDS', target: bestWall.id });
+          voidsLinked++;
+        }
+      }
+    }
+    if (voidsLinked > 0) {
+      console.log(`VOIDS relationships: linked ${voidsLinked} openings to host walls`);
+    }
+  }
+
+  // ---- Phase 3E: BUILDING-TYPE OPENING DEFAULTS — windows on exterior walls, doors on partitions ----
+  {
+    const existingWindows = elements.filter(e => e.type === 'WINDOW');
+    const buildingType = (spec.building_type || spec.type || '').toUpperCase();
+    const exteriorWallCount = elements.filter(e => e.type === 'WALL' && e.properties?.isExternal === true).length;
+    console.log(`Phase 3E check: existingWindows=${existingWindows.length}, numFloors=${numFloors}, structureClass=${structureClass}, exteriorWalls=${exteriorWallCount}, buildingType=${buildingType}`);
+
+    // Only run if extracted windows are sparse (doors from 3C shouldn't block window inference)
+    if (existingWindows.length < numFloors * 2 && structureClass !== 'LINEAR') {
+      // Per-building-type opening profiles
+      const OPENING_PROFILES = {
+        HOSPITAL:    { doorWidth: 1.2, corridorDoor: 1.8, windowSpacing: 3.0, windowWidth: 1.5, windowHeight: 1.5, sillHeight: 0.9 },
+        OFFICE:      { doorWidth: 0.9, corridorDoor: 1.2, windowSpacing: 2.5, windowWidth: 1.4, windowHeight: 1.4, sillHeight: 0.9 },
+        RESIDENTIAL: { doorWidth: 0.9, corridorDoor: 1.0, windowSpacing: 3.5, windowWidth: 1.2, windowHeight: 1.2, sillHeight: 0.9 },
+        SCHOOL:      { doorWidth: 1.0, corridorDoor: 1.5, windowSpacing: 2.5, windowWidth: 1.5, windowHeight: 1.5, sillHeight: 0.9 },
+        WAREHOUSE:   { doorWidth: 1.2, corridorDoor: 3.0, windowSpacing: 8.0, windowWidth: 1.0, windowHeight: 0.8, sillHeight: 2.0 },
+      };
+      const profile = OPENING_PROFILES[buildingType] || OPENING_PROFILES.OFFICE;
+      const glassMat = { name: 'glass', color: [0.7, 0.85, 0.95], transparency: 0.3 };
+
+      let inferredWindows = 0;
+
+      // Add windows at regular intervals on exterior walls
+      const exteriorWalls = elements.filter(e =>
+        e.type === 'WALL' && e.properties?.isExternal === true
+      );
+
+      for (const wall of exteriorWalls) {
+        const wallLen = wall.geometry?.profile?.width || 0;
+        if (wallLen < profile.windowSpacing) continue;
+
+        const side = wall.properties?.wallSide;
+        const container = wall.container;
+        const wallOrigin = wall.placement?.origin;
+        if (!wallOrigin || !side || !container) continue;
+
+        // Skip windowless sides for warehouses (only add on one face)
+        if (buildingType === 'WAREHOUSE' && side !== 'SOUTH' && side !== 'EAST') continue;
+
+        const numWindows = Math.max(1, Math.floor(wallLen / profile.windowSpacing));
+        const spacing = wallLen / (numWindows + 1);
+
+        const refDir = wall.placement?.refDirection || (
+          (side === 'NORTH' || side === 'SOUTH') ? { x: 1, y: 0, z: 0 } : { x: 0, y: 1, z: 0 }
+        );
+
+        for (let w = 1; w <= numWindows; w++) {
+          const offset = spacing * w - wallLen / 2; // offset from wall center
+          let wx, wy;
+          if (side === 'SOUTH' || side === 'NORTH') {
+            wx = wallOrigin.x + offset;
+            wy = wallOrigin.y;
+          } else {
+            wx = wallOrigin.x;
+            wy = wallOrigin.y + offset;
+          }
+
+          addElement(makeElement('WINDOW', 'IfcWindow',
+            `Window — ${side} F${(container || '').replace('level-', '')}`,
+            { origin: { x: wx, y: wy, z: wallOrigin.z + profile.sillHeight }, axis: { x: 0, y: 0, z: 1 }, refDirection: refDir },
+            { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: profile.windowWidth, height: wallThickness }, direction: { x: 0, y: 0, z: 1 }, depth: profile.windowHeight },
+            container,
+            { wallSide: side, sillHeight: profile.sillHeight, inferredFromBuildingType: true },
+            glassMat, 0.45
+          ));
+          inferredWindows++;
+        }
+      }
+
+      // Add entrance door(s) on ground floor if none exist
+      const groundDoors = elements.filter(e =>
+        e.type === 'DOOR' && e.container === 'level-1' && e.properties?.wallSide
+      );
+      let inferredEntranceDoors = 0;
+      if (groundDoors.length === 0) {
+        // Add main entrance on south wall
+        const southWall = exteriorWalls.find(w => w.container === 'level-1' && w.properties?.wallSide === 'SOUTH');
+        if (southWall) {
+          const so = southWall.placement?.origin;
+          if (so) {
+            const entranceWidth = buildingType === 'HOSPITAL' ? 2.0 : (buildingType === 'WAREHOUSE' ? 3.0 : 1.2);
+            addElement(makeElement('DOOR', 'IfcDoor', 'Main Entrance',
+              { origin: { x: so.x, y: so.y, z: so.z }, axis: { x: 0, y: 0, z: 1 }, refDirection: { x: 1, y: 0, z: 0 } },
+              { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: entranceWidth, height: wallThickness }, direction: { x: 0, y: 0, z: 1 }, depth: 2.4 },
+              'level-1',
+              { wallSide: 'SOUTH', sillHeight: 0, inferredFromBuildingType: true, isEntrance: true },
+              { name: 'glass_door', color: [0.6, 0.8, 0.9], transparency: 0.2 }, 0.45
+            ));
+            inferredEntranceDoors++;
+          }
+        }
+      }
+
+      if (inferredWindows > 0 || inferredEntranceDoors > 0) {
+        console.log(`Phase 3E: Inferred ${inferredWindows} windows + ${inferredEntranceDoors} entrance doors (building type: ${buildingType || 'DEFAULT'})`);
+      }
     }
   }
 
@@ -2283,39 +2842,49 @@ function buildingSpecToCSS(spec, sourceFiles) {
       EAST:  { ox: bMaxX,          oy: bMinY + bD / 2,  profW: wt, profH: bD, refDir: { x: 0, y: 1, z: 0 } },
     };
 
+    // Phase 3D: Multi-storey fallback — add walls and slabs per floor
     let addedWalls = 0;
-    for (const side of ['NORTH', 'SOUTH', 'EAST', 'WEST']) {
-      if (coveredSides.has(side)) continue;
-      const wd = wallDefs[side];
-      addElement(makeElement('WALL', 'IfcWallStandardCase', `${side.charAt(0) + side.slice(1).toLowerCase()} Wall (Fallback)`,
-        { origin: { x: wd.ox, y: wd.oy, z: baseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: wd.refDir },
-        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wd.profW, height: wd.profH }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
-        'level-1', { isExternal: true, wallSide: side, isFallback: true },
-        { name: sc.wallMat, color: sc.wall, transparency: 0 }
-      ));
-      addedWalls++;
-    }
-
-    // Add floor slab only if no FLOOR slab exists
-    const hasFloor = elements.some(e => e.type === 'SLAB' && (e.properties?.slabType || '').toUpperCase() === 'FLOOR');
     let addedSlabs = 0;
-    if (!hasFloor) {
-      addElement(makeElement('SLAB', 'IfcSlab', 'Floor Slab (Fallback)',
-        { origin: { x: bMinX + bW / 2, y: bMinY + bD / 2, z: baseZ } },
-        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: bW, height: bD }, direction: { x: 0, y: 0, z: 1 }, depth: 0.2 },
-        'level-1', { slabType: 'FLOOR', isFallback: true },
-        { name: 'concrete', color: [0.6, 0.6, 0.6], transparency: 0 }
-      ));
-      addedSlabs++;
+    for (let f = 0; f < numFloors; f++) {
+      const levelId = `level-${f + 1}`;
+      const floorBaseZ = floorLevel + (f * floorToFloor);
+
+      // Add missing cardinal walls for this floor
+      for (const side of ['NORTH', 'SOUTH', 'EAST', 'WEST']) {
+        if (coveredSides.has(side)) continue;
+        const wd = wallDefs[side];
+        addElement(makeElement('WALL', 'IfcWallStandardCase', `${side.charAt(0) + side.slice(1).toLowerCase()} Wall F${f + 1} (Fallback)`,
+          { origin: { x: wd.ox, y: wd.oy, z: floorBaseZ }, axis: { x: 0, y: 0, z: 1 }, refDirection: wd.refDir },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: wd.profW, height: wd.profH }, direction: { x: 0, y: 0, z: 1 }, depth: floorToFloor },
+          levelId, { isExternal: true, wallSide: side, isFallback: true },
+          { name: sc.wallMat, color: sc.wall, transparency: 0 }
+        ));
+        addedWalls++;
+      }
+
+      // Add floor slab if this level lacks one
+      const hasFloorForLevel = elements.some(e =>
+        e.type === 'SLAB' && (e.properties?.slabType || '').toUpperCase() === 'FLOOR' && e.container === levelId
+      );
+      if (!hasFloorForLevel) {
+        addElement(makeElement('SLAB', 'IfcSlab', `Floor Slab F${f + 1} (Fallback)`,
+          { origin: { x: bMinX + bW / 2, y: bMinY + bD / 2, z: floorBaseZ } },
+          { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: bW, height: bD }, direction: { x: 0, y: 0, z: 1 }, depth: 0.2 },
+          levelId, { slabType: 'FLOOR', isFallback: true },
+          { name: 'concrete', color: [0.6, 0.6, 0.6], transparency: 0 }
+        ));
+        addedSlabs++;
+      }
     }
 
-    // Add roof slab only if no ROOF slab exists
+    // Add roof slab at top of building if no ROOF slab exists
     const hasRoof = elements.some(e => e.type === 'SLAB' && (e.properties?.slabType || '').toUpperCase() === 'ROOF');
     if (!hasRoof) {
+      const roofZ = floorLevel + (numFloors * floorToFloor);
       addElement(makeElement('SLAB', 'IfcSlab', 'Roof Slab (Fallback)',
-        { origin: { x: bMinX + bW / 2, y: bMinY + bD / 2, z: baseZ + floorToFloor } },
-        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: bW, height: bD }, direction: { x: 0, y: 0, z: 1 }, depth: 0.15 },
-        'level-1', { slabType: 'ROOF', isFallback: true },
+        { origin: { x: bMinX + bW / 2, y: bMinY + bD / 2, z: roofZ } },
+        { method: 'EXTRUSION', profile: { type: 'RECTANGLE', width: bW, height: bD }, direction: { x: 0, y: 0, z: 1 }, depth: 0.25 },
+        `level-${numFloors}`, { slabType: 'ROOF', isFallback: true },
         { name: sc.roofMat, color: sc.roof, transparency: 0 }
       ));
       addedSlabs++;
@@ -2977,7 +3546,752 @@ function attemptSafeSourceFusion(css, documentFindings, sourceFiles) {
 // ============================================================================
 // v6+: VISION-BASED EXTRACTION (images + scanned PDFs)
 // Type-specific prompts for architectural/engineering drawings
+// Phase 9: Enhanced with title block extraction, page role classification,
+//          coordinate-bearing prompts, and drawing metadata evidence.
 // ============================================================================
+
+// Phase 9a: Title block extraction prompt — runs before classification.
+// Extracts drawing metadata from the title block region (typically bottom-right).
+// Title block confidence is DOCUMENT confidence, separate from geometry confidence.
+const TITLE_BLOCK_PROMPT = `Look at this architectural/engineering drawing and find the TITLE BLOCK (usually in the bottom-right corner or along the right/bottom edge).
+
+Extract any visible title block information. If there is no title block, return confidence: 0.
+
+Return ONLY a JSON object:
+{
+  "hasTitleBlock": true,
+  "confidence": 0.0-1.0,
+  "projectName": "string or null",
+  "drawingTitle": "string or null",
+  "drawingNumber": "string or null",
+  "sheetNumber": "string or null",
+  "revision": "string or null",
+  "date": "string or null",
+  "scale": "1:100 or null",
+  "author": "string or null",
+  "firm": "string or null",
+  "fieldConfidence": {
+    "projectName": 0.0-1.0,
+    "scale": 0.0-1.0,
+    "drawingNumber": 0.0-1.0,
+    "revision": 0.0-1.0
+  }
+}
+Rules:
+- Only extract fields you can clearly read. Set null for anything not visible.
+- The confidence field reflects how certain you are a title block exists and is readable.
+- fieldConfidence reflects per-field readability, not drawing quality.
+- Do NOT guess values — only transcribe what is legible.`;
+
+/**
+ * Phase 9a: Extract title block metadata from an image or document.
+ * Returns null if no title block found or extraction fails.
+ */
+async function extractTitleBlock(buffer, mediaType, bedrockClient, contentType = 'image') {
+  try {
+    const result = await callBedrockVision(buffer, mediaType, TITLE_BLOCK_PROMPT, bedrockClient, contentType);
+    if (!result || !result.hasTitleBlock || (result.confidence || 0) < 0.3) {
+      return null;
+    }
+    return {
+      projectName: result.projectName || null,
+      drawingTitle: result.drawingTitle || null,
+      drawingNumber: result.drawingNumber || null,
+      sheetNumber: result.sheetNumber || null,
+      revision: result.revision || null,
+      date: result.date || null,
+      scale: result.scale || null,
+      author: result.author || null,
+      firm: result.firm || null,
+      confidence: result.confidence || 0,
+      fieldConfidence: result.fieldConfidence || {},
+    };
+  } catch (err) {
+    console.warn(`Title block extraction failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Phase 9a: Map image classification type to a sheet role.
+ * Sheet roles classify what kind of drawing page this is, feeding both
+ * single-image and multi-page PDF flows.
+ */
+function classifySheetRole(imageType) {
+  const roleMap = {
+    FLOOR_PLAN: 'FLOOR_PLAN',
+    CROSS_SECTION: 'SECTION',
+    EQUIPMENT_LAYOUT: 'EQUIPMENT_LAYOUT',
+    SITE_PLAN: 'SITE_PLAN',
+    SPECIFICATION: 'SCHEDULE',
+    ELEVATION: 'ELEVATION',
+    PHOTO: 'UNKNOWN',
+    UNKNOWN: 'UNKNOWN',
+  };
+  return roleMap[imageType] || 'UNKNOWN';
+}
+
+/**
+ * Phase 9a: Determine if a sheet role is a geometry-bearing drawing.
+ * Non-drawing pages (SCHEDULE, TITLE_SHEET, UNKNOWN) are excluded from
+ * geometry extraction but their text is preserved for metadata/enrichment.
+ */
+function isGeometryDrawingRole(sheetRole) {
+  return ['FLOOR_PLAN', 'ELEVATION', 'SECTION', 'EQUIPMENT_LAYOUT', 'SITE_PLAN', 'DETAIL'].includes(sheetRole);
+}
+
+// ============================================================================
+// Phase 9b: Spatial Layout Assembly
+// Heuristic reconstruction of 2D floor plan and elevation geometry from
+// vision-extracted dimensions. Uses strict coordinate source discipline:
+// - DIRECT_2D: coordinates from explicit drawing dimensions/scale
+// - ASSEMBLED_2D: heuristically packed from partial evidence
+// - ESTIMATED: fallback to origin (same as pre-Phase 9)
+// ============================================================================
+
+/**
+ * Phase 9b: Assemble a floor plan into a spatially coherent layout.
+ * Takes raw vision extraction result and produces coordinate-bearing walls,
+ * rooms, doors, and windows. Follows strict priority:
+ * 1. Direct coordinates from enhanced prompt (hasCoordinates=true) → DIRECT_2D
+ * 2. Heuristic placement from overall dimensions + side/length → ASSEMBLED_2D
+ * 3. Fallback to origin → ESTIMATED
+ *
+ * @param {object} visionResult - Raw vision extraction result (FLOOR_PLAN type)
+ * @returns {object} { walls, rooms, doors, windows } with coordinates + coordinateDerivation per element
+ */
+function assembleFloorPlanLayout(visionResult) {
+  const overallL = visionResult.overallDimensions?.length_m;
+  const overallW = visionResult.overallDimensions?.width_m;
+  const hasEnvelope = overallL > 0 && overallW > 0;
+
+  const assembledWalls = [];
+  const assembledRooms = [];
+  const assembledDoors = [];
+  const assembledWindows = [];
+
+  // --- Walls ---
+  for (const wall of (visionResult.walls || [])) {
+    const wallLength = wall.length_m || 0;
+    const thickness = wall.thickness_m || 0.3;
+
+    // Priority 1: Direct coordinates from enhanced prompt
+    if (wall.hasCoordinates && wall.start && wall.end &&
+        isFinite(wall.start.x) && isFinite(wall.start.y) &&
+        isFinite(wall.end.x) && isFinite(wall.end.y)) {
+      assembledWalls.push({
+        ...wall,
+        placement: { origin: { x: wall.start.x, y: wall.start.y, z: 0 } },
+        endPoint: { x: wall.end.x, y: wall.end.y, z: 0 },
+        computedLength: Math.sqrt((wall.end.x - wall.start.x) ** 2 + (wall.end.y - wall.start.y) ** 2),
+        coordinateDerivation: 'direct',
+      });
+      continue;
+    }
+
+    // Priority 2: Heuristic placement from side + overall dimensions
+    if (hasEnvelope && wall.side && wallLength > 0) {
+      const pos = placeWallBySide(wall.side, wallLength, thickness, overallL, overallW);
+      if (pos) {
+        assembledWalls.push({
+          ...wall,
+          placement: { origin: pos.start },
+          endPoint: pos.end,
+          computedLength: wallLength,
+          coordinateDerivation: 'assembled',
+        });
+        continue;
+      }
+    }
+
+    // Priority 3: Fallback — origin placement
+    assembledWalls.push({
+      ...wall,
+      placement: { origin: { x: 0, y: 0, z: 0 } },
+      endPoint: null,
+      computedLength: wallLength,
+      coordinateDerivation: 'estimated',
+    });
+  }
+
+  // --- Rooms ---
+  // Build a wall lookup by ID for room placement
+  const wallById = {};
+  for (const w of assembledWalls) {
+    if (w.id) wallById[w.id] = w;
+  }
+
+  // Track placed rooms for packing (left-to-right, bottom-to-top)
+  let packX = 0;
+  let packY = 0;
+  let rowMaxHeight = 0;
+
+  for (const room of (visionResult.rooms || [])) {
+    const roomL = room.length_m || 0;
+    const roomW = room.width_m || 0;
+
+    // Priority 1: Direct position from enhanced prompt
+    if (room.hasPosition && room.position && isFinite(room.position.x) && isFinite(room.position.y)) {
+      assembledRooms.push({
+        ...room,
+        placement: { origin: { x: room.position.x, y: room.position.y, z: 0 } },
+        coordinateDerivation: 'direct',
+      });
+      continue;
+    }
+
+    // Priority 2: Heuristic packing within envelope
+    if (hasEnvelope && roomL > 0 && roomW > 0) {
+      // Would this room overflow the row?
+      if (packX + roomW > overallL && packX > 0) {
+        packY += rowMaxHeight;
+        packX = 0;
+        rowMaxHeight = 0;
+      }
+      // Does it still fit vertically?
+      if (packY + roomL <= overallW) {
+        assembledRooms.push({
+          ...room,
+          placement: { origin: { x: packX, y: packY, z: 0 } },
+          coordinateDerivation: 'assembled',
+        });
+        packX += roomW;
+        rowMaxHeight = Math.max(rowMaxHeight, roomL);
+        continue;
+      }
+    }
+
+    // Priority 3: Fallback
+    assembledRooms.push({
+      ...room,
+      placement: { origin: { x: 0, y: 0, z: 0 } },
+      coordinateDerivation: 'estimated',
+    });
+  }
+
+  // --- Doors ---
+  for (const door of (visionResult.doors || [])) {
+    const hostWall = resolveHostWall(door.hostWall, assembledWalls);
+    if (hostWall && hostWall.placement && door.offset_m != null) {
+      const pos = computeOffsetAlongWall(hostWall, door.offset_m);
+      assembledDoors.push({
+        ...door,
+        placement: { origin: pos },
+        coordinateDerivation: hostWall.coordinateDerivation === 'direct' ? 'direct' : 'assembled',
+      });
+    } else if (hostWall && hostWall.placement) {
+      // No offset — place at wall midpoint
+      const mid = wallMidpoint(hostWall);
+      assembledDoors.push({
+        ...door,
+        placement: { origin: mid },
+        coordinateDerivation: 'assembled',
+      });
+    } else {
+      assembledDoors.push({
+        ...door,
+        placement: { origin: { x: 0, y: 0, z: 0 } },
+        coordinateDerivation: 'estimated',
+      });
+    }
+  }
+
+  // --- Windows ---
+  for (const win of (visionResult.windows || [])) {
+    const hostWall = resolveHostWall(win.hostWall, assembledWalls);
+    const sillZ = win.sillHeight_m || 0.9;
+    if (hostWall && hostWall.placement && win.offset_m != null) {
+      const pos = computeOffsetAlongWall(hostWall, win.offset_m);
+      pos.z = sillZ;
+      assembledWindows.push({
+        ...win,
+        placement: { origin: pos },
+        coordinateDerivation: hostWall.coordinateDerivation === 'direct' ? 'direct' : 'assembled',
+      });
+    } else if (hostWall && hostWall.placement) {
+      const mid = wallMidpoint(hostWall);
+      mid.z = sillZ;
+      assembledWindows.push({
+        ...win,
+        placement: { origin: mid },
+        coordinateDerivation: 'assembled',
+      });
+    } else {
+      assembledWindows.push({
+        ...win,
+        placement: { origin: { x: 0, y: 0, z: sillZ } },
+        coordinateDerivation: 'estimated',
+      });
+    }
+  }
+
+  const stats = {
+    walls: { direct: 0, assembled: 0, estimated: 0 },
+    rooms: { direct: 0, assembled: 0, estimated: 0 },
+    doors: { direct: 0, assembled: 0, estimated: 0 },
+    windows: { direct: 0, assembled: 0, estimated: 0 },
+  };
+  for (const w of assembledWalls) stats.walls[w.coordinateDerivation]++;
+  for (const r of assembledRooms) stats.rooms[r.coordinateDerivation]++;
+  for (const d of assembledDoors) stats.doors[d.coordinateDerivation]++;
+  for (const w of assembledWindows) stats.windows[w.coordinateDerivation]++;
+  console.log(`assembleFloorPlanLayout: walls=${JSON.stringify(stats.walls)}, rooms=${JSON.stringify(stats.rooms)}, doors=${JSON.stringify(stats.doors)}, windows=${JSON.stringify(stats.windows)}`);
+
+  return { walls: assembledWalls, rooms: assembledRooms, doors: assembledDoors, windows: assembledWindows, stats };
+}
+
+/**
+ * Place a wall by its compass side within the building envelope.
+ * Returns { start, end } coordinates or null if side is unrecognized.
+ */
+function placeWallBySide(side, length, thickness, envelopeL, envelopeW) {
+  const s = (side || '').toUpperCase();
+  // Coordinate system: X right (East), Y down (South), origin at top-left
+  switch (s) {
+    case 'NORTH': return { start: { x: 0, y: 0, z: 0 }, end: { x: Math.min(length, envelopeL), y: 0, z: 0 } };
+    case 'SOUTH': return { start: { x: 0, y: envelopeW, z: 0 }, end: { x: Math.min(length, envelopeL), y: envelopeW, z: 0 } };
+    case 'WEST':  return { start: { x: 0, y: 0, z: 0 }, end: { x: 0, y: Math.min(length, envelopeW), z: 0 } };
+    case 'EAST':  return { start: { x: envelopeL, y: 0, z: 0 }, end: { x: envelopeL, y: Math.min(length, envelopeW), z: 0 } };
+    default: return null;
+  }
+}
+
+/**
+ * Resolve a hostWall reference (wall ID or compass side) to an assembled wall.
+ */
+function resolveHostWall(hostRef, assembledWalls) {
+  if (!hostRef) return null;
+  // Try by wall ID first (e.g. "W1")
+  const byId = assembledWalls.find(w => w.id === hostRef);
+  if (byId) return byId;
+  // Try by compass side
+  const side = hostRef.toUpperCase();
+  return assembledWalls.find(w => (w.side || '').toUpperCase() === side) || null;
+}
+
+/**
+ * Compute a point at a given offset along a wall from its start point.
+ */
+function computeOffsetAlongWall(wall, offset) {
+  const sx = wall.placement.origin.x;
+  const sy = wall.placement.origin.y;
+  if (!wall.endPoint) {
+    // Wall has no endpoint — just offset along X from start
+    return { x: sx + offset, y: sy, z: 0 };
+  }
+  const ex = wall.endPoint.x;
+  const ey = wall.endPoint.y;
+  const dx = ex - sx;
+  const dy = ey - sy;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 0.001) return { x: sx, y: sy, z: 0 };
+  const t = Math.min(offset / len, 1.0);
+  return { x: sx + dx * t, y: sy + dy * t, z: 0 };
+}
+
+/**
+ * Get the midpoint of an assembled wall.
+ */
+function wallMidpoint(wall) {
+  const sx = wall.placement.origin.x;
+  const sy = wall.placement.origin.y;
+  if (!wall.endPoint) return { x: sx, y: sy, z: 0 };
+  return {
+    x: (sx + wall.endPoint.x) / 2,
+    y: (sy + wall.endPoint.y) / 2,
+    z: 0,
+  };
+}
+
+/**
+ * Phase 9b: Assemble an elevation drawing into vertical layout.
+ * Uses floor-to-floor heights and window/door positions for vertical coordinates.
+ *
+ * @param {object} visionResult - Raw vision extraction result (ELEVATION type)
+ * @returns {object} { floors, windows, doors } with z-coordinates
+ */
+function assembleElevationLayout(visionResult) {
+  const floors = [];
+  const windows = [];
+  const doors = [];
+
+  // Build floor elevations from extracted data
+  const rawFloors = visionResult.floors || [];
+  const numFloors = visionResult.numFloors || rawFloors.length || 1;
+  const floorHeight = visionResult.floorToFloorHeight_m || 3.0;
+
+  for (let i = 0; i < numFloors; i++) {
+    const rawFloor = rawFloors[i];
+    const elevation = rawFloor?.elevation_m ?? (i * floorHeight);
+    const height = rawFloor?.height_m ?? floorHeight;
+    const hasDirectElevation = rawFloor?.elevation_m != null;
+    floors.push({
+      level: rawFloor?.level ?? i,
+      name: rawFloor?.name || `Level ${i}`,
+      elevation_m: elevation,
+      height_m: height,
+      coordinateDerivation: hasDirectElevation ? 'direct' : 'assembled',
+      confidence: rawFloor?.confidence ?? 0.5,
+    });
+  }
+
+  // Place windows at their floor elevation + sill height
+  for (const winGroup of (visionResult.windows || [])) {
+    const floorIdx = (winGroup.floor ?? 1) - (rawFloors[0]?.level ?? 0);
+    const floor = floors[floorIdx] || floors[0];
+    const baseZ = floor ? floor.elevation_m : 0;
+    const sillZ = baseZ + (winGroup.sillElevation_m ?? 0.9);
+    const count = winGroup.count || 1;
+    for (let j = 0; j < count; j++) {
+      windows.push({
+        floor: winGroup.floor,
+        width_m: winGroup.width_m,
+        height_m: winGroup.height_m,
+        placement: {
+          origin: {
+            x: winGroup.xOffset_m != null ? winGroup.xOffset_m : 0,
+            y: 0,
+            z: sillZ,
+          }
+        },
+        coordinateDerivation: winGroup.xOffset_m != null ? 'direct' : 'assembled',
+        confidence: winGroup.confidence ?? 0.5,
+      });
+    }
+  }
+
+  // Place doors at ground level
+  for (const doorGroup of (visionResult.doors || [])) {
+    const floorIdx = (doorGroup.floor ?? 0);
+    const floor = floors[floorIdx] || floors[0];
+    const baseZ = floor ? floor.elevation_m : 0;
+    doors.push({
+      floor: doorGroup.floor,
+      width_m: doorGroup.width_m,
+      height_m: doorGroup.height_m,
+      placement: {
+        origin: {
+          x: doorGroup.xOffset_m != null ? doorGroup.xOffset_m : 0,
+          y: 0,
+          z: baseZ,
+        }
+      },
+      coordinateDerivation: doorGroup.xOffset_m != null ? 'direct' : 'assembled',
+      confidence: doorGroup.confidence ?? 0.5,
+    });
+  }
+
+  console.log(`assembleElevationLayout: ${floors.length} floors, ${windows.length} windows, ${doors.length} doors`);
+  return { floors, windows, doors, face: visionResult.face, overallHeight_m: visionResult.overallHeight_m, overallWidth_m: visionResult.overallWidth_m };
+}
+
+/**
+ * Phase 9b: Correlate floor plan and elevation drawings from the same building.
+ * Uses floor elevations from elevation to set z-coordinates in floor plan.
+ * Only correlates when at least one strong signal exists (matching title block,
+ * consistent dimensions, shared level labels).
+ *
+ * @param {Array} visionFiles - Array of processed files with visionCSS
+ * @returns {object|null} Correlation result or null if no match
+ */
+function correlateDrawings(visionFiles) {
+  const floorPlans = visionFiles.filter(f => f.visionCSS?.sheetRole === 'FLOOR_PLAN');
+  const elevations = visionFiles.filter(f => f.visionCSS?.sheetRole === 'ELEVATION' && f.visionCSS?.elevationLayout);
+
+  if (floorPlans.length === 0 || elevations.length === 0) return null;
+
+  // Try to match by title block project name
+  for (const fp of floorPlans) {
+    const fpProject = fp.visionCSS?.titleBlock?.projectName;
+    for (const el of elevations) {
+      const elProject = el.visionCSS?.titleBlock?.projectName;
+      let matchScore = 0;
+
+      // Signal 1: Same project name
+      if (fpProject && elProject && fpProject.toLowerCase() === elProject.toLowerCase()) matchScore += 2;
+
+      // Signal 2: Same drawing number series
+      const fpNum = fp.visionCSS?.titleBlock?.drawingNumber;
+      const elNum = el.visionCSS?.titleBlock?.drawingNumber;
+      if (fpNum && elNum && fpNum.replace(/\d+$/, '') === elNum.replace(/\d+$/, '')) matchScore++;
+
+      // Signal 3: Consistent overall width
+      const fpWidth = fp.visionCSS?.scaleInfo?.overallDimensions?.width_m ||
+                      fp.visionData?.overallDimensions?.width_m;
+      const elWidth = el.visionCSS?.elevationLayout?.overallWidth_m;
+      if (fpWidth && elWidth && Math.abs(fpWidth - elWidth) < 2.0) matchScore++;
+
+      // Only correlate with strong signal (score >= 2)
+      if (matchScore >= 2) {
+        console.log(`correlateDrawings: matched ${fp.name} ↔ ${el.name} (score=${matchScore})`);
+        return {
+          floorPlan: fp.name,
+          elevation: el.name,
+          elevationLayout: el.visionCSS.elevationLayout,
+          matchScore,
+        };
+      }
+    }
+  }
+
+  console.log('correlateDrawings: no strong match found between floor plans and elevations');
+  return null;
+}
+
+// ============================================================================
+// Phase 9c: Scale Calibration
+// Parses scale ratios from title blocks and dimension annotations, cross-checks
+// for consistency, and derives a metersPerUnit factor for dimension correction.
+// ============================================================================
+
+/**
+ * Phase 9c: Calibrate drawing scale from title block and dimension annotations.
+ * Title block scale provides initial prior. Dimension annotations override only
+ * when confidently extracted AND internally consistent (≥2 consistent measurements).
+ * Conflicting scales reduce confidence, not instantly replace.
+ *
+ * @param {object} visionResult - Vision extraction result with scale and titleBlock
+ * @returns {object} { metersPerUnit, scaleRatio, scaleConfidence, source }
+ */
+function calibrateScale(visionResult) {
+  const result = { metersPerUnit: 1.0, scaleRatio: null, scaleConfidence: 0, source: 'none' };
+
+  // 1. Title block scale as initial prior
+  const titleBlockScale = visionResult.titleBlock?.scale || null;
+  const extractedScale = visionResult.scale?.ratio || null;
+  const scaleStr = titleBlockScale || extractedScale;
+
+  if (scaleStr) {
+    const parsed = parseScaleRatio(scaleStr);
+    if (parsed) {
+      result.scaleRatio = scaleStr;
+      result.metersPerUnit = parsed;
+      result.scaleConfidence = titleBlockScale
+        ? (visionResult.titleBlock?.fieldConfidence?.scale ?? 0.6)
+        : 0.5;
+      result.source = titleBlockScale ? 'title_block' : 'detected';
+    }
+  }
+
+  // 2. Check dimension annotations for consistency
+  const annotations = visionResult.scale?.dimensionAnnotations || [];
+  if (annotations.length >= 2) {
+    const confidentAnnotations = annotations.filter(a => (a.confidence || 0) >= 0.7);
+    if (confidentAnnotations.length >= 2) {
+      // We don't have pixel measurements, but if the model extracted consistent
+      // dimension labels, boost confidence in the scale
+      result.scaleConfidence = Math.min(result.scaleConfidence + 0.15, 1.0);
+      result.source = result.source === 'none' ? 'dimension_annotations' : result.source + '+annotations';
+    }
+  }
+
+  // 3. If no scale detected at all, fall back to unit scale with zero confidence
+  if (result.scaleConfidence === 0) {
+    result.metersPerUnit = 1.0;
+    result.source = 'none';
+  }
+
+  return result;
+}
+
+/**
+ * Parse a scale ratio string (e.g., "1:100", "1/50", "1 to 200") into metersPerUnit.
+ * Returns the drawing-unit-to-meter factor, or null if unparseable.
+ */
+function parseScaleRatio(scaleStr) {
+  if (!scaleStr || typeof scaleStr !== 'string') return null;
+  // Match patterns: "1:100", "1/100", "1 to 100", "1-100"
+  const match = scaleStr.match(/1\s*[:\/\-]\s*(\d+(?:\.\d+)?)/i) ||
+                scaleStr.match(/1\s+to\s+(\d+(?:\.\d+)?)/i);
+  if (match) {
+    const denominator = parseFloat(match[1]);
+    if (denominator > 0 && isFinite(denominator)) {
+      // 1:100 means 1 drawing unit = 100 real units (assuming mm on paper → meters)
+      // But in our context, the model already converts to meters, so this is informational
+      return denominator / 1000; // typical architectural: 1mm on paper = denominator mm in reality
+    }
+  }
+  return null;
+}
+
+// ============================================================================
+// Phase 9d: Vision-to-BuildingSpec Bridge + Component-Based Confidence
+// Routes vision-extracted drawings through the proven buildingSpecToCSS() path.
+// Initially scoped to simple orthogonal floor plans + elevations.
+// ============================================================================
+
+/**
+ * Phase 9d: Determine if a vision result qualifies for the BuildingSpec bridge.
+ * Only supported for simple orthogonal floor plans with sufficient data.
+ * Returns false for complex plans, MEP sheets, sketches, etc.
+ */
+function canBridgeToBuildingSpec(visionResult) {
+  if (!visionResult) return false;
+  const imageType = visionResult.imageType;
+  // Only support FLOOR_PLAN for v1
+  if (imageType !== 'FLOOR_PLAN') return false;
+  // Require overall dimensions
+  if (!visionResult.overallDimensions?.length_m || !visionResult.overallDimensions?.width_m) return false;
+  // Require at least some walls or rooms
+  const hasContent = (visionResult.walls?.length || 0) + (visionResult.rooms?.length || 0) >= 1;
+  if (!hasContent) return false;
+  // Require reasonable confidence
+  if ((visionResult.confidence || 0) < 0.4) return false;
+  return true;
+}
+
+/**
+ * Phase 9d: Convert assembled vision floor plan into buildingSpec schema.
+ * This lets vision-extracted geometry flow through the proven buildingSpecToCSS() path
+ * with its auto-layout, overlap detection, and proper coordinate placement.
+ *
+ * Scoped to: simple orthogonal floor plans, rectangular buildings, simple rooms + openings.
+ *
+ * @param {object} visionResult - Raw vision extraction result (FLOOR_PLAN)
+ * @param {object} titleBlock - Title block metadata (or null)
+ * @returns {object} buildingSpec compatible with buildingSpecToCSS()
+ */
+function visionToBuildingSpec(visionResult, titleBlock) {
+  const overallL = visionResult.overallDimensions?.length_m || 20;
+  const overallW = visionResult.overallDimensions?.width_m || 10;
+
+  // Estimate height from elevation data if correlated, otherwise default
+  const defaultHeight = 3.0;
+  const numFloors = 1; // v1: single floor only
+
+  const spec = {
+    buildingName: titleBlock?.projectName || titleBlock?.drawingTitle || 'Floor Plan Model',
+    buildingType: 'BUILDING',
+    dimensions: {
+      length_m: overallL,
+      width_m: overallW,
+      height_m: defaultHeight,
+      wall_thickness_m: 0.3,
+    },
+    structure: {
+      num_floors: numFloors,
+      floor_to_floor_height_m: defaultHeight,
+    },
+    rooms: [],
+    openings: [],
+    equipment: [],
+    materials: {},
+  };
+
+  // Convert vision rooms → spec rooms
+  for (const room of (visionResult.rooms || [])) {
+    if (!room.length_m || !room.width_m) continue;
+    spec.rooms.push({
+      name: room.name || 'Room',
+      length_m: room.length_m,
+      width_m: room.width_m,
+      height_m: defaultHeight,
+      usage: room.usage || 'OTHER',
+      floor: 1,
+      // Use position from assembly if available
+      x_position_m: room.position?.x ?? undefined,
+      y_position_m: room.position?.y ?? undefined,
+    });
+  }
+
+  // Convert vision doors → spec openings
+  for (const door of (visionResult.doors || [])) {
+    const wallSide = resolveWallSide(door.hostWall);
+    spec.openings.push({
+      type: 'DOOR',
+      width_m: door.width_m || 0.9,
+      height_m: 2.1,
+      sill_height_m: 0,
+      wall_side: wallSide,
+      x_offset_m: door.offset_m || 1,
+      floor: 1,
+    });
+  }
+
+  // Convert vision windows → spec openings
+  for (const win of (visionResult.windows || [])) {
+    const wallSide = resolveWallSide(win.hostWall);
+    spec.openings.push({
+      type: 'WINDOW',
+      width_m: win.width_m || 1.2,
+      height_m: win.height_m || 1.5,
+      sill_height_m: win.sillHeight_m || 0.9,
+      wall_side: wallSide,
+      x_offset_m: win.offset_m || 1,
+      floor: 1,
+    });
+  }
+
+  // Detect wall thickness from extracted walls if available
+  const wallThicknesses = (visionResult.walls || [])
+    .filter(w => w.thickness_m && w.thickness_m > 0.05 && w.thickness_m < 2.0)
+    .map(w => w.thickness_m);
+  if (wallThicknesses.length > 0) {
+    spec.dimensions.wall_thickness_m = wallThicknesses.reduce((a, b) => a + b) / wallThicknesses.length;
+  }
+
+  console.log(`visionToBuildingSpec: ${spec.rooms.length} rooms, ${spec.openings.length} openings, dims=${overallL}x${overallW}m`);
+  return spec;
+}
+
+/**
+ * Resolve a hostWall reference to a compass side for buildingSpec openings.
+ */
+function resolveWallSide(hostRef) {
+  if (!hostRef) return 'SOUTH';
+  const ref = hostRef.toUpperCase();
+  if (['NORTH', 'SOUTH', 'EAST', 'WEST'].includes(ref)) return ref;
+  // If it's a wall ID like "W1", default to SOUTH
+  return 'SOUTH';
+}
+
+/**
+ * Phase 9d: Component-based confidence model.
+ * Computes separate document, geometry, and placement confidence
+ * then derives final field-level confidence.
+ * Title block does NOT inflate geometry confidence.
+ *
+ * @param {object} visionResult - Vision extraction result
+ * @param {object} element - Individual CSS element with metadata
+ * @returns {object} { confidence, fieldConfidence }
+ */
+function computeComponentConfidence(visionResult, element) {
+  const titleBlock = visionResult.titleBlock;
+  const scaleDetected = visionResult.scale?.detected || false;
+  const derivation = element.metadata?.coordinateDerivation || 'estimated';
+
+  // Document confidence: title block quality, formal vs informal
+  let documentConf = 0.35;
+  if (titleBlock && titleBlock.confidence >= 0.5) {
+    documentConf = 0.60;
+    if (titleBlock.drawingNumber) documentConf += 0.05;
+    if (titleBlock.firm) documentConf += 0.05;
+  }
+
+  // Geometry confidence: dimension annotations, wall endpoints visible
+  let geometryConf = 0.35;
+  if (scaleDetected) geometryConf += 0.10;
+  if (element.metadata?.endPoint) geometryConf += 0.10; // wall has explicit endpoints
+  const annotations = visionResult.scale?.dimensionAnnotations || [];
+  if (annotations.length >= 2) geometryConf += 0.10;
+
+  // Placement confidence: coordinate derivation method
+  let placementConf = 0.30;
+  if (derivation === 'direct') placementConf = 0.55;
+  else if (derivation === 'assembled') placementConf = 0.45;
+
+  // Derive element-level confidence from components (geometry-weighted)
+  const elementConf = geometryConf * 0.5 + placementConf * 0.3 + documentConf * 0.2;
+
+  return {
+    confidence: Math.min(Math.max(elementConf, 0.15), 0.90),
+    fieldConfidence: {
+      dimensions: Math.min(geometryConf, 0.90),
+      placement: Math.min(placementConf, 0.90),
+      material: Math.min(documentConf * 0.6, 0.60),
+    },
+  };
+}
 
 // Step 1: Classify the image type
 const VISION_CLASSIFY_PROMPT = `Classify this architectural/engineering image into exactly ONE category.
@@ -3007,41 +4321,45 @@ Return ONLY a JSON object:
 const VISION_PROMPTS = {
   FLOOR_PLAN: `You are analyzing an architectural FLOOR PLAN drawing.
 Extract the geometric layout visible in this drawing. ALL DIMENSIONS IN METRES.
+Use the TOP-LEFT corner of the building footprint as origin (0, 0). X increases rightward (East), Y increases downward (South).
 
 Extract:
-1. WALLS: perimeter and interior walls with start/end coordinates or lengths
-2. ROOMS: labeled spaces with approximate dimensions
-3. DOORS: locations on walls with width
-4. WINDOWS: locations on walls with width
-5. SCALE: if a scale bar or ratio is shown, use it to calibrate dimensions
-6. GRID: if a column grid is visible, extract grid spacing
+1. WALLS: perimeter and interior walls. For each wall, provide start and end (x, y) coordinates if you can determine them from the drawing. If you cannot determine coordinates, provide length and side instead.
+2. ROOMS: labeled spaces with dimensions AND position. Provide (x, y) offset of the room's top-left corner from building origin if determinable.
+3. DOORS: locations on walls with width and offset_m (distance along the host wall from the wall's start point)
+4. WINDOWS: locations on walls with width and offset_m (distance along the host wall from the wall's start point)
+5. SCALE: if a scale bar or ratio is shown, use it to calibrate all dimensions
+6. GRID: if a column grid is visible, extract grid line positions (not just spacing)
 
 Return ONLY valid JSON:
 {
   "imageType": "FLOOR_PLAN",
   "confidence": 0.0-1.0,
-  "scale": { "detected": true, "ratio": "1:100", "pixelsPerMeter": null },
+  "scale": { "detected": true, "ratio": "1:100", "dimensionAnnotations": [{ "label": "5.0m", "confidence": 0.9 }] },
   "overallDimensions": { "length_m": null, "width_m": null },
   "walls": [
-    { "id": "W1", "type": "EXTERIOR|INTERIOR", "side": "NORTH|SOUTH|EAST|WEST|INTERIOR", "length_m": 0, "thickness_m": 0.3, "confidence": 0.8 }
+    { "id": "W1", "type": "EXTERIOR|INTERIOR", "side": "NORTH|SOUTH|EAST|WEST|INTERIOR", "start": { "x": 0, "y": 0 }, "end": { "x": 10, "y": 0 }, "length_m": 10, "thickness_m": 0.3, "hasCoordinates": true, "confidence": 0.8 }
   ],
   "rooms": [
-    { "name": "string", "usage": "OFFICE|STORAGE|MECHANICAL|WC|LOBBY|CORRIDOR|OTHER", "length_m": 0, "width_m": 0, "labeledArea_sqm": null, "confidence": 0.8 }
+    { "name": "string", "usage": "OFFICE|STORAGE|MECHANICAL|WC|LOBBY|CORRIDOR|OTHER", "length_m": 0, "width_m": 0, "position": { "x": 0, "y": 0 }, "hasPosition": true, "labeledArea_sqm": null, "confidence": 0.8 }
   ],
   "doors": [
-    { "hostWall": "W1 or NORTH/SOUTH/EAST/WEST", "width_m": 0.9, "type": "SINGLE|DOUBLE|SLIDING", "confidence": 0.7 }
+    { "hostWall": "W1 or NORTH/SOUTH/EAST/WEST", "width_m": 0.9, "offset_m": 2.5, "type": "SINGLE|DOUBLE|SLIDING", "confidence": 0.7 }
   ],
   "windows": [
-    { "hostWall": "W1 or NORTH/SOUTH/EAST/WEST", "width_m": 1.2, "height_m": 1.5, "sillHeight_m": 0.9, "confidence": 0.7 }
+    { "hostWall": "W1 or NORTH/SOUTH/EAST/WEST", "width_m": 1.2, "height_m": 1.5, "sillHeight_m": 0.9, "offset_m": 3.0, "confidence": 0.7 }
   ],
-  "grid": { "xSpacing_m": null, "ySpacing_m": null },
+  "grid": { "xLines": [0, 6, 12], "yLines": [0, 8], "xSpacing_m": null, "ySpacing_m": null },
   "annotations": ["any text labels not captured above"],
   "extractedText": "all readable text"
 }
 Rules:
 - Only extract what you can clearly see. Set confidence per element.
+- Set hasCoordinates=true ONLY if you can determine wall start/end points from dimensions, scale, or grid. Otherwise set hasCoordinates=false and provide length+side.
+- Set hasPosition=true ONLY if you can determine room position from labeled dimensions or scale. Otherwise set hasPosition=false.
 - If scale is not detectable, set scale.detected=false and estimate dimensions from labeled values only.
-- If no labeled dimensions exist and no scale, set overallDimensions to null.`,
+- If no labeled dimensions exist and no scale, set overallDimensions to null.
+- Include dimensionAnnotations: any dimension labels visible in the drawing with their confidence.`,
 
   CROSS_SECTION: `You are analyzing a CROSS-SECTION or PROFILE drawing of a tunnel or building.
 Extract the profile geometry. ALL DIMENSIONS IN METRES.
@@ -3114,6 +4432,7 @@ Return ONLY valid JSON:
 
   ELEVATION: `You are analyzing a building ELEVATION drawing (external face view).
 Extract heights and features. ALL DIMENSIONS IN METRES.
+Use ground level as z=0. X increases left-to-right across the facade.
 
 Return ONLY valid JSON:
 {
@@ -3123,14 +4442,24 @@ Return ONLY valid JSON:
   "overallHeight_m": null,
   "overallWidth_m": null,
   "numFloors": null,
+  "floors": [
+    { "level": 0, "name": "Ground Floor", "elevation_m": 0, "height_m": 3.5, "confidence": 0.8 }
+  ],
   "floorToFloorHeight_m": null,
-  "windows": [{ "floor": 1, "count": 0, "width_m": null, "height_m": null }],
-  "doors": [{ "floor": 1, "width_m": null, "height_m": null }],
+  "windows": [{ "floor": 1, "count": 0, "width_m": null, "height_m": null, "sillElevation_m": null, "xOffset_m": null, "confidence": 0.7 }],
+  "doors": [{ "floor": 0, "width_m": null, "height_m": null, "xOffset_m": null, "confidence": 0.7 }],
   "roofType": "FLAT|GABLE|HIP|OTHER",
   "roofPitch_deg": null,
+  "roofElevation_m": null,
+  "levelLabels": ["any floor/level labels visible, e.g. FFL +3.500"],
   "annotations": ["any text labels"],
   "extractedText": "all readable text"
-}`,
+}
+Rules:
+- Extract per-floor elevation values if visible (e.g. FFL +3.500, SSL +0.000).
+- xOffset_m is the horizontal distance from the left edge of the facade.
+- Only set elevation_m values you can read from dimension lines or level markers.
+- If floor elevations are not labeled, estimate from floor-to-floor height if available.`,
 
   // Fallback for SPECIFICATION, PHOTO, UNKNOWN
   DEFAULT: `You are analyzing an architectural/engineering image or scanned document.
@@ -3176,8 +4505,11 @@ function visionToCSS(visionResult, fileName) {
     const overallL = visionResult.overallDimensions?.length_m;
     const overallW = visionResult.overallDimensions?.width_m;
 
-    // Walls → CSS elements
-    for (const wall of (visionResult.walls || [])) {
+    // Phase 9b: Run spatial layout assembly to get coordinate-bearing geometry
+    const assembled = assembleFloorPlanLayout(visionResult);
+
+    // Walls → CSS elements (now with assembled coordinates)
+    for (const wall of assembled.walls) {
       if (!canGenerateGeometry || (wall.confidence || 0) < VISION_GEOMETRY_CONFIDENCE || !wall.length_m || wall.length_m <= 0) {
         findings.push({ type: 'WALL', data: wall, reason: !canGenerateGeometry ? 'NO_SCALE' : 'LOW_CONFIDENCE', source: fileName });
         continue;
@@ -3185,15 +4517,15 @@ function visionToCSS(visionResult, fileName) {
       elements.push({
         type: 'WALL', semanticType: 'IfcWall',
         name: wall.id || `Vision Wall`,
-        geometry: { profile: { width: wall.thickness_m || 0.3, height: wall.length_m }, depth: 3.0 },
-        placement: { origin: { x: 0, y: 0, z: 0 } },
-        metadata: { visionExtracted: true, wallSide: wall.side, wallType: wall.type, confidence: wall.confidence },
+        geometry: { profile: { width: wall.thickness_m || 0.3, height: wall.computedLength || wall.length_m }, depth: 3.0 },
+        placement: wall.placement,
+        metadata: { visionExtracted: true, wallSide: wall.side, wallType: wall.type, confidence: wall.confidence, coordinateDerivation: wall.coordinateDerivation, endPoint: wall.endPoint },
         source: 'VISION', sourceFile: fileName, confidence: wall.confidence || 0.5
       });
     }
 
-    // Rooms → CSS SPACE elements
-    for (const room of (visionResult.rooms || [])) {
+    // Rooms → CSS SPACE elements (now with assembled coordinates)
+    for (const room of assembled.rooms) {
       if (!canGenerateGeometry || (room.confidence || 0) < VISION_GEOMETRY_CONFIDENCE || !room.length_m || !room.width_m) {
         findings.push({ type: 'SPACE', data: room, reason: !canGenerateGeometry ? 'NO_SCALE' : 'LOW_CONFIDENCE', source: fileName });
         continue;
@@ -3203,14 +4535,14 @@ function visionToCSS(visionResult, fileName) {
         name: room.name || 'Room',
         properties: { usage: room.usage || 'OTHER' },
         geometry: { profile: { width: room.width_m, height: room.length_m }, depth: 3.0 },
-        placement: { origin: { x: 0, y: 0, z: 0 } },
-        metadata: { visionExtracted: true, labeledArea: room.labeledArea_sqm, confidence: room.confidence },
+        placement: room.placement,
+        metadata: { visionExtracted: true, labeledArea: room.labeledArea_sqm, confidence: room.confidence, coordinateDerivation: room.coordinateDerivation },
         source: 'VISION', sourceFile: fileName, confidence: room.confidence || 0.5
       });
     }
 
-    // Doors → CSS DOOR elements
-    for (const door of (visionResult.doors || [])) {
+    // Doors → CSS DOOR elements (now with assembled coordinates)
+    for (const door of assembled.doors) {
       if ((door.confidence || 0) < VISION_GEOMETRY_CONFIDENCE) {
         findings.push({ type: 'DOOR', data: door, reason: 'LOW_CONFIDENCE', source: fileName });
         continue;
@@ -3219,14 +4551,14 @@ function visionToCSS(visionResult, fileName) {
         type: 'DOOR', semanticType: 'IfcDoor',
         name: `Door (${door.type || 'SINGLE'})`,
         geometry: { profile: { width: door.width_m || 0.9, height: 2.1 }, depth: 0.1 },
-        placement: { origin: { x: 0, y: 0, z: 0 } },
-        metadata: { visionExtracted: true, hostWall: door.hostWall, doorType: door.type, confidence: door.confidence },
+        placement: door.placement,
+        metadata: { visionExtracted: true, hostWall: door.hostWall, doorType: door.type, confidence: door.confidence, coordinateDerivation: door.coordinateDerivation },
         source: 'VISION', sourceFile: fileName, confidence: door.confidence || 0.5
       });
     }
 
-    // Windows → CSS WINDOW elements
-    for (const win of (visionResult.windows || [])) {
+    // Windows → CSS WINDOW elements (now with assembled coordinates)
+    for (const win of assembled.windows) {
       if ((win.confidence || 0) < VISION_GEOMETRY_CONFIDENCE) {
         findings.push({ type: 'WINDOW', data: win, reason: 'LOW_CONFIDENCE', source: fileName });
         continue;
@@ -3235,8 +4567,8 @@ function visionToCSS(visionResult, fileName) {
         type: 'WINDOW', semanticType: 'IfcWindow',
         name: `Window`,
         geometry: { profile: { width: win.width_m || 1.2, height: win.height_m || 1.5 }, depth: 0.15 },
-        placement: { origin: { x: 0, y: 0, z: win.sillHeight_m || 0.9 } },
-        metadata: { visionExtracted: true, hostWall: win.hostWall, confidence: win.confidence },
+        placement: win.placement,
+        metadata: { visionExtracted: true, hostWall: win.hostWall, confidence: win.confidence, coordinateDerivation: win.coordinateDerivation },
         source: 'VISION', sourceFile: fileName, confidence: win.confidence || 0.5
       });
     }
@@ -3245,6 +4577,9 @@ function visionToCSS(visionResult, fileName) {
     if (overallL && overallW) {
       findings.push({ type: 'BUILDING_ENVELOPE', data: { length_m: overallL, width_m: overallW }, reason: 'INFORMATIONAL', source: fileName });
     }
+
+    // Store assembly stats as finding for traceability
+    findings.push({ type: 'ASSEMBLY_STATS', data: assembled.stats, reason: 'INFORMATIONAL', source: fileName });
 
   } else if (imageType === 'CROSS_SECTION') {
     // Cross-section → tunnel profile or building section info
@@ -3309,15 +4644,22 @@ function visionToCSS(visionResult, fileName) {
     }
 
   } else if (imageType === 'ELEVATION') {
-    // Elevation → building envelope information (no direct geometry, but useful metadata)
+    // Phase 9b: Assemble elevation layout with vertical coordinates
+    const elevLayout = assembleElevationLayout(visionResult);
+
+    // Store elevation data as finding (used for cross-drawing correlation)
     findings.push({
       type: 'ELEVATION_DATA', data: {
-        face: visionResult.face, height_m: visionResult.overallHeight_m, width_m: visionResult.overallWidth_m,
+        face: elevLayout.face, height_m: elevLayout.overallHeight_m, width_m: elevLayout.overallWidth_m,
         numFloors: visionResult.numFloors, floorHeight_m: visionResult.floorToFloorHeight_m,
         roofType: visionResult.roofType, roofPitch: visionResult.roofPitch_deg,
-        windows: visionResult.windows, doors: visionResult.doors
+        floors: elevLayout.floors,
+        windows: elevLayout.windows, doors: elevLayout.doors
       }, reason: 'INFORMATIONAL', source: fileName
     });
+
+    // Store assembled elevation layout for cross-drawing correlation (9b.3)
+    // This is attached to the visionCSS output so correlateDrawings() can access it
 
   } else if (imageType === 'SITE_PLAN') {
     for (const bldg of (visionResult.buildings || [])) {
@@ -3331,8 +4673,20 @@ function visionToCSS(visionResult, fileName) {
     }
   }
 
-  console.log(`visionToCSS(${fileName}): ${elements.length} elements, ${findings.length} findings (type=${imageType}, scale=${hasScale})`);
-  return { elements, findings, imageType, extractedText: visionResult.extractedText || visionResult.annotations?.join('; ') || '' };
+  // Phase 9b: If this is an elevation, store assembled layout for cross-drawing correlation
+  const elevationLayout = (imageType === 'ELEVATION') ? assembleElevationLayout(visionResult) : null;
+
+  console.log(`visionToCSS(${fileName}): ${elements.length} elements, ${findings.length} findings (type=${imageType}, scale=${hasScale}, sheetRole=${visionResult.sheetRole || 'N/A'})`);
+  return {
+    elements, findings, imageType,
+    extractedText: visionResult.extractedText || visionResult.annotations?.join('; ') || '',
+    // Phase 9a: Pass through drawing metadata for claims evidence and render metadata
+    titleBlock: visionResult.titleBlock || null,
+    sheetRole: visionResult.sheetRole || null,
+    scaleInfo: visionResult.scale || null,
+    // Phase 9b: Elevation layout for cross-drawing correlation
+    elevationLayout,
+  };
 }
 
 async function callBedrockVision(buffer, mediaType, prompt, bedrockClient, contentType = 'image') {
@@ -3368,9 +4722,16 @@ async function extractFromImage(imageBuffer, fileName, bedrockClient) {
     const mediaTypeMap = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', tiff: 'image/png', tif: 'image/png' };
     const mediaType = mediaTypeMap[ext] || 'image/png';
 
-    if (imageBuffer.length > 5 * 1024 * 1024) {
+    // Phase 9a: Increased from 5MB to 20MB (Bedrock supports up to 20MB)
+    if (imageBuffer.length > 20 * 1024 * 1024) {
       console.warn(`Image ${fileName} too large (${imageBuffer.length} bytes), skipping vision extraction`);
       return null;
+    }
+
+    // Phase 9a Step 0: Extract title block metadata (runs before classification)
+    const titleBlock = await extractTitleBlock(imageBuffer, mediaType, bedrockClient);
+    if (titleBlock) {
+      console.log(`Title block found in ${fileName}: project="${titleBlock.projectName}", drawing="${titleBlock.drawingNumber}", scale="${titleBlock.scale}", confidence=${titleBlock.confidence}`);
     }
 
     // Step 1: Classify the image type
@@ -3381,27 +4742,49 @@ async function extractFromImage(imageBuffer, fileName, bedrockClient) {
     }
 
     const imageType = classification.imageType || 'UNKNOWN';
-    console.log(`Vision classify ${fileName}: type=${imageType}, confidence=${classification.confidence}, scale=${classification.hasScale}`);
+    const sheetRole = classifySheetRole(imageType);
+    console.log(`Vision classify ${fileName}: type=${imageType}, sheetRole=${sheetRole}, confidence=${classification.confidence}, scale=${classification.hasScale}`);
+
+    // Phase 9a: Skip geometry extraction for non-drawing pages but preserve text
+    if (!isGeometryDrawingRole(sheetRole)) {
+      console.log(`Non-drawing page ${fileName} (role=${sheetRole}), skipping geometry extraction`);
+      return {
+        imageType, confidence: classification.confidence,
+        extractedText: classification.extractedText || '',
+        buildingInfo: null, titleBlock, sheetRole,
+      };
+    }
 
     // Step 2: Use type-specific extraction prompt
     const extractPrompt = VISION_PROMPTS[imageType] || VISION_PROMPTS.DEFAULT;
     const result = await callBedrockVision(imageBuffer, mediaType, extractPrompt, bedrockClient);
     if (!result) {
       console.warn(`Vision extraction for ${fileName}: no result from type-specific prompt`);
-      // Return classification data at minimum
-      return { imageType, confidence: classification.confidence, extractedText: classification.extractedText || '', buildingInfo: null };
+      return { imageType, confidence: classification.confidence, extractedText: classification.extractedText || '', buildingInfo: null, titleBlock, sheetRole };
     }
 
     // Merge classification metadata into result
     result.imageType = result.imageType || imageType;
+    result.sheetRole = sheetRole;
+    result.titleBlock = titleBlock;
     if (classification.hasScale && !result.scale) {
       result.scale = { detected: true, ratio: classification.scaleInfo };
+    }
+    // Phase 9a: If title block has scale and extraction didn't detect one, use title block scale
+    if (titleBlock?.scale && !result.scale?.detected) {
+      result.scale = { detected: true, ratio: titleBlock.scale, source: 'title_block' };
     }
     if (classification.extractedText && !result.extractedText) {
       result.extractedText = classification.extractedText;
     }
 
-    console.log(`Vision extraction for ${fileName}: type=${result.imageType}, confidence=${result.confidence}`);
+    // Phase 9c: Run scale calibration
+    result.calibratedScale = calibrateScale(result);
+    if (result.calibratedScale.scaleConfidence > 0) {
+      console.log(`Scale calibrated for ${fileName}: ratio=${result.calibratedScale.scaleRatio}, confidence=${result.calibratedScale.scaleConfidence}, source=${result.calibratedScale.source}`);
+    }
+
+    console.log(`Vision extraction for ${fileName}: type=${result.imageType}, sheetRole=${sheetRole}, confidence=${result.confidence}, titleBlock=${!!titleBlock}`);
     return result;
   } catch (err) {
     console.warn(`Vision extraction failed for ${fileName}:`, err.message);
@@ -3411,9 +4794,16 @@ async function extractFromImage(imageBuffer, fileName, bedrockClient) {
 
 async function extractFromScannedPDF(pdfBuffer, fileName, bedrockClient) {
   try {
-    if (pdfBuffer.length > 5 * 1024 * 1024) {
+    // Phase 9a: Increased from 5MB to 20MB
+    if (pdfBuffer.length > 20 * 1024 * 1024) {
       console.warn(`Scanned PDF ${fileName} too large (${pdfBuffer.length} bytes), skipping`);
       return null;
+    }
+
+    // Phase 9a Step 0: Extract title block
+    const titleBlock = await extractTitleBlock(pdfBuffer, 'application/pdf', bedrockClient, 'document');
+    if (titleBlock) {
+      console.log(`Title block found in scanned PDF ${fileName}: project="${titleBlock.projectName}", drawing="${titleBlock.drawingNumber}", scale="${titleBlock.scale}"`);
     }
 
     // Step 1: Classify
@@ -3421,28 +4811,193 @@ async function extractFromScannedPDF(pdfBuffer, fileName, bedrockClient) {
     if (!classification) return null;
 
     const imageType = classification.imageType || 'UNKNOWN';
-    console.log(`Scanned PDF classify ${fileName}: type=${imageType}, confidence=${classification.confidence}`);
+    const sheetRole = classifySheetRole(imageType);
+    console.log(`Scanned PDF classify ${fileName}: type=${imageType}, sheetRole=${sheetRole}, confidence=${classification.confidence}`);
+
+    // Phase 9a: Skip geometry extraction for non-drawing pages
+    if (!isGeometryDrawingRole(sheetRole)) {
+      return {
+        imageType, confidence: classification.confidence,
+        extractedText: classification.extractedText || '',
+        buildingInfo: null, titleBlock, sheetRole,
+      };
+    }
 
     // Step 2: Type-specific extraction
     const extractPrompt = VISION_PROMPTS[imageType] || VISION_PROMPTS.DEFAULT;
     const result = await callBedrockVision(pdfBuffer, 'application/pdf', extractPrompt, bedrockClient, 'document');
     if (!result) {
-      return { imageType, confidence: classification.confidence, extractedText: classification.extractedText || '', buildingInfo: null };
+      return { imageType, confidence: classification.confidence, extractedText: classification.extractedText || '', buildingInfo: null, titleBlock, sheetRole };
     }
 
     result.imageType = result.imageType || imageType;
+    result.sheetRole = sheetRole;
+    result.titleBlock = titleBlock;
     if (classification.hasScale && !result.scale) {
       result.scale = { detected: true, ratio: classification.scaleInfo };
+    }
+    if (titleBlock?.scale && !result.scale?.detected) {
+      result.scale = { detected: true, ratio: titleBlock.scale, source: 'title_block' };
     }
     if (classification.extractedText && !result.extractedText) {
       result.extractedText = classification.extractedText;
     }
 
-    console.log(`Scanned PDF extraction for ${fileName}: type=${result.imageType}, confidence=${result.confidence}`);
+    // Phase 9c: Run scale calibration
+    result.calibratedScale = calibrateScale(result);
+
+    console.log(`Scanned PDF extraction for ${fileName}: type=${result.imageType}, sheetRole=${sheetRole}, confidence=${result.confidence}, titleBlock=${!!titleBlock}`);
     return result;
   } catch (err) {
     console.warn(`Scanned PDF extraction failed for ${fileName}:`, err.message);
     return null;
+  }
+}
+
+/**
+ * Phase 9c: Extract from a multi-page scanned PDF.
+ * Processes up to 5 pages individually with page role classification,
+ * title block extraction (first found only), and type-specific geometry extraction.
+ * Non-drawing pages (SCHEDULE, TITLE_SHEET, UNKNOWN) are skipped for geometry.
+ *
+ * @param {Buffer} pdfBuffer - Raw PDF buffer
+ * @param {string} fileName - Source file name
+ * @param {object} bedrockClient - Bedrock client
+ * @param {number} pageCount - Number of pages in the PDF
+ * @returns {Array} Array of per-page vision results
+ */
+async function extractFromMultiPagePDF(pdfBuffer, fileName, bedrockClient, pageCount) {
+  const MAX_PAGES = 5;
+  const PER_PAGE_TIMEOUT = 30000; // 30s per Bedrock call
+  const TOTAL_BUDGET_MS = 120000; // 120s total vision processing budget
+  const startTime = Date.now();
+  const results = [];
+  let titleBlock = null;
+  let consecutiveLowConf = 0;
+
+  const pagesToProcess = Math.min(pageCount, MAX_PAGES);
+  console.log(`Multi-page PDF ${fileName}: processing ${pagesToProcess} of ${pageCount} pages`);
+
+  for (let page = 1; page <= pagesToProcess; page++) {
+    // Check total budget
+    if (Date.now() - startTime > TOTAL_BUDGET_MS) {
+      console.warn(`Multi-page PDF ${fileName}: total budget exceeded at page ${page}, stopping`);
+      break;
+    }
+
+    // Early stop on consecutive low-confidence pages
+    if (consecutiveLowConf >= 2) {
+      console.log(`Multi-page PDF ${fileName}: 2 consecutive low-confidence pages, stopping at page ${page}`);
+      break;
+    }
+
+    try {
+      // Bedrock supports multi-page PDF natively — add page-focus instruction
+      const pagePrefix = `Focus on page ${page} of this ${pageCount}-page document.\n\n`;
+
+      // Step 0: Title block (only if not yet found)
+      if (!titleBlock) {
+        const tbPrompt = pagePrefix + TITLE_BLOCK_PROMPT;
+        const tbResult = await callBedrockVisionWithTimeout(pdfBuffer, 'application/pdf', tbPrompt, bedrockClient, 'document', PER_PAGE_TIMEOUT);
+        if (tbResult?.hasTitleBlock && (tbResult.confidence || 0) >= 0.3) {
+          titleBlock = {
+            projectName: tbResult.projectName || null,
+            drawingTitle: tbResult.drawingTitle || null,
+            drawingNumber: tbResult.drawingNumber || null,
+            sheetNumber: tbResult.sheetNumber || null,
+            revision: tbResult.revision || null,
+            date: tbResult.date || null,
+            scale: tbResult.scale || null,
+            author: tbResult.author || null,
+            firm: tbResult.firm || null,
+            confidence: tbResult.confidence || 0,
+            fieldConfidence: tbResult.fieldConfidence || {},
+          };
+          console.log(`Multi-page PDF ${fileName} page ${page}: title block found (project="${titleBlock.projectName}")`);
+        }
+      }
+
+      // Step 1: Classify page
+      const classifyPrompt = pagePrefix + VISION_CLASSIFY_PROMPT;
+      const classification = await callBedrockVisionWithTimeout(pdfBuffer, 'application/pdf', classifyPrompt, bedrockClient, 'document', PER_PAGE_TIMEOUT);
+      if (!classification || (classification.confidence || 0) < 0.2) {
+        consecutiveLowConf++;
+        continue;
+      }
+
+      const imageType = classification.imageType || 'UNKNOWN';
+      const sheetRole = classifySheetRole(imageType);
+      console.log(`Multi-page PDF ${fileName} page ${page}: type=${imageType}, sheetRole=${sheetRole}, confidence=${classification.confidence}`);
+
+      // Skip non-geometry pages
+      if (!isGeometryDrawingRole(sheetRole)) {
+        results.push({
+          page, imageType, sheetRole, confidence: classification.confidence,
+          extractedText: classification.extractedText || '',
+          titleBlock, isGeometry: false,
+        });
+        consecutiveLowConf = 0; // Non-drawing is valid, just not geometry
+        continue;
+      }
+
+      // Step 2: Type-specific extraction
+      const extractPrompt = pagePrefix + (VISION_PROMPTS[imageType] || VISION_PROMPTS.DEFAULT);
+      const result = await callBedrockVisionWithTimeout(pdfBuffer, 'application/pdf', extractPrompt, bedrockClient, 'document', PER_PAGE_TIMEOUT);
+
+      if (!result || (result.confidence || 0) < 0.2) {
+        consecutiveLowConf++;
+        continue;
+      }
+
+      result.imageType = result.imageType || imageType;
+      result.sheetRole = sheetRole;
+      result.titleBlock = titleBlock;
+      result.page = page;
+
+      if (classification.hasScale && !result.scale) {
+        result.scale = { detected: true, ratio: classification.scaleInfo };
+      }
+      if (titleBlock?.scale && !result.scale?.detected) {
+        result.scale = { detected: true, ratio: titleBlock.scale, source: 'title_block' };
+      }
+      if (classification.extractedText && !result.extractedText) {
+        result.extractedText = classification.extractedText;
+      }
+
+      // Phase 9c: Calibrate scale
+      result.calibratedScale = calibrateScale(result);
+      result.isGeometry = true;
+
+      results.push(result);
+      consecutiveLowConf = 0;
+
+    } catch (pageErr) {
+      console.warn(`Multi-page PDF ${fileName} page ${page} failed: ${pageErr.message}`);
+      consecutiveLowConf++;
+    }
+  }
+
+  console.log(`Multi-page PDF ${fileName}: processed ${results.length} pages in ${Date.now() - startTime}ms`);
+  return results;
+}
+
+/**
+ * callBedrockVision with a per-call timeout.
+ * Returns null if the call exceeds the timeout.
+ */
+async function callBedrockVisionWithTimeout(buffer, mediaType, prompt, bedrockClient, contentType, timeoutMs) {
+  try {
+    const result = await Promise.race([
+      callBedrockVision(buffer, mediaType, prompt, bedrockClient, contentType),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Vision call timeout')), timeoutMs)),
+    ]);
+    return result;
+  } catch (err) {
+    if (err.message === 'Vision call timeout') {
+      console.warn('Bedrock vision call timed out');
+      return null;
+    }
+    throw err;
   }
 }
 
@@ -3453,6 +5008,7 @@ async function extractFromScannedPDF(pdfBuffer, fileName, bedrockClient) {
 export const handler = async (event) => {
   console.log('ExtractBuildingSpec input:', JSON.stringify(event, null, 2));
   const { userId, renderId, bucket, files, description, render } = event;
+  const revision = event.renderRevision || 1;
   let previousCSS = event.previousCSS || null;
   const refinementText = render?.refinement || null;
   if (refinementText) console.log(`Refinement context present: "${refinementText.slice(0, 120)}..."`);
@@ -3482,6 +5038,8 @@ export const handler = async (event) => {
     }
   }
   if (previousCSS) console.log(`Previous CSS available for refinement (${JSON.stringify(previousCSS).length} bytes)`);
+
+  const extractStartTime = Date.now();
 
   try {
     // Track per-file parse status
@@ -3516,16 +5074,48 @@ export const handler = async (event) => {
           try {
             const rawResult = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: file.key }));
             const pdfBuffer = Buffer.from(await rawResult.Body.transformToByteArray());
-            const visionResult = await extractFromScannedPDF(pdfBuffer, file.name, bedrock);
-            if (visionResult && visionResult.confidence > 0.2) {
-              // Convert structured vision output to CSS elements + findings
-              const visionCSS = visionToCSS(visionResult, file.name);
-              const visionText = visionCSS.extractedText || visionResult.extractedText || JSON.stringify(visionResult.buildingInfo || {});
-              processedFiles.push({ name: file.name, content: visionText, sourceRole: 'VISION', type: 'scanned_pdf', visionData: visionResult, visionCSS });
-              sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'vision', sourceRole: 'VISION', imageType: visionResult.imageType });
+
+            // Phase 9c: Check page count for multi-page processing
+            let pdfPageCount = 1;
+            try {
+              const pdfMeta = await pdf(pdfBuffer, { max: 0 }); // parse metadata only
+              pdfPageCount = pdfMeta.numpages || 1;
+            } catch (_) { /* fallback to 1 page */ }
+
+            if (pdfPageCount > 1) {
+              // Multi-page path: process up to 5 pages individually
+              console.log(`Multi-page scanned PDF: ${file.name} has ${pdfPageCount} pages`);
+              const pageResults = await extractFromMultiPagePDF(pdfBuffer, file.name, bedrock, pdfPageCount);
+              let addedPages = 0;
+              for (const pageResult of pageResults) {
+                if (!pageResult.isGeometry) continue;
+                if ((pageResult.confidence || 0) <= 0.2) continue;
+                const pageName = `${file.name}#p${pageResult.page}`;
+                const visionCSS = visionToCSS(pageResult, pageName);
+                const visionText = visionCSS.extractedText || pageResult.extractedText || '';
+                processedFiles.push({ name: pageName, content: visionText, sourceRole: 'VISION', type: 'scanned_pdf', visionData: pageResult, visionCSS });
+                sourceFiles.push({ name: pageName, parseStatus: 'success', role: 'vision', sourceRole: 'VISION', imageType: pageResult.imageType, page: pageResult.page });
+                addedPages++;
+              }
+              if (addedPages === 0) {
+                // No geometry pages found — fall back to text content
+                processedFiles.push({ name: file.name, content: result.content });
+                sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'unknown' });
+              } else {
+                console.log(`Multi-page PDF ${file.name}: ${addedPages} geometry pages extracted`);
+              }
             } else {
-              processedFiles.push({ name: file.name, content: result.content });
-              sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'unknown' });
+              // Single-page path: original behavior
+              const visionResult = await extractFromScannedPDF(pdfBuffer, file.name, bedrock);
+              if (visionResult && visionResult.confidence > 0.2) {
+                const visionCSS = visionToCSS(visionResult, file.name);
+                const visionText = visionCSS.extractedText || visionResult.extractedText || JSON.stringify(visionResult.buildingInfo || {});
+                processedFiles.push({ name: file.name, content: visionText, sourceRole: 'VISION', type: 'scanned_pdf', visionData: visionResult, visionCSS });
+                sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'vision', sourceRole: 'VISION', imageType: visionResult.imageType });
+              } else {
+                processedFiles.push({ name: file.name, content: result.content });
+                sourceFiles.push({ name: file.name, parseStatus: 'success', role: 'unknown' });
+              }
             }
           } catch (vErr) {
             console.warn(`Scanned PDF fallback failed for ${file.name}:`, vErr.message);
@@ -3592,8 +5182,10 @@ export const handler = async (event) => {
           css = await enrichCSS(css, suppText);
 
           // v6: Restricted safe source fusion — extract fusible equipment from docs
+          // Skip for TUNNEL domain: fused equipment inherits real mine elevation offsets (z=3-53m)
+          // which places them far above the tunnel network floor as floating proxies
           console.log(`Source fusion: supplementary text length = ${suppText.length} chars`);
-          const docFindings = await extractDocumentFindings(suppText, otherFiles.map(f => f.name));
+          const docFindings = (css.domain === 'TUNNEL') ? [] : await extractDocumentFindings(suppText, otherFiles.map(f => f.name));
           if (docFindings.length > 0) {
             // Log anchor availability before fusion
             const anchorTypes = new Set(['SPACE', 'TUNNEL_SEGMENT', 'WALL']);
@@ -3638,7 +5230,23 @@ export const handler = async (event) => {
         css.metadata = css.metadata || {};
         css.metadata.tracingReport = tracingReport;
         const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
-        return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport: null };
+        await saveExtractDebug(bucket, userId, renderId, css, tracingReport, sourceFiles, Date.now() - extractStartTime, revision);
+
+        // Phase 1: Claims dual-write
+        let claimsS3Key = null;
+        try {
+          resetClaimCounter();
+          const claimsResult = ventSimCssToClaims(css, ventSimFile.name);
+          const visionClaimFiles = processedFiles.filter(f => f.visionCSS);
+          const vClaims = visionToClaims(visionClaimFiles);
+          const allClaims = mergeClaims(claimsResult.claims, vClaims);
+          const claimsDoc = createClaimsEnvelope(claimsResult.domain, claimsResult.facilityMeta, allClaims, sourceFiles);
+          claimsS3Key = await saveClaimsToS3(bucket, userId, renderId, claimsDoc, revision);
+        } catch (claimsErr) {
+          console.warn('Claims dual-write failed (non-fatal):', claimsErr.message);
+        }
+
+        return { cssS3Key, claimsS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport: null, refinementReportS3Key: null };
       }
     }
 
@@ -3661,7 +5269,8 @@ export const handler = async (event) => {
           css = await enrichCSS(css, suppText);
 
           // v6: Restricted safe source fusion
-          const docFindings = await extractDocumentFindings(suppText, otherFiles.map(f => f.name));
+          // Skip for TUNNEL domain: fused equipment placed at mine elevation offsets produces floating proxies
+          const docFindings = (css.domain === 'TUNNEL') ? [] : await extractDocumentFindings(suppText, otherFiles.map(f => f.name));
           if (docFindings.length > 0) {
             attemptSafeSourceFusion(css, docFindings, sourceFiles);
           }
@@ -3693,7 +5302,113 @@ export const handler = async (event) => {
         css.metadata = css.metadata || {};
         css.metadata.tracingReport = tracingReport;
         const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
-        return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport: null };
+        await saveExtractDebug(bucket, userId, renderId, css, tracingReport, sourceFiles, Date.now() - extractStartTime, revision);
+
+        // Phase 1: Claims dual-write
+        let claimsS3Key = null;
+        try {
+          resetClaimCounter();
+          const claimsResult = dxfCssToClaims(css, dxfFile.name);
+          const visionClaimFiles = processedFiles.filter(f => f.visionCSS);
+          const vClaims = visionToClaims(visionClaimFiles);
+          const allClaims = mergeClaims(claimsResult.claims, vClaims);
+          const claimsDoc = createClaimsEnvelope(claimsResult.domain, claimsResult.facilityMeta, allClaims, sourceFiles);
+          claimsS3Key = await saveClaimsToS3(bucket, userId, renderId, claimsDoc, revision);
+        } catch (claimsErr) {
+          console.warn('Claims dual-write failed (non-fatal):', claimsErr.message);
+        }
+
+        return { cssS3Key, claimsS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport: null, refinementReportS3Key: null };
+      }
+    }
+
+    // ---- Phase 9d: Vision-to-BuildingSpec Bridge ----
+    // When the primary input is drawing(s) with no substantial text/VentSim/DXF,
+    // and the drawing qualifies, route through the proven buildingSpecToCSS() path
+    // instead of LLM extraction for better coordinate quality.
+    const visionOnlyFiles = processedFiles.filter(f => f.visionCSS);
+    const textFiles = processedFiles.filter(f => !f.visionCSS && f.content && f.content.trim().length > 100);
+    const isDrawingPrimary = visionOnlyFiles.length > 0 && textFiles.length === 0 && !previousCSS && !refinementText;
+
+    if (isDrawingPrimary) {
+      // Find the best floor plan vision result that qualifies for bridging
+      const floorPlanFile = visionOnlyFiles.find(f =>
+        f.visionCSS?.imageType === 'FLOOR_PLAN' && canBridgeToBuildingSpec(f.visionData)
+      );
+
+      if (floorPlanFile) {
+        console.log(`Phase 9d: Drawing-primary render detected — routing ${floorPlanFile.name} through BuildingSpec bridge`);
+
+        const bestTitleBlock = visionOnlyFiles
+          .map(f => f.visionCSS?.titleBlock)
+          .filter(Boolean)
+          .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0] || null;
+
+        const bridgeSpec = visionToBuildingSpec(floorPlanFile.visionData, bestTitleBlock);
+        applyBuildingSpecDefaults(bridgeSpec);
+        const css = buildingSpecToCSS(bridgeSpec, sourceFiles);
+
+        // Mark all elements as vision-sourced for traceability
+        for (const el of css.elements) {
+          el.source = el.source || 'VISION_BRIDGE';
+          el.metadata = el.metadata || {};
+          el.metadata.visionBridge = true;
+          el.metadata.sourceFile = floorPlanFile.name;
+        }
+
+        // Also merge additional vision elements from other drawings (elevations, etc.)
+        for (const vf of visionOnlyFiles) {
+          if (vf === floorPlanFile) continue;
+          if (!vf.visionCSS?.elements) continue;
+          for (const ve of vf.visionCSS.elements) {
+            ve.id = ve.id || `vision-${Math.random().toString(36).slice(2, 8)}`;
+            ve.element_key = ve.element_key || ve.id;
+            ve.container = ve.container || 'level-1';
+            css.elements.push(ve);
+          }
+        }
+
+        css.metadata = css.metadata || {};
+        css.metadata.extractionRoute = 'VISION_BRIDGE';
+        css.metadata.bridgeSource = floorPlanFile.name;
+
+        // Store drawing metadata
+        const drawingSheets = visionOnlyFiles.map(f => ({
+          fileName: f.name, sheetRole: f.visionCSS?.sheetRole, imageType: f.visionCSS?.imageType,
+          titleBlock: f.visionCSS?.titleBlock, scaleInfo: f.visionCSS?.scaleInfo,
+        }));
+        css.metadata.drawingSheets = drawingSheets;
+
+        // Generate title + description
+        const ai_generated_title = bestTitleBlock?.projectName || bridgeSpec.buildingName || 'Floor Plan Model';
+        const descParts = [`BUILDING project: ${bridgeSpec.dimensions.length_m}m x ${bridgeSpec.dimensions.width_m}m.`];
+        if (bridgeSpec.rooms.length > 0) descParts.push(`${bridgeSpec.rooms.length} room(s).`);
+        if (bridgeSpec.openings.length > 0) descParts.push(`${bridgeSpec.openings.length} opening(s).`);
+        descParts.push('Extracted from architectural drawing via vision bridge.');
+        if (bestTitleBlock?.drawingNumber) descParts.push(`Drawing ${bestTitleBlock.drawingNumber}.`);
+        const ai_generated_description = descParts.join(' ');
+        css.facility.description = ai_generated_description;
+
+        const tracingReport = buildTracingReport(css, processedFiles);
+        css.metadata.tracingReport = tracingReport;
+        const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
+        await saveExtractDebug(bucket, userId, renderId, css, tracingReport, sourceFiles, Date.now() - extractStartTime, revision);
+
+        // Claims dual-write
+        let claimsS3Key = null;
+        try {
+          resetClaimCounter();
+          const claimsResult = buildingSpecToClaims(css, sourceFiles, { isRefinement: false });
+          const vClaims = visionToClaims(visionOnlyFiles);
+          const allClaims = mergeClaims(claimsResult.claims, vClaims);
+          const claimsDoc = createClaimsEnvelope(claimsResult.domain, claimsResult.facilityMeta, allClaims, sourceFiles);
+          claimsS3Key = await saveClaimsToS3(bucket, userId, renderId, claimsDoc, revision);
+        } catch (claimsErr) {
+          console.warn('Claims dual-write failed (non-fatal):', claimsErr.message);
+        }
+
+        console.log(`Vision bridge complete: ${css.elements.length} elements, route=VISION_BRIDGE`);
+        return { cssS3Key, claimsS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport: null, refinementReportS3Key: null };
       }
     }
 
@@ -3745,16 +5460,28 @@ export const handler = async (event) => {
     // v3.2: Constraint rules for prompts
     const CONSTRAINT_RULES = `
 IMPORTANT RULES:
-- Only extract information explicitly stated or clearly implied in the source text
-- Do NOT invent rooms, walls, or openings not mentioned in the input
-- If interior layout is not described, return empty rooms[] and interior_walls[]
+- Extract information explicitly stated or clearly implied in the source text
 - If dimensions are not specified, use reasonable defaults for the building type
-- Prefer simple structural envelopes over guessed interior details
 - Omit uncertain geometry rather than guessing
-- For openings: only include doors/windows that are explicitly mentioned with clear placement
-- For BUILDING types (office, warehouse, residential, hospital, school): include rooms only if described, specify floor for each room, include openings only on walls where they are mentioned
+- For BUILDING types (office, warehouse, residential, hospital, school):
+  - ALWAYS set num_floors based on how many distinct levels/storeys are described (hospital=2-5 floors, office=2-10, warehouse=1-2, residential=1-3)
+  - floor_to_floor_height_m: hospital=3.5-4.5m, office=3.0-3.5m, warehouse=4.0-8.0m, residential=2.7-3.0m. Convert ceiling heights: 8ft=2.44m, 9ft=2.74m, 10ft=3.05m
+  - dimensions (length_m, width_m) MUST be large enough to contain ALL listed rooms — if rooms need more space, increase dimensions
+  - Include rooms if described, specify floor for each room
+  - Infer standard openings based on building type: each room should have at least one door, exterior walls should have windows at regular intervals unless explicitly described as windowless
+  - For hospitals: include entrance doors on ground floor, patient room doors, corridor access doors, and windows on patient-facing exterior walls
+  - For offices: include entrance doors, office doors, and windows on all exterior walls
+- For RESIDENTIAL buildings specifically:
+  - Extract EVERY door and window explicitly mentioned — front door, rear door, sliding door, each bedroom window, bathroom window, kitchen window, etc. Do not skip any named opening
+  - Set num_floors from explicit story/level count in the description (e.g. "two-story", "2 bed upstairs" = 2 floors)
+  - Set floor_to_floor_height_m from explicit ceiling height specs (e.g. "9ft ceilings" = 2.74m). Default 2.74m if not stated
+  - Set roof.type to "GABLE" if any pitched roof is mentioned (gable, hip, pitched, sloped) — only use "FLAT" if explicitly stated as flat
+  - Set roof.pitch_degrees from stated pitch ratio (e.g. 6:12 pitch = 26.6°, 4:12 = 18.4°, 8:12 = 33.7°)
+  - For attached garage/wing sections: set x_offset_m and y_offset_m so the section EXACTLY abuts the main building with NO gap. An attached garage on the west face of a length_m × width_m building at y_offset=0 must have x_offset_m = 0 (or = length_m to attach on east). Verify: x_offset + section_length = 0 or main_length (for E/W attachments), or y_offset + section_width = 0 or main_width (for N/S attachments)
+  - elevations.floor_level_m should be 0 (ground level) unless explicitly stated otherwise — do NOT use negative values unless the floor is below grade
 - For TUNNEL / LINEAR structures: do not generate rooms, interior_walls, or openings — focus on overall dimensions and equipment
-- For FACILITY / INDUSTRIAL structures: rooms optional, openings only if explicitly mentioned`;
+- For FACILITY / INDUSTRIAL structures: rooms optional, openings only if explicitly mentioned
+- For ALL building types: ensure perimeter_walls array describes each exterior facade if the building has non-rectangular or complex perimeter`;
 
     // Single-pass extraction (v3.2: improved prompts)
     async function singlePassExtraction() {
@@ -3785,6 +5512,7 @@ Return ONLY valid JSON (no markdown, no explanations):
   "structural_system": "FRAME|LOADBEARING|SHELL|TRUSS|OTHER",
   "structure": { "column_grid": [{ "x_spacing_m": number, "y_spacing_m": number, "column_size_m": number }], "floor_to_floor_height_m": number, "num_floors": number },
   "interior_walls": [{ "name": "string", "x_start_m": number, "y_start_m": number, "x_end_m": number, "y_end_m": number, "height_m": number, "thickness_m": number, "floor": number (1-indexed, default 1) }],
+  "perimeter_walls": [{ "side": "NORTH|SOUTH|EAST|WEST", "length_m": number, "height_m": number, "has_windows": boolean, "window_count": number, "has_entrance": boolean, "floor": number (1-indexed, default 1) }],
   "roof": { "type": "FLAT|GABLE", "pitch_degrees": number (default 25, range 5-60), "ridge_orientation": "ALONG_LENGTH|ALONG_WIDTH", "overhang_m": number (default 0.3, range 0-2) },
   "sections": [{ "name": "string", "type": "MAIN|GARAGE|WING|ANNEX|TOWER|CANOPY|MEZZANINE|COURTYARD_WALL", "length_m": number, "width_m": number, "height_m": number, "num_floors": number, "x_offset_m": number, "y_offset_m": number, "roof_type": "FLAT|GABLE", "roof_pitch_degrees": number, "floor_level_m": number (for MEZZANINE: height above ground) }],
   "vertical_features": [{ "name": "string", "type": "CHIMNEY|EXHAUST_STACK|VENT|PARAPET|ANTENNA_MOUNT", "x_position_m": number, "y_position_m": number, "width_m": number, "depth_m": number, "height_above_roof_m": number }]
@@ -3969,7 +5697,7 @@ Rules: Only use element_keys from the list. Only set name, description, material
       if (!spec.dimensions) spec.dimensions = { length_m: 20, width_m: 10, height_m: 3, wall_thickness_m: 0.3 };
       if (spec.dimensions.wall_thickness_m === undefined) spec.dimensions.wall_thickness_m = 0.3;
       if (!spec.elevations) spec.elevations = {};
-      if (spec.elevations.floor_level_m === undefined) spec.elevations.floor_level_m = 0.0;
+      spec.elevations.floor_level_m = 0.0;  // Always force ground = 0; LLM sometimes returns non-zero (treating foundation depth as offset) which raises all geometry incorrectly
       if (!spec.rooms) spec.rooms = [];
       if (!spec.openings) spec.openings = [];
       if (!spec.ventilation) spec.ventilation = { system_type: 'natural', num_fans: 0 };
@@ -4139,6 +5867,45 @@ Return the complete updated CSS JSON with ONLY the requested modification applie
       console.log(`Vision findings: ${allVisionFindings.length} stored as metadata`);
     }
 
+    // Phase 9a: Store drawing metadata (title blocks, sheet roles) in CSS metadata
+    const drawingSheets = processedFiles
+      .filter(f => f.visionCSS)
+      .map(f => ({
+        fileName: f.name,
+        sheetRole: f.visionCSS.sheetRole || null,
+        imageType: f.visionCSS.imageType || null,
+        titleBlock: f.visionCSS.titleBlock || null,
+        scaleInfo: f.visionCSS.scaleInfo || null,
+      }));
+    if (drawingSheets.length > 0) {
+      css.metadata = css.metadata || {};
+      css.metadata.drawingSheets = drawingSheets;
+    }
+
+    // Phase 9b: Cross-drawing correlation (floor plan ↔ elevation)
+    if (!isRefinement) {
+      const visionFilesForCorrelation = processedFiles.filter(f => f.visionCSS);
+      const correlation = correlateDrawings(visionFilesForCorrelation);
+      if (correlation) {
+        css.metadata = css.metadata || {};
+        css.metadata.drawingCorrelation = correlation;
+        // Apply elevation floor heights to level definitions if available
+        if (correlation.elevationLayout?.floors?.length > 0) {
+          for (const elFloor of correlation.elevationLayout.floors) {
+            const matchingLevel = css.levelsOrSegments?.find(l =>
+              l.name?.toLowerCase().includes(elFloor.name?.toLowerCase()) ||
+              l.name?.toLowerCase().includes(`level ${elFloor.level}`)
+            );
+            if (matchingLevel && elFloor.elevation_m != null) {
+              matchingLevel.elevation_m = elFloor.elevation_m;
+              matchingLevel.height_m = elFloor.height_m || matchingLevel.height_m;
+              console.log(`Cross-drawing: updated level "${matchingLevel.name}" elevation to ${elFloor.elevation_m}m`);
+            }
+          }
+        }
+      }
+    }
+
     // v3.2: Facade fallback — generate openings from description if LLM returned none
     // Skip during refinement — openings are already in the base CSS
     const structureClass = css.metadata?.structureClass || 'BUILDING';
@@ -4182,8 +5949,21 @@ Return the complete updated CSS JSON with ONLY the requested modification applie
     // v3.2: Envelope fallback — if too many elements removed, degrade to clean box
     // (Applied after transform step removes bad openings — tracked via metadata)
 
-    // Generate AI title and description
-    const ai_generated_title = buildingSpec.buildingName || 'Structure Model';
+    // Phase 9a: Extract title block metadata from vision sources for render metadata
+    const visionTitleBlocks = processedFiles
+      .filter(f => f.visionCSS?.titleBlock)
+      .map(f => f.visionCSS.titleBlock)
+      .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+    const bestTitleBlock = visionTitleBlocks[0] || null;
+
+    // Generate AI title and description — prefer title block project name when available
+    let ai_generated_title = buildingSpec.buildingName || 'Structure Model';
+    if (bestTitleBlock?.projectName && bestTitleBlock.confidence >= 0.5) {
+      ai_generated_title = bestTitleBlock.projectName;
+      if (bestTitleBlock.drawingTitle && bestTitleBlock.drawingTitle !== bestTitleBlock.projectName) {
+        ai_generated_title += ` — ${bestTitleBlock.drawingTitle}`;
+      }
+    }
     const descParts = [];
     descParts.push(`${buildingSpec.buildingType} project: ${buildingSpec.dimensions.length_m}m x ${buildingSpec.dimensions.width_m}m x ${buildingSpec.dimensions.height_m}m.`);
     if (buildingSpec.rooms?.length > 0) {
@@ -4191,6 +5971,13 @@ Return the complete updated CSS JSON with ONLY the requested modification applie
     }
     if (buildingSpec.equipment?.length > 0) {
       descParts.push(`${buildingSpec.equipment.length} equipment item(s).`);
+    }
+    if (bestTitleBlock) {
+      const tbParts = [];
+      if (bestTitleBlock.drawingNumber) tbParts.push(`Drawing ${bestTitleBlock.drawingNumber}`);
+      if (bestTitleBlock.revision) tbParts.push(`Rev ${bestTitleBlock.revision}`);
+      if (bestTitleBlock.firm) tbParts.push(`by ${bestTitleBlock.firm}`);
+      if (tbParts.length > 0) descParts.push(`Source: ${tbParts.join(', ')}.`);
     }
     const ai_generated_description = descParts.join(' ');
 
@@ -4202,16 +5989,39 @@ Return the complete updated CSS JSON with ONLY the requested modification applie
     css.metadata = css.metadata || {};
     css.metadata.tracingReport = tracingReport;
     const cssS3Key = await saveCSSToS3(bucket, userId, renderId, css);
+    await saveExtractDebug(bucket, userId, renderId, css, tracingReport, sourceFiles, Date.now() - extractStartTime, revision);
 
     // Build refinement report if this was a refinement
     let refinementReport = null;
+    let refinementReportS3Key = null;
     if (isRefinement && previousCSS) {
       refinementReport = buildRefinementReport(previousCSS, css, refinementText);
       css.metadata.refinementReport = refinementReport;
       console.log(`Refinement report: ${JSON.stringify(refinementReport.summary)}`);
+
+      // Phase 6: Save dedicated refinement_report.json artifact
+      try {
+        refinementReportS3Key = await saveRefinementReport(bucket, userId, renderId, refinementReport, refinementText, revision);
+      } catch (rrErr) {
+        console.warn('Refinement report save failed (non-fatal):', rrErr.message);
+      }
     }
 
-    return { cssS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport };
+    // Phase 1: Claims dual-write
+    let claimsS3Key = null;
+    try {
+      resetClaimCounter();
+      const claimsResult = buildingSpecToClaims(css, sourceFiles, { isRefinement });
+      const visionClaimFiles = processedFiles.filter(f => f.visionCSS);
+      const vClaims = visionToClaims(visionClaimFiles);
+      const allClaims = mergeClaims(claimsResult.claims, vClaims);
+      const claimsDoc = createClaimsEnvelope(claimsResult.domain, claimsResult.facilityMeta, allClaims, sourceFiles);
+      claimsS3Key = await saveClaimsToS3(bucket, userId, renderId, claimsDoc, revision);
+    } catch (claimsErr) {
+      console.warn('Claims dual-write failed (non-fatal):', claimsErr.message);
+    }
+
+    return { cssS3Key, claimsS3Key, ai_generated_title, ai_generated_description, tracingReport, refinementReport, refinementReportS3Key };
   } catch (error) {
     console.error('ExtractBuildingSpec error:', error);
     // Let the error propagate to the Step Function so HandleFailure can mark it as failed

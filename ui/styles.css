@@ -53,6 +53,63 @@
 
     /* Transitions */
     --transition: 0.15s ease;
+    --transition-layout: 0.2s ease-out;
+
+    /* Sensor / Telemetry semantic tokens */
+    --sensor-normal: #4ade80;
+    --sensor-warning: #facc15;
+    --sensor-critical: #ef4444;
+
+    /* Telemetry overlay glass */
+    --glass-bg: rgba(30, 30, 30, 0.85);
+    --glass-border: rgba(255, 255, 255, 0.12);
+    --glass-border-hover: rgba(255, 255, 255, 0.2);
+    --glass-text: #94a3b8;
+    --glass-text-hover: #e2e8f0;
+}
+
+/* ─── Utility: hidden ─── */
+.hidden {
+    display: none !important;
+}
+
+/* ─── Selection ─── */
+::selection {
+    background: rgba(124, 107, 189, 0.35);
+    color: #f0edf9;
+}
+
+/* ─── Toast Notification ─── */
+.__toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: 10px 20px;
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    z-index: 20000;
+    opacity: 0;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.__toast.--visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+.__toast-icon {
+    color: var(--status-success);
+    font-size: 16px;
+    line-height: 1;
 }
 
 /* ─── Global Reset ─── */

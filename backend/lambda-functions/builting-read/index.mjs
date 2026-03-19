@@ -25,18 +25,34 @@ export const handler = async (event) => {
     }
 
     const render = result.Item;
+
+    // Phase 6: Ensure render_revision always has a default so Step Function
+    // JsonPath references ($.metadata.render.render_revision) never fail
+    if (render.render_revision === undefined || render.render_revision === null) {
+      render.render_revision = 1;
+    }
+    // Ensure validationReportS3Key is always present (null is fine for JsonPath)
+    if (render.validationReportS3Key === undefined) {
+      render.validationReportS3Key = null;
+    }
+
     console.log('Found render:', render);
+
+    // Use s3_path from render record (handles refinements pointing to original render's files)
+    const s3Prefix = render.s3_path
+      ? render.s3_path.replace(`s3://${bucket}/`, '') + '/'
+      : `uploads/${userId}/${renderId}/`;
 
     // List files in S3 to validate
     const s3Result = await s3.send(
       new ListObjectsV2Command({
         Bucket: bucket,
-        Prefix: `uploads/${userId}/${renderId}/`
+        Prefix: s3Prefix
       })
     );
 
     const files = (s3Result.Contents || [])
-      .filter(obj => obj.Key !== `uploads/${userId}/${renderId}/`) // Skip prefix itself
+      .filter(obj => obj.Key !== s3Prefix) // Skip prefix itself
       .map(obj => ({
         key: obj.Key,
         name: obj.Key.split('/').pop(),

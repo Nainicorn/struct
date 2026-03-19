@@ -1,5 +1,5 @@
 {
-  "Comment": "Pipeline: Read → Extract → Transform → Generate → Store. Catch-all error handler writes 'failed' status to DynamoDB.",
+  "Comment": "Pipeline: Read → Extract → Resolve → TopologyEngine (structure+geometry+validate) → Generate → Store → SeedSensors. Catch-all error handler writes 'failed' status to DynamoDB. SeedSensors is non-critical (failure doesn't affect render).",
   "StartAt": "ReadRenderMetadata",
   "States": {
     "ReadRenderMetadata": {
@@ -20,24 +20,43 @@
         "bucket.$": "$.bucket",
         "files.$": "$.metadata.files",
         "description.$": "$.metadata.render.description",
-        "render.$": "$.metadata.render"
+        "render.$": "$.metadata.render",
+        "renderRevision.$": "$.metadata.render.render_revision"
       },
       "ResultPath": "$.specResult",
-      "Next": "CSSPipeline",
+      "Next": "ResolveClaims",
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
-    "CSSPipeline": {
+    "ResolveClaims": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-transform",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-resolve",
+      "Parameters": {
+        "claimsS3Key.$": "$.specResult.claimsS3Key",
+        "userId.$": "$.userId",
+        "renderId.$": "$.renderId",
+        "bucket.$": "$.bucket",
+        "renderRevision.$": "$.metadata.render.render_revision"
+      },
+      "ResultPath": "$.resolveResult",
+      "Next": "TopologyEngine",
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
+    },
+
+    "TopologyEngine": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-topology-engine",
       "Parameters": {
         "cssS3Key.$": "$.specResult.cssS3Key",
         "userId.$": "$.userId",
         "renderId.$": "$.renderId",
-        "bucket.$": "$.bucket"
+        "bucket.$": "$.bucket",
+        "renderRevision.$": "$.metadata.render.render_revision",
+        "previousValidationReportS3Key.$": "$.metadata.render.validationReportS3Key"
       },
-      "ResultPath": "$.pipelineResult",
+      "ResultPath": "$.topologyResult",
       "Next": "GenerateIFC",
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 1, "BackoffRate": 2 }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
@@ -47,7 +66,7 @@
       "Type": "Task",
       "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-generate",
       "Parameters": {
-        "cssS3Key.$": "$.pipelineResult.cssS3Key",
+        "cssS3Key.$": "$.topologyResult.cssS3Key",
         "bucket.$": "$.bucket",
         "renderId.$": "$.renderId",
         "userId.$": "$.userId"
@@ -64,16 +83,55 @@
       "Parameters": {
         "renderId.$": "$.renderId",
         "userId.$": "$.userId",
+        "bucket.$": "$.bucket",
         "ifcS3Path.$": "$.ifcResult.ifcS3Path",
         "ai_generated_title.$": "$.specResult.ai_generated_title",
         "ai_generated_description.$": "$.specResult.ai_generated_description",
         "elementCounts.$": "$.ifcResult.elementCounts",
         "outputMode.$": "$.ifcResult.outputMode",
         "cssHash.$": "$.ifcResult.cssHash",
-        "tracingReport.$": "$.specResult.tracingReport"
+        "tracingReport.$": "$.specResult.tracingReport",
+        "validationSummary.$": "$.ifcResult.validationSummary",
+        "sourceFusion.$": "$.ifcResult.sourceFusion",
+        "structuralWarnings.$": "$.ifcResult.structuralWarnings",
+        "renderRevision.$": "$.metadata.render.render_revision",
+        "refinementReport.$": "$.specResult.refinementReport",
+        "refinementReportS3Key.$": "$.specResult.refinementReportS3Key",
+        "readinessScore.$": "$.topologyResult.readinessScore",
+        "exportReadiness.$": "$.topologyResult.exportReadiness",
+        "authoringSuitability.$": "$.topologyResult.authoringSuitability",
+        "criticalIssueCount.$": "$.topologyResult.criticalIssueCount",
+        "validationWarningCount.$": "$.topologyResult.warningCount",
+        "validationProxyRatio.$": "$.topologyResult.proxyRatio",
+        "validationReportS3Key.$": "$.topologyResult.validationReportS3Key",
+        "generationModeRecommendation.$": "$.topologyResult.generationModeRecommendation",
+        "readinessDelta.$": "$.topologyResult.readinessDelta",
+        "geometryFidelity.$": "$.topologyResult.geometryFidelity",
+        "exportFormats.$": "$.ifcResult.exportFormats",
+        "exportFiles.$": "$.ifcResult.exportFiles"
       },
-      "End": true,
+      "Next": "SeedSensors",
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
+    },
+
+    "SeedSensors": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-sensors",
+      "Parameters": {
+        "renderId.$": "$.renderId",
+        "userId.$": "$.userId",
+        "elementCounts.$": "$.ifcResult.elementCounts"
+      },
+      "ResultPath": "$.sensorResult",
+      "End": true,
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 1, "BackoffRate": 2 }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.sensorError", "Next": "SensorSeedFailed" }]
+    },
+
+    "SensorSeedFailed": {
+      "Type": "Pass",
+      "Comment": "Non-critical: sensor seeding failed but render is already complete",
+      "End": true
     },
 
     "HandleFailure": {

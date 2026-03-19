@@ -17,17 +17,14 @@ const ifcViewer = {
             // Create xeokit viewer
             this.viewer = new Viewer({
                 canvasId: canvas.id,
-                transparent: false,
+                transparent: true,
+                saoEnabled: true,
                 backgroundColor: [0.164, 0.164, 0.164], // Match #2a2a2a dark theme
                 preserveDrawingBuffer: true // Required for canvas snapshot capture
             });
 
             // Initialize web-ifc API instance
-            this.ifcAPI = new WebIFC.IfcAPI();
-            this.ifcAPI.SetWasmPath('/');
-
-            // Initialize WASM module (async)
-            await this.ifcAPI.Init();
+            await this._initIfcAPI();
 
             // Initialize WebIFC loader plugin with both WebIFC module and IfcAPI instance
             this.ifcLoader = new WebIFCLoaderPlugin(this.viewer, {
@@ -50,6 +47,20 @@ const ifcViewer = {
     },
 
     /**
+     * Initialize or re-initialize the web-ifc API with WASM
+     */
+    async _initIfcAPI() {
+        this.ifcAPI = new WebIFC.IfcAPI();
+        this.ifcAPI.SetWasmPath('/');
+        await this.ifcAPI.Init();
+        // Verify WASM module loaded
+        if (!this.ifcAPI.wasmModule) {
+            throw new Error('web-ifc WASM module failed to initialize');
+        }
+        console.log('web-ifc WASM initialized successfully');
+    },
+
+    /**
      * Load an IFC file into the viewer
      * @param {string|ArrayBuffer} srcOrArrayBuffer - URL/path to IFC file OR binary ArrayBuffer data
      * @returns {Promise<void>}
@@ -58,6 +69,17 @@ const ifcViewer = {
         try {
             if (!this.viewer) {
                 throw new Error('Viewer not initialized. Call init() first.');
+            }
+
+            // Re-init IfcAPI if WASM module is missing (can happen after errors)
+            if (!this.ifcAPI?.wasmModule) {
+                console.warn('web-ifc WASM not ready, re-initializing...');
+                await this._initIfcAPI();
+                // Recreate loader with fresh IfcAPI
+                this.ifcLoader = new WebIFCLoaderPlugin(this.viewer, {
+                    WebIFC: WebIFC,
+                    IfcAPI: this.ifcAPI
+                });
             }
 
             // Clear existing model
@@ -71,17 +93,22 @@ const ifcViewer = {
             // Prepare loader config based on input type
             const loaderConfig = { edges: true };
             if (typeof srcOrArrayBuffer === 'string') {
-                // URL/path - use src parameter
                 loaderConfig.src = srcOrArrayBuffer;
             } else if (srcOrArrayBuffer instanceof ArrayBuffer) {
-                // Binary data - use ifc parameter (xeokit expects lowercase ifc for binary data)
                 loaderConfig.ifc = srcOrArrayBuffer;
             } else {
                 throw new Error('Invalid input: must be URL string or ArrayBuffer');
             }
 
-            // Load new model
-            this.currentModel = await this.ifcLoader.load(loaderConfig);
+            // Load new model — xeokit's load() returns the model synchronously
+            // but parsing happens async. Wrap in a Promise that resolves on 'loaded'.
+            this.currentModel = await new Promise((resolve, reject) => {
+                const model = this.ifcLoader.load(loaderConfig);
+                model.on('loaded', () => resolve(model));
+                model.on('error', (err) => reject(new Error(err || 'IFC load failed')));
+                // Safety timeout — if neither event fires in 30s, resolve anyway
+                setTimeout(() => resolve(model), 30000);
+            });
 
             console.log('IFC file loaded successfully');
 
@@ -178,6 +205,10 @@ const ifcViewer = {
             offscreen.height = size;
             const ctx = offscreen.getContext('2d');
 
+            // Fill with dark background first (canvas may be transparent)
+            ctx.fillStyle = '#2a2a2a';
+            ctx.fillRect(0, 0, size, size);
+
             // Center-crop the largest square from the source canvas
             const sq = Math.min(srcCanvas.width, srcCanvas.height);
             const sx = (srcCanvas.width - sq) / 2;
@@ -197,7 +228,7 @@ const ifcViewer = {
             }
             const totalSampled = Math.ceil(sample.length / (step * 4));
             if (nonBgPixels / totalSampled < 0.005) {
-                // Less than 0.5% non-background — likely blank canvas (lowered for thin elongated models)
+                // Less than 0.5% non-background — likely blank canvas
                 return null;
             }
 
@@ -215,7 +246,11 @@ const ifcViewer = {
      */
     setupPickEvents() {
         if (!this.viewer) return;
-        this.viewer.scene.input.on('mouseclicked', (coords) => {
+        // Remove previous listener to prevent duplicates (stacked listeners cause chip to flash)
+        if (this._pickSubId !== undefined) {
+            this.viewer.scene.input.off(this._pickSubId);
+        }
+        this._pickSubId = this.viewer.scene.input.on('mouseclicked', (coords) => {
             const pickResult = this.viewer.scene.pick({ canvasPos: coords });
             if (pickResult && pickResult.entity) {
                 const entity = pickResult.entity;
@@ -231,6 +266,121 @@ const ifcViewer = {
                 document.dispatchEvent(new CustomEvent('elementPickCleared'));
             }
         });
+    },
+
+    // ==================== Telemetry Overlay ====================
+
+    _overlayActive: false,
+    _colorizedEntityIds: [], // Track which entities we've colorized
+
+    // Status sensor color mapping
+    _statusColors: {
+        running: [0.13, 0.77, 0.37],  // green
+        idle:    [0.98, 0.80, 0.08],   // yellow
+        fault:   [0.94, 0.26, 0.26],   // red
+    },
+
+    /**
+     * Apply telemetry color overlay to model elements based on sensor data.
+     * Colors elements by matching sensor element_type to IFC metaObject types.
+     * @param {Array} sensors - Sensor objects from sensorService
+     * @param {string} filterType - 'all' or specific sensor type to visualize
+     */
+    applyTelemetryOverlay(sensors, filterType = 'all') {
+        if (!this.viewer || !sensors || sensors.length === 0) return;
+
+        // Clear previous overlay first
+        this.clearTelemetryOverlay();
+        this._overlayActive = true;
+
+        // Group sensors by element_type, taking the worst/highest value per type
+        const sensorsByType = {};
+        for (const s of sensors) {
+            if (filterType !== 'all' && s.sensor_type !== filterType) continue;
+            const key = s.element_type;
+            if (!sensorsByType[key]) sensorsByType[key] = [];
+            sensorsByType[key].push(s);
+        }
+
+        if (Object.keys(sensorsByType).length === 0) return;
+
+        // Iterate all meta objects and colorize matching entities
+        const metaObjects = this.viewer.metaScene?.metaObjects || {};
+        for (const [entityId, metaObj] of Object.entries(metaObjects)) {
+            const typeSensors = sensorsByType[metaObj.type];
+            if (!typeSensors || typeSensors.length === 0) continue;
+
+            const entity = this.viewer.scene.objects[entityId];
+            if (!entity) continue;
+
+            // Use the first sensor for this type (round-robin could be added later)
+            const sensor = typeSensors[0];
+            let color;
+
+            if (sensor.unit === null && this._statusColors[sensor.current_value]) {
+                // Categorical (equipment status)
+                color = this._statusColors[sensor.current_value];
+            } else if (sensor.min_range !== null && sensor.max_range !== null) {
+                // Numeric — normalize and map to heatmap
+                const normalized = Math.max(0, Math.min(1,
+                    (sensor.current_value - sensor.min_range) / (sensor.max_range - sensor.min_range)
+                ));
+                color = this._valueToHeatColor(normalized);
+            }
+
+            if (color) {
+                entity.colorize = color;
+                this._colorizedEntityIds.push(entityId);
+            }
+        }
+    },
+
+    /**
+     * Remove all telemetry overlays, restoring default element colors.
+     */
+    clearTelemetryOverlay() {
+        if (!this.viewer) return;
+
+        for (const entityId of this._colorizedEntityIds) {
+            const entity = this.viewer.scene.objects[entityId];
+            if (entity) entity.colorize = null;
+        }
+        this._colorizedEntityIds = [];
+        this._overlayActive = false;
+    },
+
+    /**
+     * Map a normalized value (0–1) to an RGB color on a blue→green→yellow→red gradient.
+     * @param {number} t - Value between 0 and 1
+     * @returns {number[]} [r, g, b] each 0–1
+     */
+    _valueToHeatColor(t) {
+        // 4-stop gradient: blue(0) → green(0.33) → yellow(0.66) → red(1)
+        const stops = [
+            [0.00, 0.23, 0.51, 0.96], // blue
+            [0.33, 0.13, 0.77, 0.37], // green
+            [0.66, 0.98, 0.80, 0.08], // yellow
+            [1.00, 0.94, 0.26, 0.26], // red
+        ];
+
+        // Find the two stops to interpolate between
+        let lower = stops[0], upper = stops[stops.length - 1];
+        for (let i = 0; i < stops.length - 1; i++) {
+            if (t >= stops[i][0] && t <= stops[i + 1][0]) {
+                lower = stops[i];
+                upper = stops[i + 1];
+                break;
+            }
+        }
+
+        const range = upper[0] - lower[0];
+        const f = range > 0 ? (t - lower[0]) / range : 0;
+
+        return [
+            lower[1] + f * (upper[1] - lower[1]),
+            lower[2] + f * (upper[2] - lower[2]),
+            lower[3] + f * (upper[3] - lower[3]),
+        ];
     },
 
     /**

@@ -10,6 +10,16 @@
 - use plan mode everytime you plan out the next phase or tasks
 - when you start working on the backend implementation via AWS suggest any improvements IF necessary
 - everytime lambda function updated and user needs to upload new zip file, YOU take care of the zip function
+- AWS CLI is configured and available — use `aws` commands to upload Lambda zips, update Lambda code, update Step Functions, configure S3 CORS, etc. directly. Ask user only for things that require console-only actions (IAM policy edits, API Gateway deployments, ECR pushes).
+
+**Pipeline Engineering Principles**
+- All pipeline changes must be universal — no render-type-specific hacks in generate. Fix problems upstream in extract/structure/geometry.
+- Per-element resilience — never degrade the entire model for one bad element. Proxy individual failures, preserve everything else.
+- Keep lambda functions lean — decompose monoliths into focused modules. No single file should exceed ~1,000 lines.
+- Z-placement is always storey-relative in generate — auto-detect and normalize, no reliance on placementZIsAbsolute flag.
+- Wall endpoint coincidence is a structure-lambda responsibility — walls must share exact endpoints before reaching generate.
+- Validation must annotate elements with actionable flags — not just write a report that gets ignored.
+- Test every change against multiple render types (tunnel, hospital, office, warehouse) before deploying.
 
 ## Project Overview
 
@@ -59,6 +69,7 @@ The backend folder contains the most recent code or information that is is ident
       - uploadService: Request presigned S3 URLs and upload files/descriptions directly to S3
       - usersService: Fetch current user data and user info from backend
       - userStore: Client-side state manager for current user (session in memory + localStorage backup)
+      - sensorService: Polls GET /sensors (30s interval, visibility-aware pause), POST /sensors/refresh; provides live sensor readings for active render
 
 - Backend Architecture
     - dynamoDB builting-renders table holds each users renders
@@ -68,15 +79,20 @@ The backend folder contains the most recent code or information that is is ident
       - id (String), created_at, email, name, password
       - for testing -> id: user-1, email: nkoujala@gmail.com, name: Sreenaina, password: scrypt-hashed (plaintext: Bujji1125$)
 
-    - lambda functions (pipeline order: router → read → extract → transform → generate → store)
+    - dynamoDB builting-sensors table holds simulated live sensor readings per render
+      - render_id (String PK), sensor_id (String SK), element_id, ifc_type, sensor_type, value, unit, status, last_updated
+
+    - lambda functions (pipeline order: router → read → extract → resolve → topology-engine → generate → store)
       * all lambda functions use builting-role (single shared role with 5 custom least-privilege policies: builting-logs, builting-dynamodb, builting-s3, builting-stepfunctions, builting-bedrock)
-      * builting-router has ENV variables: STATE_MACHINE_ARN, SESSION_SECRET, ALLOWED_ORIGINS
-      - builting-router (node.js20 and arm64): API gateway router for auth, user data, renders, presigned URLs, and finalize endpoint (starts Step Function directly)
+      * builting-router has ENV variables: STATE_MACHINE_ARN, SESSION_SECRET, ALLOWED_ORIGINS, SENSORS_TABLE
+      - builting-router (node.js20 and arm64): API gateway router for auth, user data, renders, presigned URLs, finalize endpoint (starts Step Function), and sensor endpoints (GET /sensors, POST /sensors/refresh)
       - builting-read (node.js20 and arm64): retrieves render from DynamoDB and lists uploaded files from S3
-      - builting-extract (node.js20 and arm64): downloads files from S3, extracts building specs as CSS v1.0 via Bedrock + VentSim/DXF/XLSX/DOCX parsers + multi-pass Bedrock extraction + enrichment; esbuild-bundled (5.7MB)
-      - builting-transform (node.js20 and arm64): consolidated Lambda that runs ValidateCSS → RepairCSS → NormalizeGeometry → DecomposeTunnelShell (v2 stable frame + v3 infrastructure containment hints) → MergeWalls → InferOpenings → InferSlabs (MergeWalls and InferSlabs skip for TUNNEL domain)
-      - builting-generate (python3.11 container): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, mesh fallback (IfcTriangulatedFaceSet), viewer compatibility scoring, tunnel shell report generation, decomposed parent skip logic, v3 BIM semantics (IfcDuctSegment, IfcSpace containment, branch IfcElementAssembly aggregation, IfcMaterialLayerSetUsage)
-      - builting-store (node.js20 and arm64): updates DynamoDB with IFC path, elementCounts, outputMode, cssHash
+      - builting-extract (node.js20 and arm64): downloads files from S3, extracts building specs as CSS v1.0 via Bedrock + VentSim/DXF/XLSX/DOCX parsers + multi-pass Bedrock extraction + enrichment; esbuild-bundled (5.8MB); Phase 1 dual-writes claims.json alongside css_raw.json; Phase 9 adds title block extraction, page role classification, coordinate-bearing prompts, spatial layout assembly (DIRECT_2D/ASSEMBLED_2D/ESTIMATED), multi-page PDF (up to 5 pages), scale calibration, vision-to-BuildingSpec bridge for drawing-primary renders, component-based confidence model
+      - builting-resolve (node.js20 and arm64): NormalizeClaims + ResolveClaims — reads claims.json, normalizes units/conventions, groups claims by subject identity, resolves field conflicts, assigns canonical IDs, writes normalized_claims.json + canonical_observed.json + resolution_report.json + identity_map.json
+      - builting-topology-engine (node.js20 and arm64, 512MB, 120s): Consolidated from builting-structure + builting-geometry + builting-validate. Runs entire structural inference, geometry build, and validation pipeline in single memory context — no S3 serialization. Pipeline: ValidateCSS → RepairCSS → NormalizeGeometry → [TUNNEL] DecomposeTunnelShell → SnapWallEndpoints (tiered 50mm→150mm) → BuildTopology → [BUILDING] MergeWalls → CleanWallAxes → InferOpenings → CreateOpeningRelationships → InferSlabs → DeriveRoofElevation → AlignSlabsToWalls → SnapSlabsToWallBases → GuaranteeBuildingEnvelope → ClampDimensions → BuildPathConnections (with connection angle computation: MITRE/BUTT/TEE) → EquipmentMounting → AnnotateSweepGeometry → CSSValidation → SafetyChecks → ValidateTopology → RunFullModelValidation → v2 Adapter → Write artifacts to S3. Outputs cssS3Key + resolvedS3Key + validationReportS3Key + readinessScore + all validation fields.
+      - builting-generate (python3.11 container, 512MB): CSS-driven IFC4 generation with confidence-based semantic mapping, caching, inline IFC validation, self-healing PROXY_ONLY regeneration, mesh fallback (IfcTriangulatedFaceSet), IfcSweptDiskSolid for circular ducts/pipes, IfcCircleHollowProfileDef for hollow profiles, viewer compatibility scoring, tunnel shell report generation, decomposed parent skip logic, v3 BIM semantics (IfcDuctSegment, IfcSpace containment, branch IfcElementAssembly aggregation, IfcMaterialLayerSetUsage), common Psets (Wall/Slab/Door/Window/Column/Beam + ManufacturerTypeInformation), IfcRelConnectsPathElements with mitre/butt/tee angle metadata, Phase 11 glTF (.glb) and OBJ export via trimesh (non-blocking, 30s time-boxed)
+      - builting-store (node.js20 and arm64): updates DynamoDB with IFC path, elementCounts, outputMode, cssHash, validation fields (readinessScore, exportReadiness, authoringSuitability, criticalIssueCount, validationWarningCount, validationProxyRatio, validationReportS3Key, generationModeRecommendation, geometryFidelity)
+      - builting-sensors (node.js20 and arm64): seeds and refreshes simulated live sensor data per render; maps IFC element types to sensor types (IfcSpace→TEMPERATURE, IfcDuctSegment→AIRFLOW, IfcFan/IfcPump→EQUIPMENT_STATUS, IfcColumn/IfcBeam→STRUCTURAL_LOAD); stores readings in builting-sensors DynamoDB table; max 20 sensors per type per render
 
     - Step Function
       - builting-state-machine
@@ -105,7 +121,7 @@ The backend folder contains the most recent code or information that is is ident
                   GET
                   OPTIONS
                   /download
-                     GET
+                     GET (?format=ifc|glb|obj)
                      OPTIONS
                   /report
                      GET
@@ -113,6 +129,12 @@ The backend folder contains the most recent code or information that is is ident
                   /finalize
                      POST
                      OPTIONS
+                  /sensors
+                     GET
+                     OPTIONS
+                     /refresh
+                        POST
+                        OPTIONS
             /uploads
                /presigned
                   OPTIONS
@@ -127,9 +149,11 @@ The backend folder contains the most recent code or information that is is ident
       - /aws/lambda/builting-router
       - /aws/lambda/builting-read
       - /aws/lambda/builting-extract
-      - /aws/lambda/builting-transform
+      - /aws/lambda/builting-resolve
+      - /aws/lambda/builting-topology-engine
       - /aws/lambda/builting-generate
       - /aws/lambda/builting-store
+      - /aws/lambda/builting-sensors
 
    - S3 buckets
       - builting-data (raw data user uploads for each user render)
@@ -142,27 +166,22 @@ The backend folder contains the most recent code or information that is is ident
 ### COMPLETED ✅
 See `COMPLETED.md` for full implementation history — all phases through final gap-closure are done.
 
-### Current: All Core Phases Complete (v6+ deployed 2026-03-13)
-- v6 Phases 1-9: Guardrails, Visual QA, Tunnel Clamping, Building Hardening, Quantity Sets, Validation, Source Report, Image Ingestion, Source Fusion
-- Requirements-Closure: Evidence Trail, Visual Improvements, BIM Maturity, Regression Tests, Scope Boundary
-- Final Gap-Closure Phases 1-8:
-  1. Revit Compatibility Validation (12-check scoring)
-  2. Connected System Topology (IfcDistributionSystem + IfcDistributionPort + connections)
-  3. Blueprint/Image Geometry Extraction Upgrade (type-specific vision, confidence-gated CSS)
-  4. Element-Level Evidence Mapping (sourceExcerpt, pageNumber, coordinateSource, Pset_SourceProvenance)
-  5. Universal Building Robustness (mezzanine, canopy, shared walls, L-shaped)
-  6. Viewer/Visualization Export (geometry stats, export readiness)
-  7. Full Verification Artifact (v2.0 engineer audit report)
-  8. Final Safety Checks (element limits, overlap detection, coordinate bounds)
+### Extra
+* Security & Platform Hardening
+   - Replace the shared builting-role IAM role with per-function execution roles following least-privilege principles
+   - Restrict S3, DynamoDB, and Step Functions access to only required resources
+   - Improve operational logging, monitoring, and deployment configuration
+   - Perform a security and infrastructure review to ensure production readiness
+* Prepare codebase for final delivery:
+   - Add clear, layman's-term comments throughout all frontend and backend code (explain *what* and *why*, not just *how*)
+   - Remove dead code, unused files, debug logs, and dev-only artifacts (dist/, test IFC files, etc.)
+   - Ensure consistent naming, formatting, and file organization
+   - Add top-of-file summaries for every Lambda, service, and component explaining its role in plain English
+   - Review and clean up .gitignore, environment configs, and deployment scripts
+ * Collaborative Model Review (only if user demand justifies it)
+   - Support multi-user review sessions within the viewer
+   - Allow users to leave comments or annotations on model elements
+   - Provide revision comparison tools to analyze changes between generated models
+   - Enable collaborative design review workflows
 
-### Remaining / Future Work
-1. Edit/retry failed renders
-2. Complex curved geometries for tunnels
-3. Formal Revit round-trip proof
-4. Real-time sensor ingestion
-5. CAD-quality geometry from blueprints (advanced OCR/symbol recognition)
-6. Native glTF/OBJ export in Lambda
-7. Real-time collaboration / multi-user support
-8. Render versioning / history
-
-**References**: See DEPLOYMENT_GUIDE_IFC4.md and backend/schemas/builting-css-spec.md
+**References**: See DEPLOYMENT_GUIDE_IFC4.md, backend/schemas/builting-css-spec.md

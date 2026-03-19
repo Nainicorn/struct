@@ -1,0 +1,10 @@
+{
+  "name": "builting-topology-engine",
+  "version": "3.0.0",
+  "type": "module",
+  "description": "Unified Topology Engine — structure + geometry + validation in a single in-memory pipeline",
+  "main": "index.mjs",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.500.0"
+  }
+}

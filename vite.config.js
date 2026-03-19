@@ -26,28 +26,30 @@ const setupWasm = {
   apply: 'serve',
   enforce: 'pre',
   configResolved() {
-    // Copy web-ifc WASM file to public directory once (only if needed)
-    const wasmSrc = path.resolve('./node_modules/web-ifc/web-ifc.wasm');
-    const wasmDest = path.resolve('./public/web-ifc.wasm');
-
+    // Copy web-ifc WASM files to public directory once (only if needed)
     if (!fs.existsSync('./public')) {
       fs.mkdirSync('./public', { recursive: true });
     }
 
-    // Only copy if destination doesn't exist or source is newer
-    let shouldCopy = false;
-    if (!fs.existsSync(wasmDest)) {
-      shouldCopy = true;
-    } else {
-      const srcStats = fs.statSync(wasmSrc);
-      const destStats = fs.statSync(wasmDest);
-      if (srcStats.mtime > destStats.mtime) {
-        shouldCopy = true;
-      }
-    }
+    const wasmFiles = ['web-ifc.wasm', 'web-ifc-mt.wasm'];
+    for (const wasmFile of wasmFiles) {
+      const wasmSrc = path.resolve(`./node_modules/web-ifc/${wasmFile}`);
+      const wasmDest = path.resolve(`./public/${wasmFile}`);
 
-    if (shouldCopy && fs.existsSync(wasmSrc)) {
-      fs.copyFileSync(wasmSrc, wasmDest);
+      let shouldCopy = false;
+      if (!fs.existsSync(wasmDest)) {
+        shouldCopy = true;
+      } else {
+        const srcStats = fs.statSync(wasmSrc);
+        const destStats = fs.statSync(wasmDest);
+        if (srcStats.mtime > destStats.mtime) {
+          shouldCopy = true;
+        }
+      }
+
+      if (shouldCopy && fs.existsSync(wasmSrc)) {
+        fs.copyFileSync(wasmSrc, wasmDest);
+      }
     }
   }
 };

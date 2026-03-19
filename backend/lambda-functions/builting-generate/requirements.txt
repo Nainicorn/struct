@@ -1,2 +1,4 @@
 ifcopenshell
 boto3
+trimesh
+numpy

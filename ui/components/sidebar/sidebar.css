@@ -6,7 +6,7 @@
 .__sidebar-controls {
     flex-shrink: 0;
     padding: 12px 12px 8px 12px;
-    transition: all 0.2s ease-out;
+    transition: all var(--transition-layout);
 }
 
 body[data-collapsed="true"] .__sidebar-controls {
@@ -32,7 +32,7 @@ body[data-collapsed="true"] .__sidebar-section-label {
     flex: 1;
     overflow-y: auto;
     padding: 4px 8px 12px 8px;
-    transition: all 0.2s ease-out;
+    transition: all var(--transition-layout);
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -41,23 +41,6 @@ body[data-collapsed="true"] .__sidebar-section-label {
 
 body[data-collapsed="true"] .__sidebar-renders {
     display: none;
-}
-
-.__sidebar-renders::-webkit-scrollbar {
-    width: 4px;
-}
-
-.__sidebar-renders::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-.__sidebar-renders::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 3px;
-}
-
-.__sidebar-renders::-webkit-scrollbar-thumb:hover {
-    background: var(--border-strong);
 }
 
 /* ─── Render Preview Cards ─── */
@@ -146,7 +129,13 @@ body[data-collapsed="true"] .__sidebar-renders {
 }
 
 .__render-item-status-dot--pending {
-    background: var(--text-muted);
+    background: var(--status-info);
+    animation: pulse-dot 1.5s infinite;
+}
+
+.__render-item-status-dot--uploading {
+    background: var(--status-info);
+    animation: pulse-dot 1.5s infinite;
 }
 
 .__render-item-status-dot--failed {
@@ -156,6 +145,32 @@ body[data-collapsed="true"] .__sidebar-renders {
 @keyframes pulse-dot {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
+}
+
+/* Status label for accessibility (shown on non-completed renders) */
+.__render-item-status-label {
+    position: absolute;
+    bottom: 6px;
+    right: 6px;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 2px 5px;
+    border-radius: 3px;
+    line-height: 1;
+}
+
+.__render-item-status-label--processing,
+.__render-item-status-label--pending,
+.__render-item-status-label--uploading {
+    background: rgba(96, 165, 250, 0.2);
+    color: var(--status-info);
+}
+
+.__render-item-status-label--failed {
+    background: rgba(248, 113, 113, 0.2);
+    color: var(--status-error);
 }
 
 /* ─── Info Row (below thumbnail) ─── */
@@ -225,12 +240,6 @@ body[data-collapsed="true"] .__sidebar-renders {
     width: 15px;
     height: 15px;
     flex-shrink: 0;
-}
-
-/* Legacy status classes (kept for JS compat) */
-.__render-item-image,
-.__render-item-status {
-    display: none;
 }
 
 /* ─── Loading State ─── */
