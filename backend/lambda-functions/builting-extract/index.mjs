@@ -1,6 +1,7 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { createHash } from 'crypto';
+import { gunzipSync } from 'zlib';
 import pdf from 'pdf-parse';
 import { extractXlsxText } from './parsers/xlsxParser.mjs';
 import { extractDocxText } from './parsers/docxParser.mjs';
@@ -604,6 +605,18 @@ async function downloadFile(bucket, key) {
         type: 'text',
         contentType: 'text/plain; extracted-from=application/vnd.openxmlformats-officedocument.wordprocessingml.document'
       };
+    } else if (ext === 'vsm') {
+      // VentSim native format: gzip-compressed text with same structure as .txt export
+      try {
+        const buffer = Buffer.from(await response.Body.transformToByteArray());
+        const decompressed = gunzipSync(buffer);
+        const text = decompressed.toString('utf-8');
+        console.log(`VSM file decompressed: ${fileName} (${buffer.length} → ${text.length} bytes)`);
+        return { content: text, type: 'text' };
+      } catch (err) {
+        console.warn(`Failed to decompress VSM ${key}:`, err.message);
+        return { content: null, type: 'unsupported', reason: `VSM decompression failed: ${err.message}` };
+      }
     } else if (ext === 'dxf') {
       return { content: await response.Body.transformToString(), type: 'text', contentType: 'text/dxf' };
     } else if (['png', 'jpg', 'jpeg', 'tiff', 'tif'].includes(ext)) {
@@ -1895,8 +1908,22 @@ function buildingSpecToCSS(spec, sourceFiles) {
     return { id, type, semanticType, name, placement, geometry, container, relationships: [], properties: props, material, confidence, source, metadata: {} };
   }
 
+  // ════════════════════════════════════════════════════════════════════
+  // SOURCE-AUTHORITY GATE: When a structured geometric source exists
+  // (VentSim, DXF, vision with coordinates), LLM cannot create structural
+  // elements. Only enrichment phases (equipment, metadata) run.
+  // ════════════════════════════════════════════════════════════════════
+  const structuredSourceExists = spec._structuredSourceExists === true;
+  if (structuredSourceExists) {
+    console.log('Source-authority: structured source exists — skipping LLM structural generation (walls, slabs, columns)');
+    console.log('Source-authority: only equipment enrichment and metadata phases will run');
+  }
+
   // ---- EXTERIOR WALLS (4 walls per floor) ----
-  for (let f = 0; f < numFloors; f++) {
+  if (structuredSourceExists) {
+    console.log('Source-authority: SKIP exterior walls (structured source provides geometry)');
+  }
+  for (let f = 0; f < numFloors && !structuredSourceExists; f++) {
     const levelId = `level-${f + 1}`;
     const baseZ = floorLevel + (f * floorToFloor);
     const wt = wallThickness;
@@ -1967,7 +1994,10 @@ function buildingSpecToCSS(spec, sourceFiles) {
   }
 
   // ---- INTERIOR WALLS ----
-  if (spec.interior_walls && structureClass !== 'LINEAR') {
+  if (structuredSourceExists) {
+    console.log('Source-authority: SKIP interior walls (structured source provides geometry)');
+  }
+  if (spec.interior_walls && structureClass !== 'LINEAR' && !structuredSourceExists) {
     for (const wall of spec.interior_walls) {
       const dx = (wall.x_end_m || 0) - (wall.x_start_m || 0);
       const dy = (wall.y_end_m || 0) - (wall.y_start_m || 0);
@@ -2006,7 +2036,10 @@ function buildingSpecToCSS(spec, sourceFiles) {
   }
 
   // ---- COLUMNS ----
-  if (spec.structure?.column_grid) {
+  if (structuredSourceExists) {
+    console.log('Source-authority: SKIP columns (structured source provides geometry)');
+  }
+  if (spec.structure?.column_grid && !structuredSourceExists) {
     const MAX_COLUMNS = 200; // cap to prevent runaway grids overwhelming the model
     let columnCount = 0;
     for (const grid of spec.structure.column_grid) {
@@ -2132,7 +2165,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
   }
 
   // ---- Phase 3C: SMART PARTITION WALLS — shared-boundary-aware inference ----
-  if (spec.rooms && structureClass !== 'LINEAR' && (!spec.interior_walls || spec.interior_walls.length === 0)) {
+  if (spec.rooms && structureClass !== 'LINEAR' && (!spec.interior_walls || spec.interior_walls.length === 0) && !structuredSourceExists) {
     const partitionThickness = Math.max(0.1, Math.min(0.3, wallThickness * 0.5));
     const wallMat = { name: spec.materials?.walls || 'gypsum_partition', color: [0.85, 0.85, 0.82], transparency: 0 };
     const BOUNDARY_TOL = 0.3; // meters — edges within this distance are "shared"
@@ -2377,7 +2410,10 @@ function buildingSpecToCSS(spec, sourceFiles) {
   }
 
   // ---- Phase 3E: BUILDING-TYPE OPENING DEFAULTS — windows on exterior walls, doors on partitions ----
-  {
+  if (structuredSourceExists) {
+    console.log('Source-authority: SKIP opening defaults (structured source provides geometry)');
+  }
+  if (!structuredSourceExists) {
     const existingWindows = elements.filter(e => e.type === 'WINDOW');
     const buildingType = (spec.building_type || spec.type || '').toUpperCase();
     const exteriorWallCount = elements.filter(e => e.type === 'WALL' && e.properties?.isExternal === true).length;
@@ -2570,7 +2606,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
   // Main building bounding box for shared-wall detection
   const mainBBox = { minX: 0, maxX: length, minY: 0, maxY: width };
 
-  for (const section of spec.sections || []) {
+  for (const section of (structuredSourceExists ? [] : (spec.sections || []))) {
     const sLen = section.length_m || 5;
     const sWid = section.width_m || 5;
     const sHeight = section.height_m || floorToFloor;
@@ -2724,7 +2760,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
   // ---- VERTICAL FEATURES (chimneys, exhaust stacks, vents, etc.) ----
   const roofElevation = floorLevel + (numFloors * floorToFloor);
 
-  for (const feat of spec.vertical_features || []) {
+  for (const feat of (structuredSourceExists ? [] : (spec.vertical_features || []))) {
     const fw = feat.width_m || 0.8;
     const fd = feat.depth_m || 0.6;
     const fAbove = feat.height_above_roof_m || 1.0;
@@ -2796,7 +2832,7 @@ function buildingSpecToCSS(spec, sourceFiles) {
     ? structuralElems.reduce((s, e) => s + (e.confidence || 0.5), 0) / structuralElems.length
     : 0;
 
-  if (wallCount < 4 || slabCount < 2 || structuralConfidence < 0.4) {
+  if ((wallCount < 4 || slabCount < 2 || structuralConfidence < 0.4) && !structuredSourceExists) {
     console.warn(`v6 Envelope fallback (PRESERVING): ${wallCount} walls, ${slabCount} slabs, structConf=${structuralConfidence.toFixed(2)} (domain=${normalizedDomain}) — adding missing envelope pieces only`);
     envelopeFallbackApplied = true;
     const preservedCount = elements.length;
@@ -3208,7 +3244,7 @@ Rules:
 
   try {
     const response = await bedrockClient.send(new InvokeModelCommand({
-      modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      modelId: 'us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0',
       contentType: 'application/json',
       accept: 'application/json',
       body: JSON.stringify({
@@ -3330,7 +3366,7 @@ ${suppText.slice(0, 20000)}`;
 
   try {
     const response = await bedrock.send(new InvokeModelCommand({
-      modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      modelId: 'us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0',
       contentType: 'application/json',
       accept: 'application/json',
       body: JSON.stringify({
@@ -4696,7 +4732,7 @@ async function callBedrockVision(buffer, mediaType, prompt, bedrockClient, conte
     : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } };
 
   const response = await bedrockClient.send(new InvokeModelCommand({
-    modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    modelId: 'us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0',
     contentType: 'application/json',
     accept: 'application/json',
     body: JSON.stringify({
@@ -5172,6 +5208,12 @@ export const handler = async (event) => {
       if (css) {
         css.metadata.sourceFiles = sourceFiles;
 
+        // Source-authority gating: VentSim is a structured geometric source.
+        // LLM cannot create structural elements when structured source exists.
+        css.metadata._hasStructuredSource = true;
+        css.metadata._sourceAuthority = 'CAD_SIMULATION';
+        css.metadata._sourceAuthorityLevel = 'DIRECT_3D';
+
         // VentSim geometry is always primary — it has precise 3D coordinates.
         // Narrative files enrich metadata (equipment names/specs) via enrichCSS below.
         const otherFiles = processedFiles.filter(f => f !== ventSimFile);
@@ -5260,6 +5302,11 @@ export const handler = async (event) => {
       let css = parseDxfToCSS(dxfFile.content);
       if (css) {
         css.metadata.sourceFiles = sourceFiles;
+
+        // Source-authority gating: DXF is a structured geometric source.
+        css.metadata._hasStructuredSource = true;
+        css.metadata._sourceAuthority = 'CAD_SIMULATION';
+        css.metadata._sourceAuthorityLevel = 'DIRECT_2D';
 
         // Enrichment: use supplementary files to add metadata to CSS elements
         const otherFiles = processedFiles.filter(f => f !== dxfFile);
@@ -5372,6 +5419,11 @@ export const handler = async (event) => {
         css.metadata.extractionRoute = 'VISION_BRIDGE';
         css.metadata.bridgeSource = floorPlanFile.name;
 
+        // Source-authority gating: Vision bridge has structured coordinates.
+        css.metadata._hasStructuredSource = true;
+        css.metadata._sourceAuthority = 'VISION';
+        css.metadata._sourceAuthorityLevel = 'DIRECT_2D';
+
         // Store drawing metadata
         const drawingSheets = visionOnlyFiles.map(f => ({
           fileName: f.name, sheetRole: f.visionCSS?.sheetRole, imageType: f.visionCSS?.imageType,
@@ -5417,7 +5469,7 @@ export const handler = async (event) => {
     // Helper: call Bedrock with a prompt and return parsed JSON (or null)
     async function callBedrock(prompt, maxTokens = 4096) {
       const response = await bedrock.send(new InvokeModelCommand({
-        modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+        modelId: 'us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0',
         contentType: 'application/json',
         accept: 'application/json',
         body: JSON.stringify({
@@ -5824,13 +5876,43 @@ Return the complete updated CSS JSON with ONLY the requested modification applie
       throw new Error('Bedrock returned empty or unparseable response');
     }
 
+    // Source-authority gating: Check if vision files provide structured coordinates.
+    // If DIRECT_2D/DIRECT_3D vision data exists, LLM should only enrich (not create structure).
+    const visionWithCoords = processedFiles.filter(f =>
+      f.visionCSS && f.visionCSS.elements?.length > 0 &&
+      f.visionCSS.elements.some(e => {
+        const cs = e.metadata?.evidence?.coordinateSource;
+        return cs === 'DIRECT_2D' || cs === 'DIRECT_3D' || cs === 'ASSEMBLED_2D';
+      })
+    );
+    const hasStructuredVision = visionWithCoords.length > 0;
+    if (hasStructuredVision) {
+      console.log(`Source-authority: ${visionWithCoords.length} vision files have structured coordinates — LLM structural generation restricted`);
+    }
+
     // Use enriched CSS from multi-pass if available, otherwise convert from spec
     let css;
     if (enrichedCSS) {
       css = enrichedCSS;
     } else {
       applyBuildingSpecDefaults(buildingSpec);
+      // Source-authority: if structured vision exists, restrict LLM spec to enrichment only
+      if (hasStructuredVision) {
+        buildingSpec._structuredSourceExists = true;
+      }
       css = buildingSpecToCSS(buildingSpec, sourceFiles);
+    }
+
+    // Mark LLM path source authority metadata
+    css.metadata = css.metadata || {};
+    if (hasStructuredVision) {
+      css.metadata._hasStructuredSource = true;
+      css.metadata._sourceAuthority = 'VISION';
+      css.metadata._sourceAuthorityLevel = 'DIRECT_2D';
+    } else {
+      css.metadata._hasStructuredSource = false;
+      css.metadata._sourceAuthority = 'LLM';
+      css.metadata._sourceAuthorityLevel = 'LLM_GENERATED';
     }
 
     // v6+: Merge vision-extracted CSS elements and findings into the model

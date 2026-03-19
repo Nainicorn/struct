@@ -43,6 +43,7 @@ function writeUInt16LE(buf, val, offset) {
 
 const files = fs.readdirSync(dir).filter(f =>
   !f.endsWith('.zip') && f !== '.DS_Store' && f !== 'build-zip.mjs' && f !== 'build-zip.js'
+  && !fs.statSync(path.join(dir, f)).isDirectory()
 );
 
 console.log('Files to include:', files);

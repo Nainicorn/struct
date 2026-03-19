@@ -1,7 +1,7 @@
 // AWS Service - Route to correct API endpoint
 import cookieService from './cookieService.js';
 
-const API_BASE_URL = "https://0mc6awox4i.execute-api.us-east-1.amazonaws.com/dev";
+const API_BASE_URL = "https://b665o7k8bc.execute-api.us-gov-east-1.amazonaws.com/prod";
 
 const aws = {
   getBaseUrl() {

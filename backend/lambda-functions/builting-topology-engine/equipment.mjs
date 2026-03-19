@@ -606,6 +606,18 @@ function applyEquipmentMounting(css) {
     };
     mountingCorrections++;
 
+    // Derive _mountType from zone assignment (tunnel domain)
+    const assignedZone = elem.metadata.mountingZone || zoneName;
+    if (assignedZone.startsWith('crown')) {
+      elem.metadata._mountType = 'CEILING';
+    } else if (assignedZone.startsWith('floor')) {
+      elem.metadata._mountType = 'FLOOR';
+    } else if (assignedZone.includes('wall')) {
+      elem.metadata._mountType = 'WALL';
+    } else {
+      elem.metadata._mountType = 'FLOOR';
+    }
+
     // Floor pad for heavy equipment — skip in tunnel domain since the tunnel
     // segment floor IS the pad (generating pads creates visual double-floor)
     if (FLOOR_MOUNTED.has(st) && !isTunnel) {
@@ -1294,6 +1306,7 @@ function applyBuildingEquipmentMounting(css) {
     }
 
     elem.metadata.mountingType = mountType;
+    elem.metadata._mountType = mountType; // universal geometry contract metadata
     elem.metadata.correctedBy = 'EQUIPMENT_MOUNTING';
     elem.metadata.correctionDelta = {
       dx: Math.round((o.x - elem.metadata.originalPlacement.x) * 100) / 100,

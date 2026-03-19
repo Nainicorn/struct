@@ -4,7 +4,7 @@
   "States": {
     "ReadRenderMetadata": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-read",
+      "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-read",
       "ResultPath": "$.metadata",
       "Next": "ExtractBuildingSpec",
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
@@ -13,7 +13,7 @@
 
     "ExtractBuildingSpec": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-extract",
+      "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-extract",
       "Parameters": {
         "renderId.$": "$.renderId",
         "userId.$": "$.userId",
@@ -31,7 +31,7 @@
 
     "ResolveClaims": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-resolve",
+      "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-resolve",
       "Parameters": {
         "claimsS3Key.$": "$.specResult.claimsS3Key",
         "userId.$": "$.userId",
@@ -47,7 +47,7 @@
 
     "TopologyEngine": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-topology-engine",
+      "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-topology-engine",
       "Parameters": {
         "cssS3Key.$": "$.specResult.cssS3Key",
         "userId.$": "$.userId",
@@ -64,7 +64,7 @@
 
     "GenerateIFC": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-generate",
+      "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-generate",
       "Parameters": {
         "cssS3Key.$": "$.topologyResult.cssS3Key",
         "bucket.$": "$.bucket",
@@ -79,7 +79,7 @@
 
     "StoreIFC": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store",
+      "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-store",
       "Parameters": {
         "renderId.$": "$.renderId",
         "userId.$": "$.userId",
@@ -116,7 +116,7 @@
 
     "SeedSensors": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-sensors",
+      "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-sensors",
       "Parameters": {
         "renderId.$": "$.renderId",
         "userId.$": "$.userId",
@@ -136,7 +136,7 @@
 
     "HandleFailure": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:103870333822:function:builting-store",
+      "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-store",
       "Parameters": {
         "failureMode": true,
         "renderId.$": "$.renderId",

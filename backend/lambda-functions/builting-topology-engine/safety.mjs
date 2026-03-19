@@ -23,8 +23,67 @@ export function validateCSSElements(css) {
     if (g?.depth !== undefined && (!Number.isFinite(g.depth) || g.depth <= 0))
       cssIssues.push(`Invalid depth: ${e.id}`);
   }
+
+  // ── Geometry contract consistency checks ──
+  for (const e of css.elements) {
+    const g = e.geometry;
+    if (!g) continue;
+    const behavior = g._geoBehavior;
+    if (!behavior) continue;
+    const eid = e.element_key || e.id;
+
+    // PATH_SWEEP must be path-authored with valid pathPoints
+    if (behavior === 'PATH_SWEEP' && !g._isTunnelShell) {
+      if (!g._pathAuthored) {
+        cssIssues.push(`Geometry contract: ${eid} is PATH_SWEEP but not path-authored`);
+      }
+      if (!Array.isArray(g.pathPoints) || g.pathPoints.length < 2) {
+        cssIssues.push(`Geometry contract: ${eid} is PATH_SWEEP with ${g.pathPoints?.length || 0} pathPoints`);
+      }
+    }
+    // PATH_SWEEP tunnel shell must have depth > 0.5m
+    if (behavior === 'PATH_SWEEP' && g._isTunnelShell) {
+      if ((g.depth || 0) < 0.5) {
+        cssIssues.push(`Geometry contract: ${eid} is tunnel shell with depth ${g.depth || 0}m (< 0.5m)`);
+      }
+    }
+    // PROFILE_EXTRUSION must have depth and profile
+    if (behavior === 'PROFILE_EXTRUSION') {
+      if ((g.depth || 0) <= 0) {
+        cssIssues.push(`Geometry contract: ${eid} is PROFILE_EXTRUSION with depth=${g.depth || 0}`);
+      }
+      if (!g.profile) {
+        cssIssues.push(`Geometry contract: ${eid} is PROFILE_EXTRUSION with no profile`);
+      }
+    }
+    // OPENING_HOSTED must have hostWallKey
+    if (behavior === 'OPENING_HOSTED') {
+      const hostKey = e.metadata?.hostWallKey || e.properties?.hostWallKey;
+      if (!hostKey) {
+        cssIssues.push(`Geometry contract: ${eid} is OPENING_HOSTED with no hostWallKey`);
+      }
+    }
+  }
+
+  // ── Relationship integrity checks ──
+  for (const e of css.elements) {
+    if (!e.relationships || !Array.isArray(e.relationships)) continue;
+    const eid = e.element_key || e.id;
+    const validRels = [];
+    for (const rel of e.relationships) {
+      if (!rel.target) { validRels.push(rel); continue; }
+      if (elementKeys.has(rel.target)) {
+        validRels.push(rel);
+      } else {
+        cssIssues.push(`Broken relationship: ${eid} → ${rel.target} (${rel.type || 'unknown'})`);
+        // Drop broken relationship (don't drop element — per-element resilience)
+      }
+    }
+    e.relationships = validRels;
+  }
+
   if (cssIssues.length > 0) {
-    console.warn(`v6 CSS validation: ${cssIssues.length} issues: ${cssIssues.slice(0, 5).join('; ')}`);
+    console.warn(`v6 CSS validation: ${cssIssues.length} issues: ${cssIssues.slice(0, 10).join('; ')}`);
   }
   return cssIssues;
 }

@@ -6,7 +6,8 @@ import renders from './renders.mjs';
 const s3 = new S3Client({});
 const DATA_BUCKET = process.env.DATA_BUCKET || 'builting-data';
 
-const ALLOWED_EXTENSIONS = new Set(['.txt', '.pdf', '.xlsx', '.xls', '.docx', '.dxf']);
+const ALLOWED_EXTENSIONS = new Set(['.txt', '.pdf', '.xlsx', '.xls', '.docx', '.dxf',
+  '.vsm', '.dwg', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.csv', '.json']);
 const MAX_FILES = 20;
 const MAX_FILENAME_LENGTH = 255;
 

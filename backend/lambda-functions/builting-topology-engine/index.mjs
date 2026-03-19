@@ -71,46 +71,252 @@ function buildTypeHistogram(elements) {
   return counts;
 }
 
+// ============================================================================
+// UNIVERSAL GEOMETRY CONTRACT
+// ============================================================================
+
 /**
- * Annotate DUCT and PIPE elements with SWEEP geometry method for circular profiles.
+ * Classify every element's geometry behavior. This is the backbone of the
+ * universal geometry contract — behavior-based, not element-name-based.
+ *
+ * Behaviors:
+ *   PATH_SWEEP         — path-authored: directrix centerline + cross-section profile
+ *   PROFILE_EXTRUSION  — profile extruded along a single direction
+ *   TESSELLATED        — triangulated/faceted mesh
+ *   OPENING_HOSTED     — void-cut element hosted in a parent
+ *   SPATIAL            — bounding volume only (no physical geometry)
+ *   DISCRETE_SOLID     — standalone solid with identity placement
+ */
+function classifyGeometryBehavior(css) {
+  if (!css.elements) return;
+
+  const PATH_SWEEP_TYPES = new Set(['DUCT', 'PIPE', 'CABLE_TRAY']);
+  const PATH_SWEEP_SEMANTICS = new Set(['IfcDuctSegment', 'IfcPipeSegment', 'IfcCableCarrierSegment']);
+  const SURFACE_TYPES = new Set(['WALL', 'SLAB', 'COLUMN', 'BEAM']);
+  let counts = {};
+
+  for (const elem of css.elements) {
+    const geom = elem.geometry;
+    if (!geom) continue;
+
+    const type = (elem.type || '').toUpperCase();
+    const st = elem.semanticType || '';
+    const props = elem.properties || {};
+    const meta = elem.metadata || {};
+    const method = (geom.method || '').toUpperCase();
+    const pp = geom.pathPoints;
+    const hasValidPath = Array.isArray(pp) && pp.length >= 2;
+
+    let behavior;
+
+    // 1. TUNNEL_SEGMENT (structural) → PATH_SWEEP with _isTunnelShell flag
+    if (type === 'TUNNEL_SEGMENT' && props.branchClass === 'STRUCTURAL') {
+      behavior = 'PATH_SWEEP';
+      geom._isTunnelShell = true;
+    }
+    // 2. Explicit linear MEP types → PATH_SWEEP
+    else if (PATH_SWEEP_TYPES.has(type) || PATH_SWEEP_SEMANTICS.has(st)) {
+      behavior = 'PATH_SWEEP';
+    }
+    // 3. WALL/SLAB/COLUMN/BEAM with pathPoints → PATH_SWEEP (curved walls, ramps)
+    else if (SURFACE_TYPES.has(type) && hasValidPath) {
+      // Check pathLength > profile_max_dimension * 2
+      const profile = geom.profile || {};
+      const maxDim = Math.max(profile.width || 0, profile.height || 0, (profile.radius || 0) * 2, 0.1);
+      const pathLen = _computePathLength(pp);
+      if (pathLen > maxDim * 2) {
+        behavior = 'PATH_SWEEP';
+      } else {
+        behavior = 'PROFILE_EXTRUSION';
+      }
+    }
+    // 4. Standard surface types → PROFILE_EXTRUSION
+    else if (SURFACE_TYPES.has(type)) {
+      behavior = 'PROFILE_EXTRUSION';
+    }
+    // 5. Doors/windows with host → OPENING_HOSTED
+    else if ((type === 'DOOR' || type === 'WINDOW') && (meta.hostWallKey || props.hostWallKey)) {
+      behavior = 'OPENING_HOSTED';
+    }
+    // 6. Spaces → SPATIAL
+    else if (type === 'SPACE') {
+      behavior = 'SPATIAL';
+    }
+    // 7. Mesh/BREP → TESSELLATED
+    else if (method === 'MESH' || method === 'BREP') {
+      behavior = 'TESSELLATED';
+    }
+    // 8. Default → DISCRETE_SOLID
+    else {
+      behavior = 'DISCRETE_SOLID';
+    }
+
+    geom._geoBehavior = behavior;
+    counts[behavior] = (counts[behavior] || 0) + 1;
+  }
+
+  console.log(`classifyGeometryBehavior: ${JSON.stringify(counts)}`);
+}
+
+/** Compute total path length from an array of {x,y,z} points. */
+function _computePathLength(pathPoints) {
+  let len = 0;
+  for (let i = 1; i < pathPoints.length; i++) {
+    const p0 = pathPoints[i - 1], p1 = pathPoints[i];
+    const dx = (p1.x || 0) - (p0.x || 0);
+    const dy = (p1.y || 0) - (p0.y || 0);
+    const dz = (p1.z || 0) - (p0.z || 0);
+    len += Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  return len;
+}
+
+/**
+ * Path-author all PATH_SWEEP elements: ensure they have validated pathPoints,
+ * _runAxis, and _pathLength. Does NOT force geometry.method = 'SWEEP' —
+ * the generator chooses the best IFC representation.
  */
 function annotateSweepGeometry(css) {
   if (!css.elements) return;
 
-  const SWEEP_TYPES = new Set(['DUCT', 'PIPE']);
   let annotated = 0;
+  const MAX_PATH_POINTS = 200;
 
   for (const elem of css.elements) {
-    if (!SWEEP_TYPES.has(elem.type)) continue;
     const geom = elem.geometry;
     if (!geom) continue;
-    const profile = geom.profile || {};
-    if (profile.type !== 'CIRCLE' && !profile.radius) continue;
-    if (geom.method === 'SWEEP') continue;
+    if (geom._geoBehavior !== 'PATH_SWEEP') continue;
+    if (geom._isTunnelShell) continue; // tunnel shell placement handled by generate
+
+    // Already path-authored with valid data — skip
+    if (geom._pathAuthored && Array.isArray(geom.pathPoints) && geom.pathPoints.length >= 2) continue;
 
     const placement = elem.placement || {};
     const origin = placement.origin || { x: 0, y: 0, z: 0 };
-    const axis = placement.axis || geom.direction || { x: 0, y: 0, z: 1 };
+
+    // Determine run axis: refDirection (CSS convention: axis=world-up, refDirection=bearing)
+    const runDir = placement.refDirection || geom.direction || placement.axis || { x: 0, y: 0, z: 1 };
     const depth = geom.depth || 1.0;
     if (depth <= 0) continue;
 
-    const ax = axis.x || 0, ay = axis.y || 0, az = axis.z || 0;
+    const ax = runDir.x || 0, ay = runDir.y || 0, az = runDir.z || 0;
     const len = Math.sqrt(ax * ax + ay * ay + az * az);
     if (len < 1e-10) continue;
     const nx = ax / len, ny = ay / len, nz = az / len;
 
-    geom.method = 'SWEEP';
-    geom.pathPoints = [
-      { x: origin.x - nx * depth / 2, y: origin.y - ny * depth / 2, z: origin.z - nz * depth / 2 },
-      { x: origin.x + nx * depth / 2, y: origin.y + ny * depth / 2, z: origin.z + nz * depth / 2 }
-    ];
-    geom._previousMethod = 'EXTRUSION';
+    // Generate pathPoints if missing
+    if (!Array.isArray(geom.pathPoints) || geom.pathPoints.length < 2) {
+      geom.pathPoints = [
+        { x: origin.x - nx * depth / 2, y: origin.y - ny * depth / 2, z: origin.z - nz * depth / 2 },
+        { x: origin.x + nx * depth / 2, y: origin.y + ny * depth / 2, z: origin.z + nz * depth / 2 }
+      ];
+      geom._previousMethod = geom.method || 'EXTRUSION';
+    }
+
+    // Validate and clean pathPoints
+    geom.pathPoints = _validatePathPoints(geom.pathPoints, MAX_PATH_POINTS);
+
+    if (geom.pathPoints.length < 2) continue; // validation removed all points
+
+    // Check minimum path length
+    const profile = geom.profile || {};
+    const maxDim = Math.max(profile.width || 0, profile.height || 0, (profile.radius || 0) * 2, 0.1);
+    const pathLen = _computePathLength(geom.pathPoints);
+    if (pathLen <= maxDim * 2) {
+      // Too short — downgrade to DISCRETE_SOLID
+      geom._geoBehavior = 'DISCRETE_SOLID';
+      geom._pathAuthored = false;
+      continue;
+    }
+
+    // Store path metadata
+    geom._pathAuthored = true;
+    geom._runAxis = { x: nx, y: ny, z: nz };
+    geom._pathLength = pathLen;
     annotated++;
   }
 
   if (annotated > 0) {
-    console.log(`annotateSweepGeometry: ${annotated} DUCT/PIPE elements annotated with SWEEP method`);
+    console.log(`annotateSweepGeometry: ${annotated} PATH_SWEEP elements path-authored`);
   }
+}
+
+/**
+ * Validate and clean pathPoints: sort along dominant axis, dedupe,
+ * remove zero-length segments, enforce max count.
+ */
+function _validatePathPoints(points, maxPoints) {
+  if (!Array.isArray(points) || points.length < 2) return points;
+
+  // Remove non-finite points
+  let clean = points.filter(p =>
+    Number.isFinite(p.x || 0) && Number.isFinite(p.y || 0) && Number.isFinite(p.z || 0)
+  );
+
+  if (clean.length < 2) return clean;
+
+  // Sort along dominant axis (ensure consistent start→end direction)
+  // Determine dominant axis from first-to-last vector
+  const p0 = clean[0], pN = clean[clean.length - 1];
+  const dx = Math.abs((pN.x || 0) - (p0.x || 0));
+  const dy = Math.abs((pN.y || 0) - (p0.y || 0));
+  const dz = Math.abs((pN.z || 0) - (p0.z || 0));
+  // Only sort if points might be unordered (more than 2 points)
+  if (clean.length > 2) {
+    if (dx >= dy && dx >= dz) {
+      clean.sort((a, b) => (a.x || 0) - (b.x || 0));
+    } else if (dy >= dx && dy >= dz) {
+      clean.sort((a, b) => (a.y || 0) - (b.y || 0));
+    } else {
+      clean.sort((a, b) => (a.z || 0) - (b.z || 0));
+    }
+  }
+
+  // Remove duplicate points (within 1mm tolerance)
+  const DEDUP_TOL = 0.001;
+  const deduped = [clean[0]];
+  for (let i = 1; i < clean.length; i++) {
+    const prev = deduped[deduped.length - 1];
+    const cur = clean[i];
+    const dist = Math.sqrt(
+      ((cur.x || 0) - (prev.x || 0)) ** 2 +
+      ((cur.y || 0) - (prev.y || 0)) ** 2 +
+      ((cur.z || 0) - (prev.z || 0)) ** 2
+    );
+    if (dist > DEDUP_TOL) {
+      deduped.push(cur);
+    }
+  }
+
+  // Remove zero-length segments (min 10mm)
+  const MIN_SEG = 0.01;
+  const filtered = [deduped[0]];
+  for (let i = 1; i < deduped.length; i++) {
+    const prev = filtered[filtered.length - 1];
+    const cur = deduped[i];
+    const dist = Math.sqrt(
+      ((cur.x || 0) - (prev.x || 0)) ** 2 +
+      ((cur.y || 0) - (prev.y || 0)) ** 2 +
+      ((cur.z || 0) - (prev.z || 0)) ** 2
+    );
+    if (dist >= MIN_SEG) {
+      filtered.push(cur);
+    }
+  }
+
+  // Enforce max pathPoints (performance guard)
+  if (filtered.length > maxPoints) {
+    // Subsample evenly
+    const step = filtered.length / maxPoints;
+    const sampled = [filtered[0]];
+    for (let i = 1; i < maxPoints - 1; i++) {
+      sampled.push(filtered[Math.round(i * step)]);
+    }
+    sampled.push(filtered[filtered.length - 1]);
+    return sampled;
+  }
+
+  return filtered;
 }
 
 export const handler = async (event) => {
@@ -314,30 +520,31 @@ export const handler = async (event) => {
   // Step G2: Equipment mounting
   timedStep('applyEquipmentMounting', () => applyEquipmentMounting(css));
 
-  // Step G2.5: Annotate sweep geometry for ducts/pipes
+  // Step G2.5: Classify geometry behavior (universal geometry contract)
+  timedStep('classifyGeometryBehavior', () => classifyGeometryBehavior(css));
+
+  // Step G2.6: Path-author PATH_SWEEP elements (ensure pathPoints, _runAxis, _pathLength)
   timedStep('annotateSweepGeometry', () => annotateSweepGeometry(css));
 
-  // Step G2.6: Guard invalid sweeps — downgrade non-MEP SWEEP to EXTRUSION,
-  // but FLAG tunnel linear MEP (pipes/ducts/trays) as needing path generation
-  // instead of converting them to vertical extrusions.
+  // Step G2.7: Guard invalid sweeps — use _geoBehavior for smarter decisions.
+  // PATH_SWEEP elements missing pathPoints → flag for path generation (all domains).
+  // Non-PATH_SWEEP elements with SWEEP method + no pathPoints → downgrade to EXTRUSION.
   timedStep('guardInvalidSweeps', () => {
     let downgraded = 0;
     let flaggedLinear = 0;
-    const isTunnel = (css.domain || '').toUpperCase() === 'TUNNEL';
 
     for (const elem of css.elements) {
       const geom = elem.geometry;
       if (!geom || geom.method !== 'SWEEP') continue;
       if (Array.isArray(geom.pathPoints) && geom.pathPoints.length >= 2) continue;
 
-      const st = elem.semanticType || '';
-      const isLinearMEP = ['IfcPipeSegment', 'IfcDuctSegment', 'IfcCableCarrierSegment'].includes(st);
+      const behavior = geom._geoBehavior || '';
 
       geom._failedSweep = true;
       geom._previousMethod = geom.method;
 
-      if (isTunnel && isLinearMEP) {
-        // Don't downgrade — flag for path generation by centerline inheritance
+      if (behavior === 'PATH_SWEEP') {
+        // PATH_SWEEP without pathPoints: flag for path generation (universal, all domains)
         geom._needsGeneratedPath = true;
         if (!elem.metadata) elem.metadata = {};
         elem.metadata.sweepPathMissing = true;
@@ -345,6 +552,7 @@ export const handler = async (event) => {
         continue;
       }
 
+      // Non-PATH_SWEEP with SWEEP method + no pathPoints: downgrade to EXTRUSION
       geom.method = 'EXTRUSION';
       delete geom.pathPoints;
       if (geom.profile?.type === 'CIRCLE' && geom.profile.radius) {
@@ -355,7 +563,7 @@ export const handler = async (event) => {
       elem.metadata.sweepDowngraded = true;
       downgraded++;
     }
-    console.log(`guardInvalidSweeps: ${downgraded} downgraded, ${flaggedLinear} tunnel linear MEP flagged for path generation`);
+    console.log(`guardInvalidSweeps: ${downgraded} downgraded, ${flaggedLinear} PATH_SWEEP flagged for path generation`);
   });
 
   // Step G3: CSS validation
@@ -487,6 +695,60 @@ export const handler = async (event) => {
         floorsByContainer.set(floorKey, elem.element_key || elem.id);
       }
 
+      // ── Gate E: MEP/Equipment host validation (annotation-only) ──
+      // Annotates elements with host validation status for generate lambda.
+      // Does NOT strip — generate decides per output mode (HARD=suppress, SOFT=proxy).
+      const geoBehavior = geom._geoBehavior || '';
+      const isTunnelDomain = (css.domain || '').toUpperCase() === 'TUNNEL';
+      if (isTunnelDomain && (geoBehavior === 'PATH_SWEEP' || type === 'EQUIPMENT')) {
+        if (!geom._isTunnelShell) { // skip tunnel shell segments (they ARE hosts)
+          const hostKey = meta.parentSegment || meta.hostSegmentId ||
+                          props.hostStructuralBranchMatched || props.derivedFromBranch ||
+                          props.hostBranch || '';
+          const hasValidHost = hostKey && finalKeys.has(hostKey);
+
+          if (!elem.metadata) elem.metadata = {};
+          if (hasValidHost) {
+            elem.metadata._hostValidation = 'VALID';
+          } else {
+            // Check distance to nearest valid host for WEAK_HOST classification
+            const o = elem.placement?.origin;
+            let nearestDist = Infinity;
+            if (o) {
+              for (const candidate of css.elements) {
+                if (!candidate.geometry?._isTunnelShell) continue;
+                const co = candidate.placement?.origin;
+                if (!co) continue;
+                // Constrained matching: same container check
+                if (elem.container && candidate.container && elem.container !== candidate.container) continue;
+                const dist = Math.sqrt(
+                  ((o.x || 0) - (co.x || 0)) ** 2 +
+                  ((o.y || 0) - (co.y || 0)) ** 2 +
+                  ((o.z || 0) - (co.z || 0)) ** 2
+                );
+                if (dist < nearestDist) nearestDist = dist;
+              }
+            }
+            // Host distance threshold: min(0.5m, 25% of profile max dimension)
+            const profMaxDim = Math.max(
+              geom.profile?.width || 0, geom.profile?.height || 0,
+              (geom.profile?.radius || 0) * 2, 0.5
+            );
+            const threshold = Math.min(0.5, profMaxDim * 0.25);
+            if (nearestDist <= threshold * 10) { // within 10x threshold = weak but usable
+              elem.metadata._hostValidation = 'WEAK_HOST';
+            } else {
+              elem.metadata._hostValidation = 'NO_HOST';
+            }
+          }
+
+          // Set severity based on output mode
+          const outputMode = (css.metadata?.outputMode || 'HYBRID').toUpperCase();
+          elem.metadata._hostFailureSeverity =
+            (outputMode === 'FULL_AUTHORING' || outputMode === 'COORDINATION') ? 'HARD' : 'SOFT';
+        }
+      }
+
       keep.push(elem);
     }
 
@@ -504,6 +766,24 @@ export const handler = async (event) => {
       strippedHostRef, strippedLinearPath, strippedDuplicateFloor, strippedBadPlacement, totalStripped
     };
   });
+
+  // ════════════════════════════════════════════════════════════════════════
+  // UNIVERSAL METADATA — Z convention, export profile
+  // ════════════════════════════════════════════════════════════════════════
+
+  if (!css.metadata) css.metadata = {};
+
+  // Step 4: Z convention dual tracking — store both source and normalized conventions
+  // so generate lambda can skip its heuristic, and logs can reference source for debugging.
+  css.metadata.zConvention = {
+    source: domain === 'TUNNEL' ? 'MINE_ABSOLUTE' : 'MIXED',
+    normalized: 'STOREY_RELATIVE',
+    origin: 'topology_engine'
+  };
+
+  // Step 5: Export profile — informs generator's IFC representation choices.
+  // Default to WEB_VIEWER; can be overridden by upstream metadata.
+  css.metadata.exportProfile = css.metadata.exportProfile || 'WEB_VIEWER';
 
   // ════════════════════════════════════════════════════════════════════════
   // PHASE 4: V2 ADAPTER BOUNDARY

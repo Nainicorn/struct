@@ -28,6 +28,11 @@ s3_client = boto3.client('s3')
 DATA_BUCKET = os.environ.get('DATA_BUCKET', 'builting-data')
 IFC_BUCKET = os.environ.get('IFC_BUCKET', 'builting-ifc')
 
+# Feature flag: enable IfcFixedReferenceSweptAreaSolid for non-circular profiles.
+# Default OFF — rectangular profiles use extrusion-along-path (proven).
+# Enable per-deployment for testing against xeokit/BIMvision/Revit.
+USE_FIXED_REF_SWEEP = os.environ.get('USE_FIXED_REF_SWEEP', 'false').lower() == 'true'
+
 
 # ============================================================================
 # CONSTANTS & MATERIAL LIBRARY
@@ -533,6 +538,59 @@ def create_swept_disk_solid(f, subcontext, path_points, radius, inner_radius=Non
     return solid, pds
 
 
+def create_fixed_reference_swept_area_solid(f, subcontext, profile_def, path_points,
+                                              fixed_reference=(0.0, 0.0, 1.0), elem_id=None):
+    """Create IfcFixedReferenceSweptAreaSolid — any profile swept along a polyline path.
+    Unlike IfcSweptDiskSolid (circular only), supports rectangular and arbitrary profiles.
+    The FixedReference direction controls profile orientation along the path.
+    Returns (solid, pds) or (None, None) on failure.
+    FEATURE-FLAGGED: only called when USE_FIXED_REF_SWEEP is enabled."""
+    if len(path_points) < 2:
+        if elem_id:
+            print(f"Warning: FixedRefSweep requires >= 2 pathPoints for {elem_id}")
+        return None, None
+
+    # Build polyline directrix
+    ifc_points = []
+    for pt in path_points:
+        x = float(pt.get('x', 0))
+        y = float(pt.get('y', 0))
+        z = float(pt.get('z', 0))
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+            if elem_id:
+                print(f"Warning: non-finite path point in FixedRefSweep for {elem_id}")
+            continue
+        ifc_points.append(f.create_entity('IfcCartesianPoint', Coordinates=(x, y, z)))
+
+    if len(ifc_points) < 2:
+        if elem_id:
+            print(f"Warning: FixedRefSweep < 2 valid points for {elem_id}")
+        return None, None
+
+    directrix = f.create_entity('IfcPolyline', Points=tuple(ifc_points))
+    fixed_ref = f.create_entity('IfcDirection', DirectionRatios=fixed_reference)
+
+    solid = f.create_entity(
+        'IfcFixedReferenceSweptAreaSolid',
+        SweptArea=profile_def,
+        Directrix=directrix,
+        FixedReference=fixed_ref
+    )
+
+    body_rep = f.create_entity(
+        'IfcShapeRepresentation',
+        ContextOfItems=subcontext,
+        RepresentationIdentifier='Body',
+        RepresentationType='AdvancedSweptSolid',
+        Items=(solid,)
+    )
+    pds = f.create_entity('IfcProductDefinitionShape', Representations=(body_rep,))
+    if elem_id:
+        print(f"Created IfcFixedReferenceSweptAreaSolid for {elem_id}: "
+              f"points={len(ifc_points)}, ref={fixed_reference}")
+    return solid, pds
+
+
 def _generate_arch_profile_points(w, h, curve_ratio=0.3, segments=16):
     """Generate horseshoe-arch profile points (straight walls + semicircular crown).
     Profile is centered at (0, h/2) — bottom at -h/2, top at +h/2.
@@ -767,51 +825,27 @@ def create_element_geometry(f, subcontext, geometry, elem_id=None):
         return result[0], result[1], None
 
     # SWEEP — cross-section swept along polyline path
-    if method == 'SWEEP':
+    # Export-profile-aware dispatch: uses _geoBehavior and export profile
+    geo_behavior = geometry.get('_geoBehavior', '')
+    path_authored = geometry.get('_pathAuthored', False)
+    export_profile = geometry.get('_exportProfile', 'WEB_VIEWER')
+
+    if method == 'SWEEP' or (geo_behavior == 'PATH_SWEEP' and path_authored and not geometry.get('_isTunnelShell')):
         profile_data = geometry.get('profile', {})
         path_points = geometry.get('pathPoints', [])
         sweep_profile_type = profile_data.get('type', 'CIRCLE')
 
-        # Rectangular SWEEP: convert 2-point path to straight extrusion along path direction.
-        # IfcSweptDiskSolid only supports circular cross-sections, so rectangular runs
-        # are realized as extrusions oriented along the path vector.
-        if sweep_profile_type == 'RECTANGLE' and len(path_points) >= 2:
-            p0 = path_points[0]
-            p1 = path_points[-1]
-            dx = float(p1.get('x', 0)) - float(p0.get('x', 0))
-            dy = float(p1.get('y', 0)) - float(p0.get('y', 0))
-            dz = float(p1.get('z', 0)) - float(p0.get('z', 0))
-            path_len = math.sqrt(dx * dx + dy * dy + dz * dz)
-            if path_len > 0.001:
-                direction = {'x': dx / path_len, 'y': dy / path_len, 'z': dz / path_len}
-                try:
-                    profile_def = create_profile(f, profile_data)
-                    # Compute solid frame so profile XY plane is perpendicular to path direction
-                    solid_axis = (dx / path_len, dy / path_len, dz / path_len)
-                    world_up = (0.0, 0.0, 1.0)
-                    cx = world_up[1] * solid_axis[2] - world_up[2] * solid_axis[1]
-                    cy = world_up[2] * solid_axis[0] - world_up[0] * solid_axis[2]
-                    cz = world_up[0] * solid_axis[1] - world_up[1] * solid_axis[0]
-                    c_len = math.sqrt(cx * cx + cy * cy + cz * cz)
-                    solid_ref = None
-                    if c_len > 1e-6:
-                        solid_ref = (cx / c_len, cy / c_len, cz / c_len)
-                    solid, pds = create_extrusion(f, subcontext, profile_def, direction, path_len,
-                                                  elem_id=elem_id, solid_axis=solid_axis, solid_ref=solid_ref)
-                    if elem_id:
-                        print(f"Rectangular SWEEP -> extrusion for {elem_id}: len={path_len:.2f}m")
-                    return solid, pds, None
-                except Exception as e_rect:
-                    if elem_id:
-                        print(f"Warning: Rectangular SWEEP extrusion failed for {elem_id}: {e_rect}")
-                    fallback_used = 'rect_sweep_to_default_extrusion'
-            else:
-                if elem_id:
-                    print(f"Warning: Rectangular SWEEP path too short for {elem_id}: {path_len:.4f}m")
-                fallback_used = 'rect_sweep_zero_length'
+        if len(path_points) < 2:
+            if elem_id:
+                print(f"SWEEP rejected for {elem_id}: < 2 pathPoints")
+            fallback_used = 'sweep_missing_path'
+            # Convert circular profile to rectangular for extrusion fallback
+            if sweep_profile_type == 'CIRCLE' and profile_data.get('radius'):
+                d = float(profile_data['radius']) * 2
+                geometry['profile'] = {'type': 'RECTANGLE', 'width': d, 'height': d}
 
-        # Circular SWEEP: use IfcSweptDiskSolid
-        elif sweep_profile_type != 'RECTANGLE':
+        elif sweep_profile_type == 'CIRCLE':
+            # Circular profiles: IfcSweptDiskSolid (proven, all targets)
             radius = float(profile_data.get('radius', 0.10))
             inner_radius = profile_data.get('innerRadius') or profile_data.get('wallThickness')
             if inner_radius is not None and profile_data.get('wallThickness') is not None:
@@ -820,33 +854,73 @@ def create_element_geometry(f, subcontext, geometry, elem_id=None):
             elif inner_radius is not None:
                 inner_radius = float(inner_radius)
 
-            if len(path_points) < 2:
+            try:
+                solid, pds = create_swept_disk_solid(f, subcontext, path_points, radius,
+                                                      inner_radius=inner_radius, elem_id=elem_id)
+                if solid is not None:
+                    return solid, pds, None
+            except Exception as e_sweep:
                 if elem_id:
-                    print(f"SWEEP rejected for {elem_id}: missing pathPoints (upstream should downgrade)")
-                fallback_used = 'sweep_missing_path_to_extrusion'
-                profile_data_fb = geometry.get('profile', {})
-                if profile_data_fb.get('type') == 'CIRCLE' and profile_data_fb.get('radius'):
-                    d = float(profile_data_fb['radius']) * 2
-                    geometry['profile'] = {'type': 'RECTANGLE', 'width': d, 'height': d}
-            else:
+                    print(f"Warning: IfcSweptDiskSolid failed for {elem_id}: {e_sweep}")
+            fallback_used = 'sweep_circular_failed'
+            if elem_id:
+                print(f"SWEEP circular fallback to extrusion for {elem_id}")
+
+        else:
+            # Non-circular profiles (RECTANGLE, ARCH, ARBITRARY)
+            # Feature-flagged: try IfcFixedReferenceSweptAreaSolid if enabled
+            if USE_FIXED_REF_SWEEP and export_profile != 'REVIT_AUTHORING':
                 try:
-                    solid, pds = create_swept_disk_solid(f, subcontext, path_points, radius,
-                                                          inner_radius=inner_radius, elem_id=elem_id)
+                    profile_def = create_profile(f, profile_data)
+                    # Fixed reference: world-up for horizontal, world-X for vertical paths
+                    fixed_ref = (0.0, 0.0, 1.0)
+                    p0, p1 = path_points[0], path_points[-1]
+                    horiz = math.sqrt((float(p1.get('x', 0)) - float(p0.get('x', 0))) ** 2 +
+                                      (float(p1.get('y', 0)) - float(p0.get('y', 0))) ** 2)
+                    vert = abs(float(p1.get('z', 0)) - float(p0.get('z', 0)))
+                    if horiz < 0.1 and vert > 0.1:
+                        fixed_ref = (1.0, 0.0, 0.0)
+
+                    solid, pds = create_fixed_reference_swept_area_solid(
+                        f, subcontext, profile_def, path_points,
+                        fixed_reference=fixed_ref, elem_id=elem_id)
                     if solid is not None:
                         return solid, pds, None
-                except Exception as e_sweep:
+                except Exception as e_frs:
                     if elem_id:
-                        print(f"Warning: SWEEP failed for {elem_id}: {e_sweep}, falling back to extrusion")
+                        print(f"Warning: IfcFixedReferenceSweptAreaSolid failed for {elem_id}: {e_frs}")
 
-                fallback_used = 'sweep_to_extrusion'
-                if elem_id:
-                    print(f"SWEEP fallback to extrusion for {elem_id}")
+            # Default/fallback: extrusion along path direction (proven behavior)
+            if len(path_points) >= 2:
+                p0 = path_points[0]
+                p1 = path_points[-1]
+                dx = float(p1.get('x', 0)) - float(p0.get('x', 0))
+                dy = float(p1.get('y', 0)) - float(p0.get('y', 0))
+                dz = float(p1.get('z', 0)) - float(p0.get('z', 0))
+                path_len = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if path_len > 0.001:
+                    try:
+                        profile_def = create_profile(f, profile_data)
+                        solid_axis = (dx / path_len, dy / path_len, dz / path_len)
+                        world_up = (0.0, 0.0, 1.0)
+                        cx = world_up[1] * solid_axis[2] - world_up[2] * solid_axis[1]
+                        cy = world_up[2] * solid_axis[0] - world_up[0] * solid_axis[2]
+                        cz = world_up[0] * solid_axis[1] - world_up[1] * solid_axis[0]
+                        c_len = math.sqrt(cx * cx + cy * cy + cz * cz)
+                        solid_ref = None
+                        if c_len > 1e-6:
+                            solid_ref = (cx / c_len, cy / c_len, cz / c_len)
+                        solid, pds = create_extrusion(f, subcontext, profile_def, {'x': 0, 'y': 0, 'z': 1},
+                                                      path_len, elem_id=elem_id,
+                                                      solid_axis=solid_axis, solid_ref=solid_ref)
+                        if elem_id:
+                            print(f"PATH_SWEEP -> extrusion for {elem_id}: len={path_len:.2f}m")
+                        return solid, pds, None
+                    except Exception as e_rect:
+                        if elem_id:
+                            print(f"Warning: PATH_SWEEP extrusion failed for {elem_id}: {e_rect}")
 
-        # Rectangular SWEEP with < 2 points: fall through to default extrusion
-        elif len(path_points) < 2:
-            if elem_id:
-                print(f"Rectangular SWEEP rejected for {elem_id}: missing pathPoints, falling back to extrusion")
-            fallback_used = 'rect_sweep_missing_path'
+            fallback_used = 'rect_sweep_to_extrusion'
 
     # EXTRUSION (or SWEEP fallback) — profile + direction + depth
     # For SWEEP elements that fell through (e.g. rectangular with valid pathPoints but no depth),
@@ -1239,8 +1313,17 @@ def generate_ifc4_from_css(css):
             _type_hist['_SLAB_ROOF'] = _type_hist.get('_SLAB_ROOF', 0) + 1
     print(f"CSS input histogram: {json.dumps(_type_hist)}")
 
-    # Auto-detect Z convention instead of relying on a flag
-    placement_z_is_absolute = _detect_z_convention(elements, levels, metadata)
+    # Z convention: prefer explicit metadata from topology engine, fall back to heuristic
+    z_conv = metadata.get('zConvention', {})
+    if z_conv.get('origin') == 'topology_engine':
+        placement_z_is_absolute = (z_conv.get('normalized', 'STOREY_RELATIVE') == 'ABSOLUTE')
+        print(f"Z from topology: normalized={z_conv['normalized']}, source={z_conv.get('source', 'unknown')}")
+    else:
+        print("Z: no topology metadata, using heuristic (DEPRECATED)")
+        placement_z_is_absolute = _detect_z_convention(elements, levels, metadata)
+
+    # Read export profile for geometry dispatch decisions
+    export_profile = metadata.get('exportProfile', 'WEB_VIEWER')
 
     facility_name = facility.get('name', 'Structure')
     ts = int(datetime.now(timezone.utc).timestamp())
@@ -1744,33 +1827,6 @@ def generate_ifc4_from_css(css):
         candidates.sort(key=lambda c: (c[0], c[1]))
         return candidates[0][2]
 
-    def _is_bad_demo_linear(elem):
-        """Demo stabilization: for pipes/ducts/cables, ONLY allow SWEEP geometry with
-        horizontal pathPoints. Everything else (EXTRUSION shafts, vertical stacks,
-        stray rods) gets hidden. This is aggressive but eliminates all visual clutter."""
-        st = elem.get('semanticType', '')
-        if st not in ('IfcDuctSegment', 'IfcPipeSegment', 'IfcCableCarrierSegment'):
-            return False
-        geom = elem.get('geometry', {}) or {}
-        method = geom.get('method', '')
-
-        # SWEEP with valid pathPoints that are mostly horizontal — trust it
-        if method == 'SWEEP':
-            pp = geom.get('pathPoints')
-            if isinstance(pp, list) and len(pp) >= 2:
-                # Check that the path is mostly horizontal (not a vertical shaft sweep)
-                p0 = pp[0]
-                p1 = pp[-1]
-                dx = abs(float(p1.get('x', 0)) - float(p0.get('x', 0)))
-                dy = abs(float(p1.get('y', 0)) - float(p0.get('y', 0)))
-                dz = abs(float(p1.get('z', 0)) - float(p0.get('z', 0)))
-                horiz = math.sqrt(dx * dx + dy * dy)
-                if horiz > 1.0 and dz < horiz * 0.5:
-                    return False  # horizontal sweep — keep it
-
-        # Everything else: EXTRUSION ducts, vertical sweeps, no-path elements → hide
-        return True
-
     for elem in elements:
         try:
             css_id = elem.get('id', f'elem-{element_count}')
@@ -1785,9 +1841,10 @@ def generate_ifc4_from_css(css):
             if elem.get('metadata', {}).get('geometryExportable') is False:
                 continue
 
-            # Demo stabilization: skip unstable linear MEP (vertical spikes, absurd rods)
-            if _is_bad_demo_linear(elem):
-                print(f"Demo filter: skipping unstable linear MEP {css_id}")
+            # Contract-based exportability check (replaces demo filter)
+            if elem.get('metadata', {}).get('_geometryExportable') is False:
+                reason = elem.get('metadata', {}).get('_invalidReason', 'unknown')
+                print(f"Skipping non-exportable: {css_id} ({reason})")
                 continue
 
             # Demo stabilization: hide floating helper geometry
@@ -1868,6 +1925,27 @@ def generate_ifc4_from_css(css):
                         elem['metadata']['exportReason'] = 'orphan_opening_too_far'
                         print(f"Orphan opening filter: skipping {css_id} — {dist:.1f}m from host, no closer host")
                         continue
+
+            # Step 14: Output-mode-aware host enforcement for MEP/equipment
+            _meta = elem.get('metadata', {}) or {}
+            _host_validation = _meta.get('_hostValidation', '')
+            _host_severity = _meta.get('_hostFailureSeverity', 'SOFT')
+            if _host_validation in ('NO_HOST', 'WEAK_HOST'):
+                if _host_severity == 'HARD':
+                    # Authoring mode: suppress element (bad geometry hurts editability)
+                    print(f"Host HARD fail: suppressing {css_id} in authoring mode")
+                    continue
+                elif _host_validation == 'NO_HOST':
+                    # Viewer mode: try rehost, else proxy downgrade
+                    nearest = _find_nearest_host(elem, elements)
+                    if nearest:
+                        new_key = nearest.get('element_key') or nearest.get('id')
+                        elem.setdefault('metadata', {})['_hostValidation'] = 'REHOSTED'
+                        elem.setdefault('metadata', {})['rehostedTo'] = new_key
+                        print(f"MEP rehost: {css_id} → {new_key}")
+                    else:
+                        elem.setdefault('metadata', {})['_renderAsProxy'] = True
+                        print(f"MEP host SOFT fail: {css_id} → proxy (no host, viewer mode)")
 
             # v5: Descriptive element naming — traceable IDs + human-friendly labels
             shell_piece = properties.get('shellPiece', '')
@@ -1961,6 +2039,35 @@ def generate_ifc4_from_css(css):
             geometry_data = elem.get('geometry', {'method': 'EXTRUSION', 'profile': {'type': 'RECTANGLE', 'width': 1, 'height': 1}, 'depth': 1})
             material_data = elem.get('material')
             confidence = float(elem.get('confidence', 0.5))
+
+            # Pass export profile to geometry data for dispatch decisions
+            geometry_data = dict(geometry_data) if isinstance(geometry_data, dict) else geometry_data
+            geometry_data['_exportProfile'] = export_profile
+
+            # Step 12: Path-authored placement normalization for PATH_SWEEP elements.
+            # Sets placement to identity at pathPoints[0], transforms pathPoints to relative.
+            # Eliminates double-transform issues where both placement and geometry encode direction.
+            geo_behavior = geometry_data.get('_geoBehavior', '')
+            if geo_behavior == 'PATH_SWEEP' and geometry_data.get('_pathAuthored') and not geometry_data.get('_isTunnelShell'):
+                pp = geometry_data.get('pathPoints', [])
+                if pp and len(pp) >= 2:
+                    p0 = pp[0]
+                    p0x = float(p0.get('x', 0))
+                    p0y = float(p0.get('y', 0))
+                    p0z = float(p0.get('z', 0))
+                    # Set placement origin to pathPoints[0] with identity orientation
+                    placement_data = dict(placement_data)
+                    placement_data['origin'] = {'x': p0x, 'y': p0y, 'z': p0z}
+                    placement_data['axis'] = {'x': 0, 'y': 0, 'z': 1}
+                    placement_data['refDirection'] = {'x': 1, 'y': 0, 'z': 0}
+                    # Transform pathPoints to be relative to placement origin
+                    geometry_data = dict(geometry_data)
+                    geometry_data['pathPoints'] = [
+                        {'x': float(pt.get('x', 0)) - p0x,
+                         'y': float(pt.get('y', 0)) - p0y,
+                         'z': float(pt.get('z', 0)) - p0z}
+                        for pt in pp
+                    ]
 
             # Portal building facade — make portal walls wide enough to span both
             # branch openings, creating a unified single entrance appearance.
@@ -2782,6 +2889,10 @@ def generate_ifc4_from_css(css):
 
             # Resolve IFC entity type
             ifc_entity_type = resolve_ifc_entity_type(elem, output_mode)
+
+            # Host enforcement: force proxy for elements marked by topology engine
+            if elem.get('metadata', {}).get('_renderAsProxy') is True:
+                ifc_entity_type = 'IfcBuildingElementProxy'
 
             # Track proxy fallbacks
             if ifc_entity_type == 'IfcBuildingElementProxy':
