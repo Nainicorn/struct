@@ -396,3 +396,172 @@ export function generateRoofArcProfile(halfW, wallH, archHeight, t, segments) {
   }
   return points;
 }
+
+// ============================================================================
+// ENGINEERING DERIVATION UTILITIES
+// Single source of truth for all geometry decisions that must be derived from
+// input data rather than hardcoded. Imported by vsm-bridge, tunnel-shell,
+// building-envelope, and index to ensure consistent derivation across the
+// full topology pipeline.
+// ============================================================================
+
+/**
+ * Compute the median length of all CSS elements that have a geometry.depth value.
+ * Used to derive context-appropriate thresholds (e.g. MAX_BRIDGE_LEN) that scale
+ * with the actual structure rather than being fixed for one dataset.
+ * Returns the computed median, or fallbackM if fewer than 3 elements have depth.
+ */
+export function medianSegmentLength(elements, fallbackM = 5.0) {
+  const depths = (elements || [])
+    .map(e => Number(e?.geometry?.depth))
+    .filter(d => isFinite(d) && d > 0);
+  if (depths.length < 3) return fallbackM;
+  depths.sort((a, b) => a - b);
+  const mid = Math.floor(depths.length / 2);
+  return depths.length % 2 === 0
+    ? (depths[mid - 1] + depths[mid]) / 2
+    : depths[mid];
+}
+
+/**
+ * Compute the Z-range of all elements with finite placement origins.
+ * Returns { min, max, range } in meters.
+ * Used to derive UPPER_Z_THRESHOLD so it scales with structure height.
+ */
+export function structureZRange(elements) {
+  const zVals = (elements || [])
+    .map(e => Number(e?.placement?.origin?.z))
+    .filter(z => isFinite(z));
+  if (zVals.length === 0) return { min: 0, max: 0, range: 0 };
+  const min = Math.min(...zVals);
+  const max = Math.max(...zVals);
+  return { min, max, range: max - min };
+}
+
+/**
+ * Derive a structurally reasonable shell/wall thickness from cross-section dimensions.
+ *
+ * Priority: explicit value from element → facilityMeta.defaultWallThickness →
+ *           material-informed engineering rule → geometric rule → absolute minimum.
+ *
+ * Engineering basis (structural codes):
+ *   concrete/shotcrete/rock: t = max(0.2, min(W,H) × 0.08)   [min 200mm]
+ *   steel/metal:             t = max(0.012, min(W,H) × 0.02)
+ *   masonry/brick/block:     t = max(0.10, min(W,H) × 0.04)
+ *   timber/wood/glulam:      t = max(0.05, min(W,H) × 0.05)
+ *   default (unknown):       t = max(0.15, min(W,H) × 0.06)
+ *
+ * Result capped at (min(W,H)/2 - 5mm) so two walls always fit inside the section.
+ * @param {object} elem  — CSS element (reads properties.wallThickness / shellThickness)
+ * @param {object} facilityMeta — css.facilityMeta (reads defaultWallThickness)
+ * @returns thickness in meters
+ */
+export function shellThicknessFromProfile(elem, facilityMeta) {
+  const props = elem?.properties || {};
+  const geom = elem?.geometry || {};
+  const prof = geom.profile || {};
+
+  // 1. Explicit element-level annotation (topology engine or extract)
+  const explicit = Number(props.wallThickness || props.shellThickness || props.shellThickness_m || 0);
+  if (explicit > 0) return +explicit.toFixed(4);
+
+  // 2. Facility-level default
+  const facDefault = Number(facilityMeta?.defaultWallThickness || 0);
+  if (facDefault > 0) return +facDefault.toFixed(4);
+
+  // 3. Derive from profile dimensions + material
+  const w = Number(prof.width || (prof.radius || 0) * 2 || 1);
+  const h = Number(prof.height || (prof.radius || 0) * 2 || 1);
+  const smallest = Math.min(w, h);
+  const mat = (props.material || '').toLowerCase();
+
+  let t;
+  if (/concrete|shotcrete|rock|stone|reinforced/.test(mat)) {
+    t = Math.max(0.2, smallest * 0.08);
+  } else if (/steel|metal|alumin/.test(mat)) {
+    t = Math.max(0.012, smallest * 0.02);
+  } else if (/masonry|brick|block|tile|cmu/.test(mat)) {
+    t = Math.max(0.10, smallest * 0.04);
+  } else if (/timber|wood|glulam|clt/.test(mat)) {
+    t = Math.max(0.05, smallest * 0.05);
+  } else {
+    t = Math.max(0.15, smallest * 0.06);
+  }
+
+  // Cap: two shell walls must fit inside the profile
+  t = Math.min(t, smallest / 2 - 0.005);
+  t = Math.max(t, 0.01);
+  return +t.toFixed(4);
+}
+
+/**
+ * Compute shell extension past a junction so adjacent panels meet without gaps.
+ * At a mitre joint the cut face extends diagonally — this computes the required
+ * overlap so the mitre clip always has geometry to cut through.
+ *
+ * Engineering basis: overlap = max(W,H)/2 × tan(turnAngle/2) × 0.5 (safety factor).
+ * Capped at 1.0m to prevent excessive extension on very large-bore structures.
+ *
+ * @param {number} profileW — profile width in meters
+ * @param {number} profileH — profile height in meters
+ * @param {number} turnAngleDeg — turn angle at junction in degrees (default 90°)
+ * @returns extension in meters per end
+ */
+export function junctionOverlapFromProfile(profileW, profileH, turnAngleDeg = 90) {
+  const maxHalf = Math.max(Number(profileW) || 1, Number(profileH) || 1) / 2;
+  const tanHalf = Math.tan((turnAngleDeg / 2) * Math.PI / 180);
+  const overlap = maxHalf * tanHalf * 0.5;
+  return +Math.min(Math.max(overlap, 0.05), 1.0).toFixed(4);
+}
+
+/**
+ * Derive structural slab thickness from span length.
+ *
+ * Engineering basis (RC slab design — span/depth ratio method):
+ *   Residential/office (light): span ÷ 26
+ *   Hospital/education (medium): span ÷ 23
+ *   Warehouse/industrial (heavy): span ÷ 17
+ *   Minimum 100mm; maximum 600mm.
+ *
+ * @param {number} spanM — slab span (longer dimension) in meters
+ * @param {string} loadClass — occupancy hint ('warehouse', 'hospital', 'residential', etc.)
+ * @returns thickness in meters
+ */
+export function slabThicknessFromSpan(spanM, loadClass = '') {
+  const span = Math.max(Number(spanM) || 5, 0.1);
+  const lc = (loadClass || '').toLowerCase();
+  let divisor;
+  if (/warehouse|industrial|heavy|plant/.test(lc)) {
+    divisor = 17;
+  } else if (/hospital|education|school|medium/.test(lc)) {
+    divisor = 23;
+  } else {
+    divisor = 26;
+  }
+  const t = span / divisor;
+  return +Math.min(Math.max(t, 0.10), 0.60).toFixed(3);
+}
+
+/**
+ * Derive storey floor-to-floor height from occupancy type.
+ * Used ONLY as a last-resort fallback when css.levelsOrSegments[i].height_m is absent.
+ *
+ * Engineering basis (building codes / typical practice):
+ *   residential: 2.8m    warehouse: 8.0m
+ *   office:      3.5m    hospital:  4.2m
+ *   retail:      4.5m    car park:  3.0m
+ *   laboratory:  4.0m    data centre: 4.0m
+ *
+ * @param {string} occupancyType — occupancy description string (case-insensitive)
+ * @returns height in meters
+ */
+export function storeyHeightFromOccupancy(occupancyType = '') {
+  const occ = (occupancyType || '').toLowerCase();
+  if (/residential|apartment|housing|dwelling/.test(occ)) return 2.8;
+  if (/warehouse|storage|logistics|distribution/.test(occ)) return 8.0;
+  if (/hospital|medical|clinic|healthcare/.test(occ)) return 4.2;
+  if (/retail|shop|mall|commercial/.test(occ)) return 4.5;
+  if (/car.?park|parking|garage/.test(occ)) return 3.0;
+  if (/lab|research|data.?cent/.test(occ)) return 4.0;
+  return 3.5; // office / default
+}

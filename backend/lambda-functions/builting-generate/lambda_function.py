@@ -41,9 +41,9 @@ USE_FIXED_REF_SWEEP = os.environ.get('USE_FIXED_REF_SWEEP', 'false').lower() == 
 MATERIAL_COLORS = {
     'concrete': (0.75, 0.75, 0.75),
     'brick': (0.72, 0.36, 0.22),
-    'steel': (0.55, 0.60, 0.65),
+    'steel': (0.48, 0.52, 0.58),       # bluer steel gray
     'timber': (0.65, 0.45, 0.25),
-    'glass': (0.7, 0.85, 0.95),
+    'glass': (0.65, 0.83, 0.97),       # brighter sky blue
     'concrete_floor': (0.65, 0.65, 0.65),
     'metal_roof': (0.40, 0.45, 0.50),
     'metal': (0.40, 0.45, 0.50),
@@ -53,50 +53,109 @@ MATERIAL_COLORS = {
     'plasterboard': (0.9, 0.9, 0.88),
     'wood': (0.55, 0.40, 0.25),
     'door': (0.55, 0.40, 0.25),
-    'window': (0.7, 0.85, 0.95),
+    'window': (0.65, 0.83, 0.97),      # brighter sky blue
     'space': (0.88, 0.88, 0.88),
     'blasted_rock': (0.48, 0.43, 0.38),
     'shotcrete': (0.55, 0.55, 0.52),
     'unknown': (0.7, 0.7, 0.7),
 }
 
+# Pipe system-type colors — Revit/ASHRAE/ISO color coding conventions.
+# Keys are normalized (uppercase, spaces/hyphens → underscores).
+# Fallback to PIPE css_type color when system type is absent or unrecognized.
+PIPE_SYSTEM_COLORS = {
+    'DOMESTIC_COLD_WATER':          (0.15, 0.45, 0.88),   # cold water blue
+    'COLD_WATER':                   (0.15, 0.45, 0.88),
+    'DOMESTIC_WATER':               (0.15, 0.45, 0.88),
+    'DOMESTIC_HOT_WATER':           (0.92, 0.25, 0.10),   # hot water red-orange
+    'HOT_WATER':                    (0.92, 0.25, 0.10),
+    'FIRE_SUPPRESSION':             (0.92, 0.08, 0.08),   # fire red
+    'FIRE_PROTECTION':              (0.92, 0.08, 0.08),
+    'SPRINKLER':                    (0.92, 0.08, 0.08),
+    'CHILLED_WATER_SUPPLY':         (0.25, 0.70, 0.95),   # chilled water supply — light blue
+    'CHILLED_WATER_RETURN':         (0.10, 0.48, 0.80),   # chilled water return — medium blue
+    'CHILLED_WATER':                (0.18, 0.60, 0.90),
+    'HEATING_HOT_WATER':            (0.92, 0.38, 0.10),   # heating hot water — orange-red
+    'HEATING_HOT_WATER_SUPPLY':     (0.92, 0.38, 0.10),
+    'HEATING_HOT_WATER_RETURN':     (0.80, 0.22, 0.08),
+    'SANITARY':                     (0.45, 0.40, 0.28),   # sanitary drain — dark olive
+    'SANITARY_DRAIN':               (0.45, 0.40, 0.28),
+    'DRAIN':                        (0.45, 0.40, 0.28),
+    'STORM':                        (0.30, 0.38, 0.52),   # storm drain — slate blue-gray
+    'STORM_DRAIN':                  (0.30, 0.38, 0.52),
+    'GAS':                          (0.95, 0.88, 0.10),   # gas — yellow
+    'NATURAL_GAS':                  (0.95, 0.88, 0.10),
+    'STEAM':                        (0.82, 0.82, 0.82),   # steam — light gray
+    'CONDENSATE':                   (0.15, 0.62, 0.58),   # condensate — teal
+    'COMPRESSED_AIR':               (0.55, 0.78, 0.55),   # compressed air — light green
+    'REFRIGERANT':                  (0.72, 0.30, 0.82),   # refrigerant — purple
+}
+
+# Duct system-type colors — Revit/ASHRAE conventions.
+DUCT_SYSTEM_COLORS = {
+    'SUPPLY_AIR':   (0.10, 0.45, 0.88),   # supply air — blue
+    'SUPPLY':       (0.10, 0.45, 0.88),
+    'RETURN_AIR':   (0.15, 0.68, 0.30),   # return air — green
+    'RETURN':       (0.15, 0.68, 0.30),
+    'EXHAUST_AIR':  (0.92, 0.55, 0.10),   # exhaust — orange
+    'EXHAUST':      (0.92, 0.55, 0.10),
+    'OUTSIDE_AIR':  (0.20, 0.88, 0.92),   # outside/fresh air — teal
+    'OA':           (0.20, 0.88, 0.92),
+    'FRESH_AIR':    (0.20, 0.88, 0.92),
+    'TRANSFER_AIR': (0.55, 0.78, 0.45),   # transfer air — light green
+}
+
 # Type/system-based color overrides — precedence: semanticType → shellPiece → css_type → material
+# Colors follow Revit/Navisworks BIM industry conventions for immediate readability
 TYPE_COLORS = {
-    # Structural — unified concrete gray (matching Revit reference quality)
-    'WALL': (0.753, 0.753, 0.753),    # concrete gray
-    'SLAB': (0.65, 0.65, 0.65),       # slightly darker for slabs
-    'COLUMN': (0.72, 0.72, 0.72),     # structural gray
-    'BEAM': (0.72, 0.72, 0.72),       # structural gray
-    # Openings — high contrast
-    'DOOR': (0.50, 0.30, 0.15),       # dark wood brown
+    # Structural — Revit/Navisworks standard palette
+    'WALL':   (0.753, 0.753, 0.753),  # concrete gray
+    'SLAB':   (0.82, 0.78, 0.68),     # light tan/sandstone — floor slab BIM convention
+    'COLUMN': (0.60, 0.63, 0.68),     # structural steel blue-gray
+    'BEAM':   (0.55, 0.58, 0.65),     # structural steel blue-gray
+    # Openings
+    'DOOR': (0.50, 0.30, 0.15),       # wood brown
     'WINDOW': (0.60, 0.82, 0.95),     # sky blue glass
-    # MEP systems — subtle, professional tones
-    'DUCT': (0.55, 0.62, 0.72),       # steel grey-blue
-    'PIPE': (0.50, 0.65, 0.55),       # muted green-grey
-    # Equipment by semanticType — each unique
-    'IfcFan': (0.95, 0.50, 0.10),             # bright orange
-    'IfcPump': (0.10, 0.65, 0.60),            # teal
-    'IfcElectricGenerator': (0.85, 0.20, 0.20),  # red
-    'IfcCompressor': (0.60, 0.35, 0.75),      # purple
-    'IfcTransformer': (0.80, 0.65, 0.15),     # amber
-    'IfcBoiler': (0.85, 0.25, 0.20),          # dark red
-    'IfcChiller': (0.25, 0.55, 0.80),         # cool blue
-    'IfcAirToAirHeatRecovery': (0.35, 0.65, 0.70),
-    'IfcUnitaryEquipment': (0.55, 0.45, 0.70),
-    # Infrastructure equipment — distinct from MEP
-    'IfcFireSuppressionTerminal': (0.90, 0.10, 0.10),  # fire red
-    'IfcSensor': (0.15, 0.80, 0.25),          # lime green
-    'IfcActuator': (0.45, 0.45, 0.82),        # steel blue
-    'IfcAlarm': (0.95, 0.15, 0.15),           # alarm red
-    'IfcCommunicationsAppliance': (0.35, 0.35, 0.78),
-    'IfcElectricDistributionBoard': (0.60, 0.30, 0.70),  # purple
-    'IfcLightFixture': (0.95, 0.90, 0.40),    # warm yellow
-    'IfcValve': (0.50, 0.70, 0.35),           # olive green
-    'IfcTank': (0.45, 0.60, 0.50),            # muted teal
-    'IfcPipeSegment': (0.50, 0.65, 0.55),     # same as PIPE
-    'IfcDuctSegment': (0.55, 0.62, 0.72),     # same as DUCT
-    'IfcCableCarrierSegment': (0.85, 0.75, 0.20),  # yellow
-    'IfcCableSegment': (0.80, 0.70, 0.15),    # gold
+    # MEP systems — Revit discipline colors
+    'DUCT': (0.0, 0.72, 0.87),        # Revit HVAC cyan
+    'PIPE': (0.18, 0.60, 0.30),       # Revit piping green
+    # HVAC equipment — HVAC discipline blue
+    'IfcFan': (0.10, 0.52, 0.88),              # HVAC blue
+    'IfcPump': (0.12, 0.55, 0.28),             # plumbing green
+    'IfcElectricGenerator': (0.92, 0.48, 0.05), # electrical orange
+    'IfcCompressor': (0.30, 0.48, 0.72),        # mechanical blue
+    'IfcTransformer': (0.95, 0.80, 0.05),       # electrical amber
+    'IfcBoiler': (0.88, 0.25, 0.08),            # heating red-orange
+    'IfcChiller': (0.08, 0.58, 0.82),           # cooling blue
+    'IfcAirToAirHeatRecovery': (0.18, 0.62, 0.72),  # HVAC teal
+    'IfcUnitaryEquipment': (0.30, 0.48, 0.72),  # HVAC discipline blue
+    'IfcHeatExchanger': (0.25, 0.55, 0.75),     # HVAC blue
+    'IfcAirTerminal': (0.10, 0.72, 0.88),       # supply air cyan
+    'IfcDamper': (0.08, 0.65, 0.82),            # HVAC cyan
+    'IfcCoil': (0.28, 0.58, 0.78),              # HVAC blue
+    'IfcCoolingTower': (0.08, 0.62, 0.75),      # cooling blue
+    'IfcFilter': (0.42, 0.62, 0.72),            # HVAC gray-blue
+    # Fire protection — fire red (Navisworks standard)
+    'IfcFireSuppressionTerminal': (0.92, 0.08, 0.08),  # fire red
+    'IfcAlarm': (0.95, 0.12, 0.12),             # alarm red
+    # Sensing / controls
+    'IfcSensor': (0.20, 0.82, 0.30),            # lime green
+    'IfcActuator': (0.35, 0.45, 0.85),          # control systems blue
+    'IfcFlowMeter': (0.25, 0.62, 0.38),         # piping green
+    # Electrical — amber/yellow (Navisworks standard)
+    'IfcCommunicationsAppliance': (0.45, 0.15, 0.72),  # telecom purple
+    'IfcElectricDistributionBoard': (0.55, 0.20, 0.75), # electrical distribution purple
+    'IfcLightFixture': (1.0, 0.95, 0.42),       # warm light yellow
+    'IfcLamp': (1.0, 0.98, 0.55),               # warm white-yellow
+    'IfcCableCarrierSegment': (0.95, 0.75, 0.08),  # electrical amber
+    'IfcCableSegment': (0.90, 0.70, 0.05),      # electrical gold
+    # Plumbing
+    'IfcValve': (0.18, 0.62, 0.30),             # piping green
+    'IfcTank': (0.28, 0.52, 0.65),              # water/storage blue
+    # Distribution segments: no entry here — colors are resolved via PIPE_SYSTEM_COLORS /
+    # DUCT_SYSTEM_COLORS by systemType, falling back to css_type PIPE/DUCT entries below.
+    # Industrial
+    'IfcTransportElement': (0.55, 0.48, 0.72),  # industrial purple
     # Spaces — translucent
     'SPACE': (0.75, 0.85, 0.95),     # light blue tint
     # Generic equipment fallback
@@ -117,8 +176,10 @@ SHELL_PIECE_COLORS = {
     'VOID':       (0.55, 0.78, 0.95),     # bright sky blue (transparency preserved elsewhere)
 }
 
-# Equipment size defaults (width, height, depth) — override only when CSS has placeholder 1×1×1
-# Universal: applies to all domains
+# Equipment size reference table (width, height, depth in meters).
+# Sourced from IFC standard equipment dimensions and common manufacturer data.
+# LAST-RESORT ONLY — only applied when CSS geometry.profile is absent or placeholder (≈1×1×1).
+# Any CSS-provided geometry.profile dimensions take precedence. Log is emitted on every use.
 EQUIPMENT_SIZE_DEFAULTS = {
     'IfcFan':                       (1.2, 1.2, 0.8),
     'IfcPump':                      (0.8, 0.6, 1.0),
@@ -188,7 +249,7 @@ SEMANTIC_IFC_MAP = {
     'RAILING': 'IfcRailing',
     'STAIR': 'IfcStair',
     'RAMP': 'IfcRamp',
-    'ROOF': 'IfcRoof',
+    'ROOF': 'IfcSlab',
     'CURTAIN_WALL': 'IfcCurtainWall',
     'COVERING': 'IfcCovering',
     'FOOTING': 'IfcFooting',
@@ -206,7 +267,7 @@ EQUIPMENT_SEMANTIC_MAP = {
     'IfcTransformer': 'IfcTransformer',
     'IfcBoiler': 'IfcBoiler',
     'IfcChiller': 'IfcChiller',
-    'IfcAirToAirHeatRecovery': 'IfcUnitaryEquipment',
+    'IfcAirToAirHeatRecovery': 'IfcAirToAirHeatRecovery',
     # Distribution segments
     'IfcPipeSegment': 'IfcPipeSegment',
     'IfcDuctSegment': 'IfcDuctSegment',
@@ -235,7 +296,7 @@ EQUIPMENT_SEMANTIC_MAP = {
     'IfcFilter': 'IfcFilter',
     'IfcDamper': 'IfcDamper',
     'IfcCoil': 'IfcCoil',
-    'IfcCoolingTower': 'IfcUnitaryEquipment',
+    'IfcCoolingTower': 'IfcCoolingTower',
     'IfcConveyor': 'IfcTransportElement',
 }
 
@@ -283,6 +344,178 @@ def safe_float(value, default=None):
         return float(value) if value is not None else default
     except (TypeError, ValueError):
         return default
+
+
+# ============================================================================
+# ENGINEERING DERIVATION UTILITIES
+# All geometry constants must be derived from input data. These functions
+# implement domain-appropriate engineering rules so the pipeline works for
+# any structure type (tunnel, hospital, office, warehouse, etc.) without
+# hardcoded dataset-specific values.
+# ============================================================================
+
+def derive_shell_thickness(profile_w, profile_h, explicit_t=None, material_hint=None):
+    """Derive a structurally reasonable shell/wall thickness from cross-section dimensions.
+
+    Priority: explicit_t from CSS → material-informed rule → geometric rule → absolute minimum.
+    Engineering basis (structural codes):
+      concrete / shotcrete / blasted_rock: t = max(0.2, min(W,H) * 0.08)   [min 200mm]
+      steel / metal:                       t = max(0.012, min(W,H) * 0.02)
+      masonry / brick / tile:              t = max(0.10, min(W,H) * 0.04)
+      timber / wood:                       t = max(0.05, min(W,H) * 0.05)
+      default (unknown):                   t = max(0.15, min(W,H) * 0.06)
+
+    All results capped at half the smallest profile dimension to prevent wall
+    overlap (two walls of this thickness must fit inside the section).
+    Returns thickness in meters."""
+    if explicit_t and float(explicit_t) > 0:
+        t = float(explicit_t)
+    else:
+        w = float(profile_w) if profile_w else 1.0
+        h = float(profile_h) if profile_h else 1.0
+        smallest = min(w, h)
+        mat = (material_hint or '').lower()
+        if any(k in mat for k in ('concrete', 'shotcrete', 'rock', 'stone', 'reinforced')):
+            t = max(0.2, smallest * 0.08)
+        elif any(k in mat for k in ('steel', 'metal', 'aluminium', 'aluminum')):
+            t = max(0.012, smallest * 0.02)
+        elif any(k in mat for k in ('masonry', 'brick', 'block', 'tile', 'cmu')):
+            t = max(0.10, smallest * 0.04)
+        elif any(k in mat for k in ('timber', 'wood', 'glulam', 'clt')):
+            t = max(0.05, smallest * 0.05)
+        else:
+            t = max(0.15, smallest * 0.06)
+    # Cap: two shell walls must fit inside profile
+    w = float(profile_w) if profile_w else 1.0
+    h = float(profile_h) if profile_h else 1.0
+    t = min(t, min(w, h) / 2.0 - 0.005)
+    t = max(t, 0.01)  # absolute minimum 10mm
+    return round(t, 4)
+
+
+def derive_slab_thickness(span_m, load_hint=None, material_hint=None, explicit_t=None):
+    """Derive structural slab thickness from span length.
+
+    Priority: explicit_t → span-based rule → absolute minimum.
+    Engineering basis (RC slab design):
+      Light loading (residential/office): span / 28 (two-way) to span / 20 (one-way)
+      Medium loading (hospital/education): span / 25 to span / 18
+      Heavy loading (warehouse/industrial): span / 20 to span / 14
+      Minimum 100mm for any slab; maximum 600mm for typical flat slabs.
+    Returns thickness in meters."""
+    if explicit_t and float(explicit_t) > 0:
+        return float(explicit_t)
+    span = float(span_m) if span_m and float(span_m) > 0 else 5.0
+    hint = (load_hint or '').lower()
+    if any(k in hint for k in ('warehouse', 'industrial', 'heavy', 'plant')):
+        t = span / 17.0
+    elif any(k in hint for k in ('hospital', 'education', 'school', 'medium')):
+        t = span / 23.0
+    else:
+        t = span / 26.0  # office / residential default
+    return round(max(0.10, min(t, 0.60)), 3)
+
+
+def derive_storey_height(occupancy_type=None, explicit_h=None):
+    """Derive storey floor-to-floor height from occupancy type when not explicitly provided.
+
+    Used ONLY as a last-resort fallback when css.levelsOrSegments[i].height_m is absent.
+    Engineering basis (building codes / typical practice):
+      residential:  2.8m    warehouse:  8.0m
+      office:       3.5m    car park:   3.0m
+      hospital:     4.2m    laboratory: 4.0m
+      retail:       4.5m    data centre:4.0m
+    Returns height in meters."""
+    if explicit_h and float(explicit_h) > 0:
+        return float(explicit_h)
+    occ = (occupancy_type or '').lower()
+    if any(k in occ for k in ('residential', 'apartment', 'housing', 'dwelling')):
+        return 2.8
+    if any(k in occ for k in ('warehouse', 'storage', 'logistics', 'distribution')):
+        return 8.0
+    if any(k in occ for k in ('hospital', 'medical', 'clinic', 'healthcare')):
+        return 4.2
+    if any(k in occ for k in ('retail', 'shop', 'mall', 'commercial')):
+        return 4.5
+    if any(k in occ for k in ('car park', 'parking', 'garage')):
+        return 3.0
+    if any(k in occ for k in ('laboratory', 'lab', 'research', 'data')):
+        return 4.0
+    return 3.5  # office / default
+
+
+def derive_duct_profile(area_m2=None, system_type=None, parent_width=None, parent_height=None,
+                         elem_id=None):
+    """Derive duct rectangular cross-section width and height from available data.
+
+    Priority chain:
+      1. area_m2 present → compute from area using ASHRAE aspect ratio rules
+      2. parent segment profile present → size as clearance fraction of enclosing segment
+      3. system-type heuristic → typical duct size for the system class
+
+    ASHRAE aspect ratio guidance (duct design):
+      Supply/return main runs: AR ≤ 4:1 for efficiency; ideal 1.5:1
+      Exhaust / outside air:  AR ≤ 3:1
+      Transfer air / general: AR ≤ 6:1
+
+    Returns (width_m, height_m) rounded to 3dp."""
+    # 1. Derive from area_m2 — most accurate
+    if area_m2 and float(area_m2) > 0.01:
+        area = float(area_m2)
+        sys = (system_type or '').upper()
+        # Select target aspect ratio based on system type
+        if any(k in sys for k in ('EXHAUST', 'OUTSIDE', 'OA', 'FRESH', 'TRANSFER')):
+            ar = 1.8   # lower AR for exhaust/OA
+        elif any(k in sys for k in ('SUPPLY', 'RETURN')):
+            ar = 1.5   # near-square for supply/return mains
+        else:
+            ar = 1.5   # general default
+        w = math.sqrt(area * ar)
+        h = area / w
+        return round(w, 3), round(h, 3)
+    # 2. Derive from parent segment — duct is a clearance fraction of the bore
+    if parent_width and parent_height and float(parent_width) > 0 and float(parent_height) > 0:
+        pw, ph = float(parent_width), float(parent_height)
+        # Duct occupies ~40% of bore width and ~35% of bore height (leaves room for other services)
+        w = round(pw * 0.40, 3)
+        h = round(ph * 0.35, 3)
+        if elem_id:
+            print(f"Duct profile derived from parent segment ({pw:.2f}x{ph:.2f}): {w:.3f}x{h:.3f} for {elem_id}")
+        return max(0.1, w), max(0.1, h)
+    # 3. System-type heuristic — last resort with log
+    sys = (system_type or '').upper()
+    if 'EXHAUST' in sys:
+        w, h = 0.8, 0.5
+    elif 'SUPPLY' in sys or 'RETURN' in sys:
+        w, h = 0.6, 0.4
+    elif 'OUTSIDE' in sys or 'FRESH' in sys:
+        w, h = 0.5, 0.4
+    else:
+        w, h = 0.5, 0.35  # generic duct
+    if elem_id:
+        print(f"Duct profile fallback to system-type heuristic ({sys or 'generic'}): "
+              f"{w:.3f}x{h:.3f} for {elem_id}")
+    return w, h
+
+
+def derive_junction_overlap(profile_w, profile_h, turn_angle_deg=90.0):
+    """Compute shell-piece extension past a junction so adjacent panels meet without gaps.
+
+    Engineering basis: at a mitre joint, the cut face extends diagonally into the segment.
+    The extension needed = max_half_dim * tan(turn_angle/2).
+    A 0.5 safety factor ensures the overlap is trimmed away cleanly by the mitre clip.
+    Capped at 1.0m to prevent excessive extension on very large-bore tunnels.
+    Returns extension in meters per end (total depth increase = 2 × this value)."""
+    w = float(profile_w) if profile_w else 1.0
+    h = float(profile_h) if profile_h else 1.0
+    max_half = max(w, h) / 2.0
+    angle_rad = math.radians(float(turn_angle_deg) / 2.0)
+    try:
+        tan_half = math.tan(angle_rad)
+    except (ValueError, OverflowError):
+        tan_half = 1.0  # 90° default
+    overlap = max_half * tan_half * 0.5
+    return round(min(max(overlap, 0.05), 1.0), 4)
 
 
 def sanitize_axis_ref(axis_data, ref_data, elem_id=None):
@@ -352,6 +585,28 @@ def sanitize_axis_ref(axis_data, ref_data, elem_id=None):
         }
 
     return ax, rf
+
+
+def _normalize_system_type(s):
+    """Normalize a systemType string for color lookup: uppercase, spaces/hyphens → underscores."""
+    if not s:
+        return ''
+    return re.sub(r'[\s\-]+', '_', s.strip().upper())
+
+
+def _build_mep_pset(properties, pressure_key='Pressure'):
+    """Build common MEP Pset properties: FlowCapacity, pressure, SystemType."""
+    pset = {}
+    flow_rate = safe_float(properties.get('flowRate'))
+    if flow_rate is not None:
+        pset['FlowCapacity'] = (flow_rate, 'IfcReal')
+    pressure = safe_float(properties.get('pressure'))
+    if pressure is not None:
+        pset[pressure_key] = (pressure, 'IfcReal')
+    system_type = properties.get('systemType', '')
+    if system_type:
+        pset['SystemType'] = (str(system_type), 'IfcLabel')
+    return pset
 
 
 def apply_style(f, solid, color_rgb, transparency=0.0, entity_name=None, reflectance_method='BLINN'):
@@ -830,6 +1085,11 @@ def create_element_geometry(f, subcontext, geometry, elem_id=None):
     path_authored = geometry.get('_pathAuthored', False)
     export_profile = geometry.get('_exportProfile', 'WEB_VIEWER')
 
+    # Ramp segments (set by vsm-bridge fixRampOrientation) carry both _isTunnelShell=true and
+    # _geoBehavior='PATH_SWEEP'. They are INTENTIONALLY excluded from the PATH_SWEEP block below
+    # because they are tunnel shell geometry that extrudes along geometry.direction (the 3D slope
+    # vector) using the standard extrusion path, not a swept-area-solid. The _isTunnelShell flag
+    # prevents double-processing. Non-tunnel PATH_SWEEP elements (MEP runs, cable trays) enter here.
     if method == 'SWEEP' or (geo_behavior == 'PATH_SWEEP' and path_authored and not geometry.get('_isTunnelShell')):
         profile_data = geometry.get('profile', {})
         path_points = geometry.get('pathPoints', [])
@@ -1204,9 +1464,10 @@ def apply_material_layer(f, owner, ifc_element, material_name, thickness, layer_
 
 def get_predefined_type(ifc_entity_type, css_type):
     """Return appropriate PredefinedType for the IFC entity."""
+    if ifc_entity_type == 'IfcSlab':
+        return 'ROOF' if css_type == 'ROOF' else 'FLOOR'
     mapping = {
         'IfcWall': 'SOLIDWALL',
-        'IfcSlab': 'FLOOR',
         'IfcColumn': 'COLUMN',
         'IfcBeam': 'BEAM',
         'IfcDoor': 'DOOR',
@@ -1380,9 +1641,12 @@ def generate_ifc4_from_css(css):
     storey_entities = []
 
     domain = css.get('domain', '').upper()
-    is_tunnel = domain == 'TUNNEL'
 
-    if is_tunnel:
+    # Feature flags derived from data, not domain name — universal across all structure types.
+    has_tunnel_segments = any(e.get('type') == 'TUNNEL_SEGMENT' for e in elements)
+    has_shell_pieces = any(e.get('properties', {}).get('shellPiece') for e in elements)
+
+    if has_tunnel_segments:
         # Tunnel: all segments share ONE storey at elevation 0.
         # Segments are horizontal zones (chainage-based), not vertical floors.
         # Each element carries its own X/Y/Z placement — no vertical stacking.
@@ -1521,10 +1785,10 @@ def generate_ifc4_from_css(css):
         print(f"SAFETY: removing {len(_cross_type_dupes)} ROOF elements that duplicate SLAB-ROOF at same position")
         elements = [e for e in elements if e.get('id', '') not in _cross_type_dupes]
 
-    # ---- Building bounding box per storey (non-tunnel only) ----
+    # ---- Building bounding box per storey (segment-based structures don't need wall bbox) ----
     # Used to relocate equipment that extracted with wrong XY (outside the building footprint).
     wall_bbox_by_container = {}
-    if not is_tunnel:
+    if not has_tunnel_segments:
         for _we in elements:
             if (_we.get('type') or '').upper() != 'WALL':
                 continue
@@ -1591,42 +1855,41 @@ def generate_ifc4_from_css(css):
     duct_naming_samples = []  # first few duct/pipe named elements for QA
     equipment_size_overrides = 0  # count of equipment with placeholder geometry replaced
 
-    # Bug 5 fix: Deduplicate PORTAL_BUILDING elements by proximity
-    if is_tunnel:
-        portal_entries = []
-        for i, e in enumerate(elements):
-            if e.get('properties', {}).get('segmentType') == 'PORTAL_BUILDING':
-                o = e.get('placement', {}).get('origin', {})
-                portal_entries.append((i, float(o.get('x', 0)), float(o.get('y', 0)), float(o.get('z', 0))))
-        if len(portal_entries) > 1:
-            PORTAL_MERGE_DIST = 30.0  # aggressive merge — source data has only 2 portals
-            keep_portal_indices = set()
-            used_portals = set()
-            for j, (idx, x, y, z) in enumerate(portal_entries):
-                if j in used_portals:
+    # Bug 5 fix: Deduplicate PORTAL_BUILDING elements by proximity (universal — driven by segmentType)
+    portal_entries = []
+    for i, e in enumerate(elements):
+        if e.get('properties', {}).get('segmentType') == 'PORTAL_BUILDING':
+            o = e.get('placement', {}).get('origin', {})
+            portal_entries.append((i, float(o.get('x', 0)), float(o.get('y', 0)), float(o.get('z', 0))))
+    if len(portal_entries) > 1:
+        PORTAL_MERGE_DIST = 30.0  # aggressive merge — source data has only 2 portals
+        keep_portal_indices = set()
+        used_portals = set()
+        for j, (idx, x, y, z) in enumerate(portal_entries):
+            if j in used_portals:
+                continue
+            keep_portal_indices.add(idx)
+            used_portals.add(j)
+            for k, (idx2, x2, y2, z2) in enumerate(portal_entries):
+                if k in used_portals:
                     continue
-                keep_portal_indices.add(idx)
-                used_portals.add(j)
-                for k, (idx2, x2, y2, z2) in enumerate(portal_entries):
-                    if k in used_portals:
-                        continue
-                    dist = math.sqrt((x - x2) ** 2 + (y - y2) ** 2 + (z - z2) ** 2)
-                    if dist < PORTAL_MERGE_DIST:
-                        used_portals.add(k)
-            skip_portal_indices = set()
-            for i, e in enumerate(elements):
-                if (e.get('properties', {}).get('segmentType') == 'PORTAL_BUILDING'
-                        and i not in keep_portal_indices):
-                    skip_portal_indices.add(i)
-            if skip_portal_indices:
-                print(f"Portal dedup: keeping {len(keep_portal_indices)}, skipping {len(skip_portal_indices)}")
-                elements = [e for i, e in enumerate(elements) if i not in skip_portal_indices]
+                dist = math.sqrt((x - x2) ** 2 + (y - y2) ** 2 + (z - z2) ** 2)
+                if dist < PORTAL_MERGE_DIST:
+                    used_portals.add(k)
+        skip_portal_indices = set()
+        for i, e in enumerate(elements):
+            if (e.get('properties', {}).get('segmentType') == 'PORTAL_BUILDING'
+                    and i not in keep_portal_indices):
+                skip_portal_indices.add(i)
+        if skip_portal_indices:
+            print(f"Portal dedup: keeping {len(keep_portal_indices)}, skipping {len(skip_portal_indices)}")
+            elements = [e for i, e in enumerate(elements) if i not in skip_portal_indices]
 
-    # Parallel loop dedup: VentSim data often has two parallel drives (intake/
-    # exhaust) sharing the same junction nodes.  These produce a visible double
-    # tunnel.  Detect segments sharing both endpoints and hide the narrower one.
+    # Parallel loop dedup: when two TUNNEL_SEGMENT elements share both endpoints (parallel
+    # drives), hide the narrower one to prevent a double-bore appearance. Universal —
+    # driven by TUNNEL_SEGMENT type, not domain name.
     portal_hidden_ids = set()  # css_ids of segments to skip rendering
-    if is_tunnel:
+    if has_tunnel_segments:
         PARALLEL_SNAP = 8.0  # tolerance for matching endpoints (accounts for z-offset between parallel drives)
         seg_data = []  # [(idx, origin_xy, endpoint_xy, area, css_id)]
         for i, e in enumerate(elements):
@@ -1681,9 +1944,10 @@ def generate_ifc4_from_css(css):
         if portal_hidden_ids:
             print(f"Parallel loop dedup: hiding {len(portal_hidden_ids)} parallel segments")
 
-    # Bug 4 fix: Build per-segment lookup for duct/pipe containment
+    # Bug 4 fix: Build per-segment lookup for duct/pipe containment — universal,
+    # built whenever TUNNEL_SEGMENT elements are present regardless of domain.
     tunnel_segments_index = []  # list of {key, origin, axis, half_w, half_h, depth}
-    if is_tunnel:
+    if has_tunnel_segments:
         for e in elements:
             if e.get('type') == 'TUNNEL_SEGMENT' and e.get('properties', {}).get('branchClass') == 'STRUCTURAL':
                 prof = e.get('geometry', {}).get('profile', {})
@@ -1712,7 +1976,7 @@ def generate_ifc4_from_css(css):
     # so they overlap the tunnel mouth instead of floating independently.
     PORTAL_OVERLAP = 0.3  # meters inset into tunnel mouth
     portal_attached = 0
-    if is_tunnel and tunnel_segments_index:
+    if tunnel_segments_index:
         for elem in elements:
             if elem.get('properties', {}).get('segmentType') != 'PORTAL_BUILDING':
                 continue
@@ -1769,12 +2033,36 @@ def generate_ifc4_from_css(css):
                 elem['geometry'] = dict(elem.get('geometry', {}))
                 elem['geometry']['profile'] = dict(elem['geometry'].get('profile', {}))
                 elem['geometry']['profile']['width'] = best_seg['half_w'] * 2
-                elem['geometry']['profile']['height'] = best_seg['half_h'] * 2
+                # profile.height (outward building depth, ~3m from VentSim) is preserved as-is
                 if not elem.get('metadata'):
                     elem['metadata'] = {}
                 elem['metadata']['hostTunnelSegment'] = best_seg['key']
                 elem['metadata']['portalAttached'] = True
                 portal_attached += 1
+
+                # Snap any unhosted portal doors near this building to it.
+                # px, py hold the building's original position (before snap) so we
+                # can detect VentSim-generated portal doors placed at the same terminal.
+                building_key = elem.get('element_key') or elem.get('id', '')
+                door_face_x = ep_x - face_x * PORTAL_OVERLAP  # outward from tunnel mouth
+                door_face_y = ep_y - face_y * PORTAL_OVERLAP
+                for door_elem in elements:
+                    if door_elem.get('type', '').upper() != 'DOOR':
+                        continue
+                    door_meta = door_elem.get('metadata', {}) or {}
+                    if door_meta.get('hostWallKey'):
+                        continue  # already has a host
+                    door_po = door_elem.get('placement', {}).get('origin', {}) or {}
+                    dpx = float(door_po.get('x', 0))
+                    dpy = float(door_po.get('y', 0))
+                    if math.sqrt((dpx - px) ** 2 + (dpy - py) ** 2) < 8.0:
+                        door_meta['hostWallKey'] = building_key
+                        door_elem['metadata'] = door_meta
+                        door_elem['placement']['origin']['x'] = door_face_x
+                        door_elem['placement']['origin']['y'] = door_face_y
+                        door_elem['placement']['origin']['z'] = best_seg['oz'] - best_seg['half_h']
+                        print(f"Portal door snap: {door_elem.get('id')} -> building {building_key}")
+
                 print(f"Portal attached: {elem.get('id')} -> {best_seg['key']} ({best_end}, dist={best_dist:.1f}m)")
 
     if portal_attached > 0:
@@ -1794,7 +2082,7 @@ def generate_ifc4_from_css(css):
         if h.get('metadata', {}).get('geometryExportable') is False:
             return False
         hp = h.get('properties', {})
-        if hp.get('segmentType') == 'PORTAL_BUILDING' or hp.get('isPortalHelper'):
+        if hp.get('isPortalHelper') and hp.get('segmentType') != 'PORTAL_BUILDING':
             return False
         hg = h.get('geometry', {}) or {}
         if not hg.get('profile'):
@@ -1819,8 +2107,14 @@ def generate_ifc4_from_css(css):
                  (ez - float(eo.get('z', 0))) ** 2) ** 0.5
             if d > 15.0:
                 continue
-            # Portal end walls get priority 0, others priority 1
-            priority = 0 if e.get('properties', {}).get('segmentType') == 'PORTAL_END_WALL' else 1
+            # Portal buildings get highest priority (0), portal end walls next (1), others last (2)
+            seg_type = e.get('properties', {}).get('segmentType', '')
+            if seg_type == 'PORTAL_BUILDING':
+                priority = 0
+            elif seg_type == 'PORTAL_END_WALL':
+                priority = 1
+            else:
+                priority = 2
             candidates.append((priority, d, e))
         if not candidates:
             return None
@@ -1835,10 +2129,12 @@ def generate_ifc4_from_css(css):
 
             # Skip portal Y-split hidden segments (narrower branch at portal mouth)
             if css_id in portal_hidden_ids:
+                print(f"Portal Y-split filter: skipping {css_id}")
                 continue
 
             # Skip non-exportable elements (network-only airways, routing skeletons, etc.)
             if elem.get('metadata', {}).get('geometryExportable') is False:
+                print(f"Non-exportable flag filter: skipping {css_id}")
                 continue
 
             # Contract-based exportability check (replaces demo filter)
@@ -1847,29 +2143,15 @@ def generate_ifc4_from_css(css):
                 print(f"Skipping non-exportable: {css_id} ({reason})")
                 continue
 
-            # Demo stabilization: hide floating helper geometry
-            if is_tunnel and properties.get('segmentType') in ('PORTAL_BUILDING', 'ENTRY_BUILDING'):
-                print(f"Demo filter: skipping helper {css_id} ({properties.get('segmentType')})")
-                continue
-
-            # Skip portal helper/building walls — semantic aids, not renderable geometry
-            if is_tunnel and css_type == 'WALL':
-                is_portal_helper = (
-                    properties.get('segmentType') == 'PORTAL_BUILDING'
-                    or properties.get('isPortalHelper') is True
-                )
-                if is_portal_helper:
-                    print(f"Portal helper filter: skipping {css_id}")
-                    continue
-
-            # In tunnel domain, skip stray WALL elements (no shell pieces exist anymore,
-            # but extracted walls may still appear — only allow transition/junction walls)
-            if is_tunnel and css_type == 'WALL':
+            # In segment-based structures, skip stray WALL elements unless they are
+            # transition/junction/portal-end walls or portal entrance buildings.
+            if has_tunnel_segments and css_type == 'WALL':
                 is_transition = properties.get('isTransitionHelper', False)
                 is_junction_fill = properties.get('isJunctionFill', False)
                 is_portal_end_wall = properties.get('segmentType') == 'PORTAL_END_WALL'
-                if not is_transition and not is_junction_fill and not is_portal_end_wall:
-                    print(f"Tunnel wall filter: skipping non-structural WALL {css_id}")
+                is_portal_building = properties.get('segmentType') == 'PORTAL_BUILDING'
+                if not is_transition and not is_junction_fill and not is_portal_end_wall and not is_portal_building:
+                    print(f"Segment wall filter: skipping non-structural WALL {css_id}")
                     continue
 
             # Door/window host validation — rehost-first, skip only as last resort
@@ -2069,27 +2351,30 @@ def generate_ifc4_from_css(css):
                         for pt in pp
                     ]
 
-            # Portal building facade — make portal walls wide enough to span both
-            # branch openings, creating a unified single entrance appearance.
-            # The original 7.5m width is close to correct (spans both branches).
-            # Keep width, cap height to tunnel height, thin depth for facade.
-            if is_tunnel and css_type == 'WALL' and properties.get('segmentType') == 'PORTAL_BUILDING':
+            # Portal entrance building geometry:
+            #   profile.width  = tunnel width (set in portal attachment, preserved here)
+            #   profile.height = building outward depth (~3m from VentSim, preserved as-is)
+            #   depth (Z-extrusion) = tunnel height (building as tall as the tunnel mouth)
+            if css_type == 'WALL' and properties.get('segmentType') == 'PORTAL_BUILDING':
                 g_prof = geometry_data.get('profile', {})
                 pw = float(g_prof.get('width', 1))
                 ph = float(g_prof.get('height', 1))
                 pd = safe_float(geometry_data.get('depth'), 1.0)
-                # Portal facade: keep original width (spans both branches), cap height/depth
-                PORTAL_FACADE_MAX_H = 6.0   # match tunnel segment height
-                PORTAL_FACADE_DEPTH = 0.4    # thin facade wall
+                # Resolve tunnel height from the host segment stored during portal attachment
+                host_seg_key = elem.get('metadata', {}).get('hostTunnelSegment', '')
+                tunnel_height = pd  # fallback to VentSim-provided depth
+                for seg in tunnel_segments_index:
+                    if seg['key'] == host_seg_key:
+                        tunnel_height = seg['half_h'] * 2
+                        break
                 geometry_data = dict(geometry_data)
                 geometry_data['profile'] = dict(geometry_data.get('profile', {}))
-                geometry_data['profile']['height'] = min(ph, PORTAL_FACADE_MAX_H)
-                geometry_data['depth'] = PORTAL_FACADE_DEPTH
-                print(f"Portal facade: {css_id} ({pw:.1f}x{ph:.1f}x{pd:.1f}) -> "
-                      f"({pw:.1f}x{geometry_data['profile']['height']:.1f}x{PORTAL_FACADE_DEPTH})")
+                geometry_data['depth'] = tunnel_height
+                elem['geometry']['depth'] = tunnel_height  # patch source for host validation
+                print(f"Portal building: {css_id} width={pw:.1f}m outward_depth={ph:.1f}m height={tunnel_height:.1f}m")
 
-            # Fan orientation validation for tunnel domain
-            if is_tunnel and css_type == 'EQUIPMENT':
+            # Fan orientation validation — check whenever host direction data is present
+            if css_type == 'EQUIPMENT':
                 hx = float(properties.get('hostDirectionX', 0))
                 hy = float(properties.get('hostDirectionY', 0))
                 hz = float(properties.get('hostDirectionZ', 1))
@@ -2132,8 +2417,8 @@ def generate_ifc4_from_css(css):
             placement_data = dict(placement_data)
             placement_data['origin'] = {**placement_origin, 'z': relative_z}
 
-            # Portal building z-snap — ground portal walls to nearest tunnel segment floor
-            if is_tunnel and css_type == 'WALL' and properties.get('segmentType') == 'PORTAL_BUILDING' and tunnel_segments_index:
+            # Portal building z-snap — ground portal walls to nearest segment floor
+            if css_type == 'WALL' and properties.get('segmentType') == 'PORTAL_BUILDING' and tunnel_segments_index:
                 pb_x = float(placement_data['origin'].get('x', 0))
                 pb_y = float(placement_data['origin'].get('y', 0))
                 pb_z = float(placement_data['origin'].get('z', 0))
@@ -2149,11 +2434,11 @@ def generate_ifc4_from_css(css):
                     placement_data['origin'] = {**placement_data['origin'], 'z': portal_z}
                     print(f"Portal wall z-snap: {css_id} -> z={portal_z:.2f} (nearest seg dist={best_dist:.1f}m)")
 
-            # Bug 3 fix: Floor-snap tunnel equipment unless wall/ceiling mounted
+            # Bug 3 fix: Floor-snap equipment in segment-based structures unless wall/ceiling mounted
             # Uses host segment interior floor (not z=0) as reference
             # SKIP if topology-engine already placed this element
             eq_topology_placed = elem.get('metadata', {}).get('zAligned') or elem.get('metadata', {}).get('parentSegment')
-            if is_tunnel and css_type == 'EQUIPMENT' and not eq_topology_placed:
+            if tunnel_segments_index and css_type == 'EQUIPMENT' and not eq_topology_placed:
                 mounting_zone = (elem.get('metadata', {}).get('mountingZone', '')
                                  or properties.get('mountingZone', '') or '')
                 ELEVATED_ZONES = {'crown', 'ceiling', 'left_wall_upper', 'right_wall_upper',
@@ -2183,10 +2468,10 @@ def generate_ifc4_from_css(css):
                         placement_data['origin'] = {**placement_data['origin'], 'z': floor_z}
                         print(f"Floor-snap: {css_id} z={current_z:.2f} -> {floor_z:.2f} (zone={mounting_zone or 'FLOOR'})")
 
-            # Tunnel light fixture wall-mount + size reduction
+            # Light fixture wall-mount + size reduction (inside segment-based structures)
             # SKIP Z override if topology-engine already placed this element (still apply size reduction)
             light_topology_placed = elem.get('metadata', {}).get('zAligned') or elem.get('metadata', {}).get('parentSegment')
-            if is_tunnel and css_type == 'EQUIPMENT' and semantic_type == 'IfcLightFixture' and tunnel_segments_index:
+            if tunnel_segments_index and css_type == 'EQUIPMENT' and semantic_type == 'IfcLightFixture':
                 lx = float(placement_data['origin'].get('x', 0))
                 ly = float(placement_data['origin'].get('y', 0))
                 lz = float(placement_data['origin'].get('z', 0))
@@ -2205,9 +2490,9 @@ def generate_ifc4_from_css(css):
                 geometry_data['profile'] = {'type': 'RECTANGLE', 'width': 0.3, 'height': 0.15}
                 geometry_data['depth'] = 0.05
 
-            # Tunnel equipment axis alignment — align EQUIPMENT extrusion axis with
-            # nearest tunnel segment axis to prevent equipment punching through walls
-            if is_tunnel and css_type == 'EQUIPMENT' and tunnel_segments_index and semantic_type != 'IfcLightFixture':
+            # Equipment axis alignment — align EQUIPMENT extrusion axis with
+            # nearest segment axis to prevent equipment punching through walls
+            if tunnel_segments_index and css_type == 'EQUIPMENT' and semantic_type != 'IfcLightFixture':
                 eq_x = float(placement_data['origin'].get('x', 0))
                 eq_y = float(placement_data['origin'].get('y', 0))
                 eq_z = float(placement_data['origin'].get('z', 0))
@@ -2243,7 +2528,7 @@ def generate_ifc4_from_css(css):
             # — topology uses host-local semantic Z with clearance, generate must not override it.
             elem_metadata = elem.get('metadata', {})
             topology_placed = elem_metadata.get('zAligned') or elem_metadata.get('parentSegment')
-            if is_tunnel and not topology_placed and (css_type in ('DUCT', 'PIPE', 'CABLE_TRAY') or
+            if not topology_placed and (css_type in ('DUCT', 'PIPE', 'CABLE_TRAY') or
                (css_type == 'EQUIPMENT' and semantic_type == 'IfcCableCarrierSegment')) and tunnel_segments_index:
                 # Skip shafts — by name OR by vertical axis
                 duct_name_lower = (elem.get('name', '') or '').lower()
@@ -2360,11 +2645,12 @@ def generate_ifc4_from_css(css):
                                 })
                             geometry_data['pathPoints'] = clamped_pts
 
-            # Tunnel MEP hard depth cap — catch ducts/pipes/cables by css_type OR semantic_type OR name
+            # MEP hard depth cap inside segment-based structures — catches ducts/pipes/cables
+            # by css_type OR semantic_type OR name. Driven by segment index, not domain name.
             TUNNEL_MEP_SEMANTIC = {'IfcDuctSegment': 30.0, 'IfcPipeSegment': 20.0, 'IfcCableCarrierSegment': 20.0}
             _mep_name_lower = (elem.get('name', '') or '').lower()
             _is_mep_by_name = any(kw in _mep_name_lower for kw in ('duct', 'pipe', 'cable', 'ventilation'))
-            is_tunnel_mep = (is_tunnel and
+            is_tunnel_mep = (bool(tunnel_segments_index) and
                              (css_type in ('DUCT', 'PIPE', 'CABLE_TRAY') or
                               semantic_type in TUNNEL_MEP_SEMANTIC or
                               (css_type == 'EQUIPMENT' and _is_mep_by_name)))
@@ -2382,7 +2668,7 @@ def generate_ifc4_from_css(css):
 
             # Equipment bbox relocation: snap equipment that extracted with wrong XY coordinates
             # (e.g. placed at origin while all walls are at x=30, y=25) back into the building footprint.
-            if not is_tunnel and css_type == 'EQUIPMENT' and container_id in wall_bbox_by_container:
+            if not tunnel_segments_index and css_type == 'EQUIPMENT' and container_id in wall_bbox_by_container:
                 _eb = wall_bbox_by_container[container_id]
                 if _eb['n'] > 0:
                     _ox = float(placement_data.get('origin', {}).get('x', 0))
@@ -2424,7 +2710,9 @@ def generate_ifc4_from_css(css):
                 g_w = float(g_profile.get('width', 1))
                 g_h = float(g_profile.get('height', 1))
                 g_d = safe_float(geometry_data.get('depth'), 1.0)
-                is_placeholder = abs(g_w - 1.0) < 0.01 and abs(g_h - 1.0) < 0.01 and abs(g_d - 1.0) < 0.01
+                # Placeholder detection: CSS writes 1×1×1 when no dimensional data is available.
+                # Tolerance widened to 0.05 to catch near-unit values from rounding in upstream steps.
+                is_placeholder = abs(g_w - 1.0) < 0.05 and abs(g_h - 1.0) < 0.05 and abs(g_d - 1.0) < 0.05
                 is_absurd_ratio = g_d > max(g_w, g_h) * 10  # depth 10x larger than profile = bad data
                 if is_placeholder or is_absurd_ratio:
                     new_w, new_h, new_d = EQUIPMENT_SIZE_DEFAULTS[semantic_type]
@@ -2434,9 +2722,10 @@ def generate_ifc4_from_css(css):
                     geometry_data['profile']['height'] = new_h
                     geometry_data['depth'] = new_d
                     equipment_size_overrides += 1
-                    if is_absurd_ratio:
-                        print(f"Equipment size override (absurd ratio): {css_id} ({semantic_type}) "
-                              f"profile={g_w:.2f}x{g_h:.2f} depth={g_d:.2f} → {new_w}x{new_h}x{new_d}")
+                    reason = 'absurd depth ratio' if is_absurd_ratio else 'placeholder 1×1×1'
+                    print(f"Equipment size override ({reason}): {css_id} ({semantic_type}) "
+                          f"profile={g_w:.2f}x{g_h:.2f} depth={g_d:.2f} → {new_w}x{new_h}x{new_d} "
+                          f"[from EQUIPMENT_SIZE_DEFAULTS last-resort table]")
 
             # Equipment depth cap: prevent segment-length spikes for discrete equipment
             # Skip for generated continuous systems (they have intentional segment-length depths)
@@ -2448,24 +2737,58 @@ def generate_ifc4_from_css(css):
                     geometry_data['depth'] = max_depth
                     print(f"Equipment depth capped: {css_id} ({semantic_type}) {current_depth:.2f} → {max_depth}")
 
-            # Universal tunnel equipment depth cap — backstop for any EQUIPMENT with
-            # absurdly long depths (segment-length bleed from upstream data)
-            if is_tunnel and css_type == 'EQUIPMENT' and not is_generated_system:
+            # Equipment depth cap inside segment structures — backstop for absurdly long depths
+            # (segment-length bleed from upstream data). Cap = largest segment profile dimension * 1.5
+            # so it scales with structure size rather than being fixed at a dataset-specific constant.
+            if tunnel_segments_index and css_type == 'EQUIPMENT' and not is_generated_system:
                 cur_eq_depth = safe_float(geometry_data.get('depth'), 1.0)
-                TUNNEL_EQUIP_MAX_DEPTH = 5.0
-                if cur_eq_depth > TUNNEL_EQUIP_MAX_DEPTH:
+                # Derive cap from the largest segment cross-section in the index
+                seg_max_dim = max(
+                    (max(s.get('half_w', 0) * 2, s.get('half_h', 0) * 2)
+                     for s in tunnel_segments_index if s.get('half_w') and s.get('half_h')),
+                    default=5.0
+                )
+                seg_equip_cap = max(1.0, seg_max_dim * 1.5)
+                if cur_eq_depth > seg_equip_cap:
                     geometry_data = dict(geometry_data) if not isinstance(geometry_data, dict) else geometry_data
-                    geometry_data['depth'] = TUNNEL_EQUIP_MAX_DEPTH
-                    print(f"Tunnel equipment depth cap: {css_id} ({semantic_type}) "
-                          f"{cur_eq_depth:.2f} -> {TUNNEL_EQUIP_MAX_DEPTH}")
+                    geometry_data['depth'] = seg_equip_cap
+                    print(f"Segment equipment depth cap: {css_id} ({semantic_type}) "
+                          f"{cur_eq_depth:.2f} -> {seg_equip_cap:.2f} (derived from max segment dim {seg_max_dim:.2f}m)")
 
-            # Column/Wall/Slab depth cap: clamp to storey height to prevent elements extruding past floors
-            if not is_tunnel and css_type in ('COLUMN', 'WALL', 'SLAB', 'BEAM'):
+            # Column/Wall/Slab depth cap: clamp to prevent elements extruding past their storey.
+            # Slabs use span-based structural thickness (derive_slab_thickness) rather than a
+            # fixed storey-height ratio, so the rule applies to any building occupancy type.
+            if not tunnel_segments_index and css_type in ('COLUMN', 'WALL', 'SLAB', 'BEAM'):
                 elem_depth = safe_float(geometry_data.get('depth'), 3.0)
-                max_storey_h = storey_height_map.get(container_id, 5.0)
-                # Walls/beams: cap at storey height. Slabs: cap at 15% of storey height (avoid thick slabs).
+                # Storey height: read from CSS levels data; derive from occupancy type if missing.
+                # Never hard-code a single value — building heights vary widely by use.
+                if container_id in storey_height_map:
+                    max_storey_h = storey_height_map[container_id]
+                else:
+                    occupancy_fb = (css.get('facilityMeta') or
+                                    css.get('metadata', {}).get('facilityMeta', {})).get('occupancy', '')
+                    max_storey_h = derive_storey_height(occupancy_type=occupancy_fb)
+                    print(f"Storey height fallback via derive_storey_height('{occupancy_fb}'): "
+                          f"{max_storey_h}m for container {container_id}")
                 if css_type == 'SLAB':
-                    depth_limit = max(0.05, min(elem_depth, max_storey_h * 0.15))
+                    # Structural slab thickness from span: span is approximated as the slab footprint
+                    # diagonal (width × height). Falls back to storey-ratio only if truly unknown.
+                    slab_w = safe_float(geometry_data.get('profile', {}).get('width'), None)
+                    slab_h = safe_float(geometry_data.get('profile', {}).get('height'), None)
+                    explicit_t = safe_float(properties.get('thickness_m'), None)
+                    if explicit_t and explicit_t > 0:
+                        depth_limit = explicit_t
+                    elif slab_w and slab_h:
+                        span_approx = math.sqrt(slab_w ** 2 + slab_h ** 2) / 2.0
+                        occupancy = (css.get('facilityMeta') or css.get('metadata', {}).get('facilityMeta', {})).get('occupancy', '')
+                        depth_limit = derive_slab_thickness(span_approx, load_hint=occupancy)
+                        depth_limit = min(depth_limit, elem_depth)  # never inflate a correctly-thin slab
+                    else:
+                        # Last resort: 15% of storey height (kept as backstop only)
+                        depth_limit = max(0.05, min(elem_depth, max_storey_h * 0.15))
+                        print(f"Slab depth fallback to storey ratio: {css_id} depth={elem_depth:.2f} → {depth_limit:.2f} "
+                              f"(no span/thickness data available)")
+                    depth_limit = max(0.05, depth_limit)
                 else:
                     depth_limit = max_storey_h
                 if elem_depth > depth_limit:
@@ -2477,51 +2800,91 @@ def generate_ifc4_from_css(css):
             # Non-tunnel ducts/pipes and vertical shafts convert to circular with a radius cap.
             if semantic_type in ('IfcDuctSegment', 'IfcPipeSegment'):
                 g_profile = geometry_data.get('profile', {})
-                # Use refDirection for vertical check — CSS axis=(0,0,1) for all elements.
-                shaft_ref = placement_data.get('refDirection', placement_data.get('axis', {})) if isinstance(placement_data, dict) else {}
+                # Determine if this is a vertical shaft by checking orientation vectors.
+                # CSS convention: refDirection = horizontal bearing, axis = world-up.
+                # A near-vertical refDirection (|z| > 0.95) indicates a shaft element.
+                shaft_ref = (placement_data.get('refDirection') or placement_data.get('axis') or {}) \
+                    if isinstance(placement_data, dict) else {}
+                if not shaft_ref:
+                    # Placement has no orientation — fall back to geometry.direction if available
+                    shaft_ref = (geometry_data.get('direction') or {}) if isinstance(geometry_data, dict) else {}
+                    if shaft_ref:
+                        print(f"Duct/pipe orientation: using geometry.direction fallback for {css_id}")
                 is_vert = abs(float(shaft_ref.get('z', 0))) > 0.95
 
-                if is_tunnel and semantic_type == 'IfcDuctSegment' and not is_vert:
-                    # Tunnel ventilation ducts: rectangular profile sized from area_m2.
-                    # A 50cm circular pipe would be invisible inside a 5m tunnel bore.
-                    area_m2 = float(properties.get('area_m2', 0))
-                    if area_m2 > 0.1:
-                        duct_side = math.sqrt(area_m2)
-                        # Cap to 80% of parent segment cross-section so duct fits inside lining
-                        best_seg_prof = None
-                        for seg in tunnel_segments_index:
-                            dx = float(placement_data.get('origin', {}).get('x', 0)) - seg['ox']
-                            dy = float(placement_data.get('origin', {}).get('y', 0)) - seg['oy']
-                            if math.sqrt(dx*dx + dy*dy) < seg['depth']:
-                                best_seg_prof = seg
-                                break
-                        if best_seg_prof:
-                            max_side = min(best_seg_prof['half_w'] * 2 * 0.8,
-                                           best_seg_prof['half_h'] * 2 * 0.8,
-                                           duct_side)
-                        else:
-                            max_side = min(duct_side, 3.0)
-                        geometry_data = dict(geometry_data)
-                        geometry_data['profile'] = {
-                            'type': 'RECTANGLE',
-                            'width': round(max_side, 3),
-                            'height': round(max_side * 0.6, 3),
-                        }
-                        print(f"Tunnel duct profile from area_m2={area_m2:.1f}: {max_side:.2f}x{max_side*0.6:.2f} for {css_id}")
+                area_m2 = float(properties.get('area_m2', 0))
+
+                # Find the enclosing segment (if any) for parent-profile-based duct sizing.
+                # Guards all dict accesses — missing keys skip this segment safely.
+                best_seg_prof = None
+                if tunnel_segments_index:
+                    elem_ox = float((placement_data.get('origin') or {}).get('x', 0)) \
+                        if isinstance(placement_data, dict) else 0.0
+                    elem_oy = float((placement_data.get('origin') or {}).get('y', 0)) \
+                        if isinstance(placement_data, dict) else 0.0
+                    for seg in tunnel_segments_index:
+                        seg_ox = seg.get('ox')
+                        seg_oy = seg.get('oy')
+                        seg_depth_val = seg.get('depth')
+                        if seg_ox is None or seg_oy is None or seg_depth_val is None:
+                            continue
+                        dx = elem_ox - float(seg_ox)
+                        dy = elem_oy - float(seg_oy)
+                        if math.isfinite(dx) and math.isfinite(dy) and math.sqrt(dx * dx + dy * dy) < float(seg_depth_val):
+                            best_seg_prof = seg
+                            break
+
+                if semantic_type == 'IfcDuctSegment' and not is_vert and area_m2 > 0.1:
+                    # Large-bore duct with area_m2 → rectangular profile via ASHRAE rules.
+                    # Applies to any structure (tunnel ventilation, building AHUs) when area_m2 is present.
+                    sys_type = properties.get('systemType', properties.get('system_type', ''))
+                    if best_seg_prof:
+                        parent_w = best_seg_prof.get('half_w', 0) * 2
+                        parent_h = best_seg_prof.get('half_h', 0) * 2
+                        dw, dh = derive_duct_profile(area_m2=area_m2, system_type=sys_type,
+                                                      parent_width=parent_w, parent_height=parent_h,
+                                                      elem_id=css_id)
+                        # Clamp duct to fit inside parent bore (80% clearance each dimension)
+                        dw = min(dw, parent_w * 0.80)
+                        dh = min(dh, parent_h * 0.80)
                     else:
-                        # No area data — visible default rectangle
-                        geometry_data = dict(geometry_data)
-                        geometry_data['profile'] = {'type': 'RECTANGLE', 'width': 1.2, 'height': 0.8}
+                        dw, dh = derive_duct_profile(area_m2=area_m2, system_type=sys_type, elem_id=css_id)
+                        dw = min(dw, 3.0)
+                        dh = min(dh, 3.0)
+                    geometry_data = dict(geometry_data)
+                    geometry_data['profile'] = {'type': 'RECTANGLE', 'width': round(dw, 3), 'height': round(dh, 3)}
+                    print(f"Duct profile from area_m2={area_m2:.1f} ({sys_type}): {dw:.3f}x{dh:.3f} for {css_id}")
+                elif semantic_type == 'IfcDuctSegment' and not is_vert and tunnel_segments_index:
+                    # No area data inside a segment bore — derive from parent profile
+                    sys_type = properties.get('systemType', properties.get('system_type', ''))
+                    if best_seg_prof:
+                        parent_w = best_seg_prof.get('half_w', 0) * 2
+                        parent_h = best_seg_prof.get('half_h', 0) * 2
+                        dw, dh = derive_duct_profile(system_type=sys_type, parent_width=parent_w,
+                                                      parent_height=parent_h, elem_id=css_id)
+                    else:
+                        dw, dh = derive_duct_profile(system_type=sys_type, elem_id=css_id)
+                    geometry_data = dict(geometry_data)
+                    geometry_data['profile'] = {'type': 'RECTANGLE', 'width': round(dw, 3), 'height': round(dh, 3)}
                 else:
-                    # Non-tunnel or vertical shaft: convert to circular with radius cap
-                    if is_vert and is_tunnel:
-                        max_radius = 0.781  # Match VentSim shaft area_m2=1.92 → r=sqrt(1.92/π)=0.781
+                    # Standard circular profile: pipes, vertical shafts, building ducts without area_m2.
+                    # Radius cap derived from CSS data: area_m2 → r=sqrt(area/π), else profile width/2.
+                    # For vertical shafts inside segment structures, use the shaft area_m2 if available.
+                    if is_vert and tunnel_segments_index and area_m2 > 0:
+                        max_radius = math.sqrt(area_m2 / math.pi)
+                        print(f"Shaft radius from area_m2={area_m2:.3f}: {max_radius:.3f}m for {css_id}")
+                    elif is_vert and tunnel_segments_index and best_seg_prof:
+                        # No area — cap to half the smaller bore dimension (shaft fits inside segment)
+                        max_radius = min(best_seg_prof.get('half_w', 0.5), best_seg_prof.get('half_h', 0.5)) * 0.5
+                    elif is_vert and tunnel_segments_index:
+                        # No segment context — use a reasonable structural shaft cap
+                        max_radius = 1.0
                     else:
                         max_radius = 0.1 if semantic_type == 'IfcPipeSegment' else 0.25
                     if g_profile.get('type', 'RECTANGLE') == 'RECTANGLE':
                         w = float(g_profile.get('width', 0.4))
                         h = float(g_profile.get('height', 0.4))
-                        radius = min((w + h) / 4, max_radius)
+                        radius = min((w + h) / 4.0, max_radius)
                         geometry_data = dict(geometry_data)
                         geometry_data['profile'] = {'type': 'CIRCLE', 'radius': radius}
                     elif g_profile.get('type') == 'CIRCLE':
@@ -2530,14 +2893,17 @@ def generate_ifc4_from_css(css):
                             geometry_data = dict(geometry_data)
                             geometry_data['profile'] = dict(g_profile)
                             geometry_data['profile']['radius'] = max_radius
-                            print(f"Duct radius cap: {css_id} {cur_radius:.3f} -> {max_radius}")
+                            print(f"Duct/pipe radius cap: {css_id} {cur_radius:.3f} -> {max_radius:.3f}")
 
             # Extend shell pieces slightly past junction boundaries so adjacent panels meet
             # without gaps. IfcBooleanClippingResult mitre clips in the second pass trim the
-            # overlapping corners flush. The small overlap (0.3m) is a safety margin only —
-            # the actual junction face is determined by the mitre cut, not this extension.
-            JUNCTION_OVERLAP_M = 0.3  # 0.3m safety overlap per end (was 4.0m before mitre clips)
-            if is_tunnel and shell_piece and shell_piece in ('LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF'):
+            # overlapping corners flush. Overlap derived from profile size and turn geometry
+            # via derive_junction_overlap so it scales correctly with any tunnel size.
+            _junc_prof = geometry_data.get('profile', {})
+            _junc_w = safe_float(_junc_prof.get('width'), 5.0)
+            _junc_h = safe_float(_junc_prof.get('height'), 5.0)
+            JUNCTION_OVERLAP_M = derive_junction_overlap(_junc_w, _junc_h, turn_angle_deg=90.0)
+            if shell_piece and shell_piece in ('LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF'):
                 g_depth = safe_float(geometry_data.get('depth'), 0.0)
                 if g_depth > 0.2:  # only extend pieces with meaningful depth
                     geometry_data = dict(geometry_data)
@@ -2573,7 +2939,13 @@ def generate_ifc4_from_css(css):
                     # IfcArbitraryProfileDefWithVoids / IfcCircleHollowProfileDef
                     wt_curved = float(properties.get('shellThickness_m', 0) or 0)
                     if wt_curved <= 0:
-                        wt_curved = 0.4
+                        _cprof = geometry_data.get('profile', {})
+                        wt_curved = derive_shell_thickness(
+                            _cprof.get('width') or _cprof.get('radius', 1) * 2,
+                            _cprof.get('height') or _cprof.get('radius', 1) * 2,
+                            material_hint=properties.get('material', '')
+                        )
+                        print(f"Curved shell thickness derived: {css_id} {_ms_prof_type} → {wt_curved:.4f}m")
                     if not prof.get('wallThickness'):
                         geometry_data = dict(geometry_data)
                         geometry_data['profile'] = dict(prof)
@@ -2606,7 +2978,12 @@ def generate_ifc4_from_css(css):
                 else:
                     wt = float(properties.get('shellThickness_m', 0) or 0)
                     if wt <= 0:
-                        wt = 0.4
+                        seg_w_prelim = float(prof.get('width', 5.0))
+                        seg_h_prelim = float(prof.get('height', 5.0))
+                        wt = derive_shell_thickness(seg_w_prelim, seg_h_prelim,
+                                                    material_hint=properties.get('material', ''))
+                        print(f"Rectangular shell thickness derived: {css_id} "
+                              f"({seg_w_prelim:.2f}x{seg_h_prelim:.2f}) → {wt:.4f}m")
                     seg_w = float(prof.get('width', 5.0))
                     seg_h = float(prof.get('height', 5.0))
                     seg_depth = safe_float(geometry_data.get('depth'), 1.0)
@@ -2626,12 +3003,16 @@ def generate_ifc4_from_css(css):
                     else:
                         # Near-vertical shaft or missing refDirection — fall back to world X
                         rx_x, rx_y = 1.0, 0.0
+                        print(f"Segment bearing fallback to world-X for {css_id}: "
+                              f"no finite horizontal refDirection (shaft or missing data)")
 
                     # Build element placement: world-up Z-axis, branch-direction X-axis.
                     # CSS origin = segment MIDPOINT (topology engine convention).
                     # Extend extrusion slightly beyond both ends so adjacent segments
                     # overlap and visual seams at bends/junctions are eliminated.
-                    END_CAP = 0.5  # meters overlap per end — larger overlap visually merges segments at bends
+                    # END_CAP derived from profile: max_half_dim * tan(45°) * 0.5 — same
+                    # formula as derive_junction_overlap for a 90° turn.
+                    END_CAP = derive_junction_overlap(seg_w, seg_h, turn_angle_deg=90.0)
                     extrude_depth = seg_depth + 2 * END_CAP
 
                     orig = placement_data.get('origin', {'x': 0, 'y': 0, 'z': 0})
@@ -2788,7 +3169,7 @@ def generate_ifc4_from_css(css):
                 geom_depth_by_css_key[elem_key_for_clip] = ext_depth
                 # For tunnel shell pieces, record the overlap extension so the mitre clip
                 # pass can compute actual junction positions (junction is at ±overlap from ends).
-                is_shell_pc = is_tunnel and bool(shell_piece) and shell_piece in ('LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF')
+                is_shell_pc = bool(shell_piece) and shell_piece in ('LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF')
                 junc_overlap = JUNCTION_OVERLAP_M if is_shell_pc else 0.0
                 geom_junction_overlap_by_css_key[elem_key_for_clip] = junc_overlap
                 geom_orig_depth_by_css_key[elem_key_for_clip] = ext_depth - 2 * junc_overlap
@@ -2800,8 +3181,8 @@ def generate_ifc4_from_css(css):
                 error_count += 1
 
             # Dual Axis+Body representation for structural elements (like Revit)
-            # Suppressed in tunnel domain — centerline curves render as visible diagonal lines in tunnel viewers
-            if css_type in ('WALL', 'SLAB', 'TUNNEL_SEGMENT') and pds and not fallback_used and not is_tunnel:
+            # Suppressed in segment-based structures — centerlines render as visible diagonal lines
+            if css_type in ('WALL', 'SLAB', 'TUNNEL_SEGMENT') and pds and not fallback_used and not has_tunnel_segments:
                 try:
                     direction_data = geometry_data.get('direction', {'x': 0, 'y': 0, 'z': 1})
                     depth_val = geometry_data.get('depth', 1)
@@ -2817,19 +3198,24 @@ def generate_ifc4_from_css(css):
                     metadata['geometryFallbacks'] = {}
                 metadata['geometryFallbacks'][css_id] = fallback_used
 
-            # v5: Apply color — precedence: semanticType → shellPiece → css_type → material fallback
+            # v7: Apply color — precedence: semanticType → shellPiece → systemType → css_type → material
             transparency = float((material_data or {}).get('transparency', 0))
-            # 1. semanticType (e.g., IfcFan → orange)
+            norm_sys = _normalize_system_type(properties.get('systemType', ''))
             color_rgb = TYPE_COLORS.get(semantic_type)
-            # 2. shellPiece (e.g., FLOOR → dark gray)
             if not color_rgb and shell_piece:
                 color_rgb = SHELL_PIECE_COLORS.get(shell_piece)
                 if shell_piece == 'VOID':
                     transparency = max(transparency, 0.7)
-            # 3. css_type (e.g., DUCT → blue)
+            if not color_rgb and norm_sys:
+                if css_type == 'PIPE' or semantic_type in ('IfcPipeSegment', 'IfcPump', 'IfcValve', 'IfcTank'):
+                    color_rgb = PIPE_SYSTEM_COLORS.get(norm_sys)
+                elif css_type == 'DUCT' or semantic_type in (
+                    'IfcDuctSegment', 'IfcFan', 'IfcAirTerminal', 'IfcDamper',
+                    'IfcFilter', 'IfcCoil', 'IfcAirToAirHeatRecovery', 'IfcUnitaryEquipment',
+                ):
+                    color_rgb = DUCT_SYSTEM_COLORS.get(norm_sys)
             if not color_rgb:
                 color_rgb = TYPE_COLORS.get(css_type)
-            # 4. material fallback
             if not color_rgb:
                 if material_data:
                     mat_name = material_data.get('name', 'unknown')
@@ -2845,39 +3231,40 @@ def generate_ifc4_from_css(css):
                 transparency = max(transparency, 0.7)
             elif css_type == 'WINDOW':
                 transparency = max(transparency, 0.7)
-                color_rgb = (0.65, 0.78, 0.88)  # glass blue-grey
+                color_rgb = (0.65, 0.83, 0.97)  # sky blue glass
             # v6: Differentiate roof slabs from floor slabs
             if css_type == 'SLAB' and properties.get('slabType') == 'ROOF':
-                color_rgb = (0.40, 0.40, 0.45)  # darker for roof
+                color_rgb = (0.42, 0.42, 0.48)  # blue-tinted dark for roof slabs
             # MEP systems: semi-transparent for subtle exterior appearance
             if semantic_type in ('IfcCableCarrierSegment', 'IfcDuctSegment', 'IfcPipeSegment'):
                 # Exempt vertical shafts/exhaust from high transparency — they should be visible
                 # Use refDirection.z — axis=(0,0,1) always now
                 ref_data = placement_data.get('refDirection', {}) if isinstance(placement_data, dict) else {}
                 is_vertical_shaft = abs(float(ref_data.get('z', 0))) > 0.95
-                if is_tunnel and not is_vertical_shaft:
-                    # Ducts/pipes inside tunnel — visible but slightly translucent
+                if tunnel_segments_index and not is_vertical_shaft:
+                    # Ducts/pipes inside segment structure — visible but slightly translucent
                     transparency = max(transparency, 0.3)
                 else:
                     transparency = max(transparency, 0.4)
-            if is_tunnel and semantic_type == 'IfcLightFixture':
-                transparency = max(transparency, 0.2)  # visible inside tunnel
-            # Junction fills and transition helpers bridge gaps between tunnel segments.
+            if tunnel_segments_index and semantic_type == 'IfcLightFixture':
+                transparency = max(transparency, 0.2)  # visible inside segment structure
+            # Junction fills and transition helpers bridge gaps between segments.
             # Render semi-transparent so they visually connect segments without blocking the bore.
-            if is_tunnel and (properties.get('isJunctionFill') or properties.get('isTransitionHelper')):
+            if properties.get('isJunctionFill') or properties.get('isTransitionHelper'):
                 transparency = max(transparency, 0.4)
 
-            # v6: Style tier tracking
             style_tier = 'material'
             if TYPE_COLORS.get(semantic_type):
                 style_tier = 'semanticType'
             elif shell_piece and SHELL_PIECE_COLORS.get(shell_piece):
                 style_tier = 'shellPiece'
+            elif norm_sys and (PIPE_SYSTEM_COLORS.get(norm_sys) or DUCT_SYSTEM_COLORS.get(norm_sys)):
+                style_tier = 'systemType'
             elif TYPE_COLORS.get(css_type):
                 style_tier = 'cssType'
             report_key = f"{css_type}:{semantic_type or '-'}"
             if report_key not in style_report:
-                style_report[report_key] = {'semanticType': 0, 'shellPiece': 0, 'cssType': 0, 'material': 0, 'sampleColor': None, 'sampleName': None}
+                style_report[report_key] = {'semanticType': 0, 'shellPiece': 0, 'systemType': 0, 'cssType': 0, 'material': 0, 'sampleColor': None, 'sampleName': None}
             style_report[report_key][style_tier] += 1
             if not style_report[report_key]['sampleColor']:
                 style_report[report_key]['sampleColor'] = list(color_rgb)
@@ -2945,8 +3332,8 @@ def generate_ifc4_from_css(css):
                 is_ext = properties.get('isExternal', False)
                 create_kwargs['ObjectType'] = 'Exterior Wall' if is_ext else 'Interior Wall'
             elif ifc_entity_type == 'IfcSlab':
-                slab_t = properties.get('slabType', 'FLOOR')
-                create_kwargs['ObjectType'] = 'Roof Slab' if slab_t == 'ROOF' else 'Floor Slab'
+                is_roof = css_type == 'ROOF' or properties.get('slabType') == 'ROOF'
+                create_kwargs['ObjectType'] = 'Roof Slab' if is_roof else 'Floor Slab'
             elif semantic_type and semantic_type.startswith('Ifc') and ifc_entity_type not in ('IfcBuildingElementProxy', 'IfcSpace'):
                 # Convert IfcFan → "Ventilation Fan", IfcPump → "Pump", etc.
                 READABLE_TYPES = {
@@ -2959,6 +3346,7 @@ def generate_ifc4_from_css(css):
                     'IfcDoor': 'Door', 'IfcWindow': 'Window', 'IfcStair': 'Staircase',
                     'IfcFireSuppressionTerminal': 'Fire Suppression', 'IfcCommunicationsAppliance': 'Communications Device',
                     'IfcElectricDistributionBoard': 'Electrical Panel',
+                    'IfcAirToAirHeatRecovery': 'Heat Recovery Unit', 'IfcCoolingTower': 'Cooling Tower',
                 }
                 readable = READABLE_TYPES.get(semantic_type) or READABLE_TYPES.get(ifc_entity_type)
                 if readable:
@@ -3078,9 +3466,9 @@ def generate_ifc4_from_css(css):
                 if ref:
                     wall_pset['Reference'] = (str(ref), 'IfcLabel')
                 add_property_set(f, owner, ifc_element, 'Pset_WallCommon', wall_pset)
-            elif css_type == 'SLAB':
+            elif css_type in ('SLAB', 'ROOF'):
                 slab_pset = {
-                    'IsExternal': (properties.get('slabType') == 'ROOF', 'IfcBoolean'),
+                    'IsExternal': (css_type == 'ROOF' or properties.get('slabType') == 'ROOF', 'IfcBoolean'),
                     'LoadBearing': (properties.get('loadBearing', True), 'IfcBoolean'),
                 }
                 ref = properties.get('reference', properties.get('material', ''))
@@ -3138,7 +3526,30 @@ def generate_ifc4_from_css(css):
                 else:
                     pset_props['Width'] = (float(profile.get('width', 0)), 'IfcReal')
                     pset_props['Height'] = (float(profile.get('height', 0)), 'IfcReal')
+                pset_props.update(_build_mep_pset(properties))
                 add_property_set(f, owner, ifc_element, 'Pset_DuctSegmentCommon', pset_props)
+            elif ifc_entity_type == 'IfcPipeSegment':
+                profile = geometry_data.get('profile', {})
+                diameter = (safe_float(properties.get('diameter')) or
+                            safe_float(properties.get('nominalDiameter')) or
+                            float(profile.get('width', 0)))
+                pipe_pset = {'NominalDiameter': (diameter, 'IfcReal')}
+                pipe_pset.update(_build_mep_pset(properties))
+                add_property_set(f, owner, ifc_element, 'Pset_PipeSegmentCommon', pipe_pset)
+            elif ifc_entity_type == 'IfcFan':
+                fan_pset = _build_mep_pset(properties, pressure_key='TotalStaticPressure')
+                if fan_pset:
+                    add_property_set(f, owner, ifc_element, 'Pset_FanCommon', fan_pset)
+            elif ifc_entity_type == 'IfcPump':
+                profile = geometry_data.get('profile', {})
+                pump_pset = _build_mep_pset(properties, pressure_key='NetPositiveSuctionHead')
+                conn_size = (safe_float(properties.get('diameter')) or
+                             safe_float(properties.get('nominalDiameter')) or
+                             safe_float(profile.get('width')))
+                if conn_size is not None:
+                    pump_pset['ConnectionSize'] = (conn_size, 'IfcReal')
+                if pump_pset:
+                    add_property_set(f, owner, ifc_element, 'Pset_PumpCommon', pump_pset)
             elif css_type == 'TUNNEL_SEGMENT':
                 add_property_set(f, owner, ifc_element, 'Pset_TunnelSegmentCommon', {
                     'SegmentType': (str(properties.get('segmentType', 'MAIN_TUNNEL')), 'IfcLabel'),
@@ -3147,9 +3558,9 @@ def generate_ifc4_from_css(css):
                     'ChainageStart_m': (float(properties.get('chainageStart_m', 0)), 'IfcReal'),
                     'ChainageEnd_m': (float(properties.get('chainageEnd_m', 0)), 'IfcReal'),
                 })
-            # Shell pieces (topology-engine decomposed panels) also carry Pset_TunnelSegmentCommon
+            # Shell pieces (topology-engine decomposed panels) carry Pset_TunnelSegmentCommon
             # so BIM tools can identify each panel's role within the manifold lining system.
-            if is_tunnel and shell_piece in ('LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF'):
+            if shell_piece in ('LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF'):
                 add_property_set(f, owner, ifc_element, 'Pset_TunnelSegmentCommon', {
                     'SegmentType': (str(properties.get('segmentType', 'MAIN_TUNNEL')), 'IfcLabel'),
                     'ShellRole': (shell_piece, 'IfcLabel'),
@@ -3340,7 +3751,7 @@ def generate_ifc4_from_css(css):
     generic_names = [n for n in all_elem_names if n in GENERIC_NAMES]
 
     # Aggregate style tier counts across all element types
-    style_tier_totals = {'semanticType': 0, 'shellPiece': 0, 'cssType': 0, 'material': 0}
+    style_tier_totals = {'semanticType': 0, 'shellPiece': 0, 'systemType': 0, 'cssType': 0, 'material': 0}
     for entry in style_report.values():
         for tier in style_tier_totals:
             style_tier_totals[tier] += entry.get(tier, 0)
@@ -3353,6 +3764,7 @@ def generate_ifc4_from_css(css):
     print(f"  Elements styled: {total_styled}")
     print(f"  Style tiers: semanticType={style_tier_totals['semanticType']}, "
           f"shellPiece={style_tier_totals['shellPiece']}, "
+          f"systemType={style_tier_totals['systemType']}, "
           f"cssType={style_tier_totals['cssType']}, "
           f"material={style_tier_totals['material']}")
     print(f"  Generic names: {len(generic_names)}/{len(all_elem_names)}")
@@ -3407,8 +3819,8 @@ def generate_ifc4_from_css(css):
             # Don't double-count, just ensure coverage
     print(f"v6 IFC classes: {json.dumps(ifc_class_counts)}")
 
-    # v6: Building completeness warning
-    if not is_tunnel:
+    # v6: Building completeness warning (skip for segment-based structures — they use shell decomposition)
+    if not has_tunnel_segments:
         wall_count = sum(1 for e in elements if e.get('type') == 'WALL')
         slab_count = sum(1 for e in elements if e.get('type') == 'SLAB')
         if wall_count < 4 or slab_count < 2:
@@ -3435,13 +3847,13 @@ def generate_ifc4_from_css(css):
         regression_errors.append(f'NAN_PLACEMENT: {nan_count} elements have NaN/Inf coordinates')
 
     # 8C: Semantic count validation (v11: upgraded severity for structure-critical checks)
-    if is_tunnel:
+    if has_tunnel_segments:
         wall_elems = sum(1 for e in elements if e.get('type') == 'WALL')
         slab_elems = sum(1 for e in elements if e.get('type') == 'SLAB')
         space_elems = sum(1 for e in elements if e.get('type') == 'SPACE')
-        if wall_elems == 0: regression_errors.append('CRITICAL_TUNNEL_NO_WALLS: No IfcWall elements in tunnel model')
-        if slab_elems == 0: regression_errors.append('CRITICAL_TUNNEL_NO_SLABS: No IfcSlab elements in tunnel model')
-        if space_elems == 0: regression_warnings.append('TUNNEL_NO_SPACES: No IfcSpace elements in tunnel model')
+        if wall_elems == 0: regression_errors.append('CRITICAL_TUNNEL_NO_WALLS: No IfcWall elements in segment model')
+        if slab_elems == 0: regression_errors.append('CRITICAL_TUNNEL_NO_SLABS: No IfcSlab elements in segment model')
+        if space_elems == 0: regression_warnings.append('TUNNEL_NO_SPACES: No IfcSpace elements in segment model')
         if shell_piece_element_count > 0 and shell_naming_hits == 0:
             regression_errors.append(f'SHELL_NAMING_REGRESSION: {shell_piece_element_count} shell pieces without descriptive names')
     else:
@@ -3454,15 +3866,15 @@ def generate_ifc4_from_css(css):
         elif slab_elems < 2:
             regression_warnings.append(f'BUILDING_FEW_SLABS: Only {slab_elems} slabs (expected >= 2)')
 
-    # 8D: Domain isolation — shellPiece only on TUNNEL, envelopeFallback only on non-TUNNEL
-    if not is_tunnel:
+    # 8D: Cross-domain property leak checks — shell pieces belong with segments, envelope fallback with buildings
+    if not has_tunnel_segments:
         shell_on_building = sum(1 for e in elements if e.get('properties', {}).get('shellPiece'))
         if shell_on_building > 0:
-            regression_warnings.append(f'DOMAIN_LEAK: {shell_on_building} elements have shellPiece in non-tunnel model')
-    if is_tunnel:
+            regression_warnings.append(f'DOMAIN_LEAK: {shell_on_building} elements have shellPiece in non-segment model')
+    if has_tunnel_segments:
         fallback_on_tunnel = sum(1 for e in elements if e.get('properties', {}).get('isFallback'))
         if fallback_on_tunnel > 0:
-            regression_warnings.append(f'DOMAIN_LEAK: {fallback_on_tunnel} elements have envelopeFallback in tunnel model')
+            regression_warnings.append(f'DOMAIN_LEAK: {fallback_on_tunnel} elements have envelopeFallback in segment model')
 
     # 8E: Proxy ratio check (exclude transition helpers from canonical count)
     canonical_proxy_count = sum(1 for e in elements if e.get('semanticType') == 'IfcBuildingElementProxy' and not e.get('properties', {}).get('isTransitionHelper'))
@@ -3539,9 +3951,7 @@ def generate_ifc4_from_css(css):
                 # 0.4m shell thickness), mangling the geometry. Skip void creation for tunnel
                 # hosts; the door element already exists as a standalone element in the bore.
                 host_css_elem = css_elements_by_id.get(target_id, {})
-                if (host_css_elem.get('type', '').upper() == 'TUNNEL_SEGMENT'
-                        or is_tunnel and host_wall.is_a() == 'IfcWall'
-                        and getattr(host_wall, 'ObjectType', '') == 'Tunnel Shell'):
+                if host_css_elem.get('type', '').upper() == 'TUNNEL_SEGMENT':
                     continue
 
                 try:
@@ -4066,7 +4476,7 @@ def generate_ifc4_from_css(css):
     # We geometrically carve an IfcOpeningElement out of the nearest tunnel shell wall and link
     # the equipment inside it via IfcRelVoidsElement — no more "extruding into rock."
     void_carve_count = 0
-    if False and is_tunnel:  # Void carving disabled: generates floating proxies at mine elevation offsets
+    if False and has_tunnel_segments:  # Void carving disabled: generates floating proxies at mine elevation offsets
         # Index tunnel shell walls by branch and role for fast lookup
         shell_wall_index = {}  # (derivedFromBranch, shellPiece) -> ifc_element
         for elem in elements:
@@ -4170,7 +4580,7 @@ def generate_ifc4_from_css(css):
     # connected ventilation/service network as required by IFC4 MEP semantics.
     ports_created = 0
     port_connections_created = 0
-    if is_tunnel:
+    if has_tunnel_segments:
         # Build a port on each DUCT/PIPE element that has a parentSegmentKey annotation
         elem_port_map = {}  # css_id -> (inlet_port, outlet_port)
         for elem in elements:
@@ -4338,10 +4748,10 @@ def generate_ifc4_from_css(css):
         else:
             assembly_placement = None
 
-        # Tunnel assemblies: anchor to building origin (bld_lp + wcs), not the first child shell placement.
+        # Segment assemblies: anchor to building origin (bld_lp + wcs), not the first child shell placement.
         # Shell children may sit at mine elevations (z=13-53m); inheriting their placement makes
-        # the assembly label float high above the tunnel network in the viewport.
-        if is_tunnel:
+        # the assembly label float high above the network in the viewport.
+        if has_tunnel_segments:
             assembly_lp_final = f.create_entity(
                 'IfcLocalPlacement', PlacementRelTo=bld_lp, RelativePlacement=wcs
             )
@@ -4447,13 +4857,12 @@ def generate_ifc4_from_css(css):
             print(f"  {w}")
 
     # ---- PHASE 2: Connected System Topology ----
+    # Universal — runs whenever the model has distribution elements (ducts, fans, pipes).
     system_topology = {'systems': [], 'connections': 0, 'ports': 0}
-    if is_tunnel:
-        # Build distribution systems from VentSim branch topology
-        # Group ducts into ventilation system, equipment into equipment system
-        vent_ducts = [ent for ent in ifc_by_key.values() if ent.is_a('IfcDuctSegment')]
-        vent_fans = [ent for ent in ifc_by_key.values() if ent.is_a('IfcFan')]
-        vent_pipes = [ent for ent in ifc_by_key.values() if ent.is_a('IfcPipeSegment')]
+    vent_ducts = [ent for ent in ifc_by_key.values() if ent.is_a('IfcDuctSegment')]
+    vent_fans = [ent for ent in ifc_by_key.values() if ent.is_a('IfcFan')]
+    vent_pipes = [ent for ent in ifc_by_key.values() if ent.is_a('IfcPipeSegment')]
+    if vent_ducts or vent_fans or vent_pipes:
 
         if vent_ducts or vent_fans:
             # Create ventilation distribution system
@@ -4564,9 +4973,9 @@ def generate_ifc4_from_css(css):
             print(f"PHASE 2: Created {len(system_topology['systems'])} distribution systems, "
                   f"{system_topology['connections']} connections, {system_topology['ports']} ports")
 
-    # Tunnel bbox validation warning (CSS-space pre-generation sanity check)
+    # Segment structure bbox validation (CSS-space pre-generation sanity check)
     tunnel_shell_report = None
-    if is_tunnel:
+    if has_tunnel_segments:
         structural_elems = [e for e in elements if e.get('type') in ('WALL', 'SLAB')
                             or (e.get('type') == 'TUNNEL_SEGMENT' and e.get('properties', {}).get('branchClass') == 'STRUCTURAL')]
         z_vals = [e.get('placement', {}).get('origin', {}).get('z', 0) for e in structural_elems]
@@ -4882,17 +5291,36 @@ def _convert_ifc_to_exports(user_id, render_id, geom_stats, export_results):
     return export_results
 
 
+def _get_export_system_type(product):
+    """Read SystemType from Pset_DuctSegmentCommon or Pset_PipeSegmentCommon on an IFC product."""
+    try:
+        for definition in (product.IsDefinedBy or []):
+            if definition.is_a('IfcRelDefinesByProperties'):
+                pset = definition.RelatingPropertyDefinition
+                if not hasattr(pset, 'Name') or pset.Name not in (
+                    'Pset_DuctSegmentCommon', 'Pset_PipeSegmentCommon',
+                    'Pset_FanCommon', 'Pset_PumpCommon',
+                ):
+                    continue
+                for prop in (getattr(pset, 'HasProperties', None) or []):
+                    if prop.Name == 'SystemType' and hasattr(prop, 'NominalValue') and prop.NominalValue:
+                        return str(prop.NominalValue.wrappedValue)
+    except Exception:
+        pass
+    return None
+
+
 def _resolve_export_color(product):
     """Resolve color for an IFC product using the same precedence as IFC generation:
-    semanticType → shellPiece → css_type → material → default gray."""
+    semanticType → systemType → css_type → material → default gray."""
     ifc_class = product.is_a()
 
-    # 1. Check by IFC class name in TYPE_COLORS (e.g., IfcFan, IfcPump)
+    # 1. Specific IFC entity type (e.g., IfcFan, IfcPump)
     color = TYPE_COLORS.get(ifc_class)
     if color:
         return color
 
-    # 2. Map IFC class to CSS type and check TYPE_COLORS
+    # 2. Map IFC class to CSS type
     ifc_to_css = {
         'IfcWall': 'WALL', 'IfcWallStandardCase': 'WALL',
         'IfcSlab': 'SLAB', 'IfcColumn': 'COLUMN', 'IfcBeam': 'BEAM',
@@ -4901,12 +5329,26 @@ def _resolve_export_color(product):
         'IfcSpace': 'SPACE', 'IfcBuildingElementProxy': 'PROXY',
     }
     css_type = ifc_to_css.get(ifc_class)
+
+    # 3. System-type color for pipe/duct segments (read from Pset)
+    if ifc_class in ('IfcPipeSegment', 'IfcDuctSegment') or css_type in ('PIPE', 'DUCT'):
+        sys_type_raw = _get_export_system_type(product)
+        if sys_type_raw:
+            norm_sys = _normalize_system_type(sys_type_raw)
+            if css_type == 'PIPE' or ifc_class == 'IfcPipeSegment':
+                color = PIPE_SYSTEM_COLORS.get(norm_sys)
+            else:
+                color = DUCT_SYSTEM_COLORS.get(norm_sys)
+            if color:
+                return color
+
+    # 4. CSS type fallback
     if css_type:
         color = TYPE_COLORS.get(css_type)
         if color:
             return color
 
-    # 3. Check material name
+    # 5. Material name
     try:
         for rel in (product.HasAssociations or []):
             if rel.is_a('IfcRelAssociatesMaterial'):
@@ -5120,9 +5562,10 @@ def validate_ifc(ifc_content, user_id, render_id):
         REVIT_UNSUPPORTED = {'IfcVirtualElement', 'IfcAnnotation', 'IfcGrid'}
         REVIT_PREFERRED = {'IfcWall', 'IfcWallStandardCase', 'IfcSlab', 'IfcColumn',
                            'IfcBeam', 'IfcDoor', 'IfcWindow', 'IfcSpace', 'IfcStair',
-                           'IfcRamp', 'IfcRoof', 'IfcCurtainWall', 'IfcPlate',
+                           'IfcRamp', 'IfcCurtainWall', 'IfcPlate',
                            'IfcMember', 'IfcPipeSegment', 'IfcDuctSegment', 'IfcFan',
-                           'IfcPump', 'IfcBuildingElementProxy'}
+                           'IfcPump', 'IfcAirToAirHeatRecovery', 'IfcCoolingTower',
+                           'IfcBuildingElementProxy'}
 
         def rv_check(name, passed, detail, severity='WARNING'):
             revit_validation['checks'].append({'name': name, 'passed': passed, 'detail': detail, 'severity': severity})

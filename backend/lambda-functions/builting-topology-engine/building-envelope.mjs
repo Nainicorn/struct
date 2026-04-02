@@ -1,4 +1,17 @@
-import { safe, clamp, elemId, vecNormalize, vecDot, vecCross, vecScale, vecAdd, vecSub, vecDist, vecLen, canonicalWallDirection, canonicalWallLength, canonicalWallThickness, setCanonicalWallLength } from './shared.mjs';
+import { safe, clamp, elemId, vecNormalize, vecDot, vecCross, vecScale, vecAdd, vecSub, vecDist, vecLen, canonicalWallDirection, canonicalWallLength, canonicalWallThickness, setCanonicalWallLength, storeyHeightFromOccupancy, shellThicknessFromProfile } from './shared.mjs';
+
+/**
+ * Data-driven tunnel detection — check for TUNNEL_SEGMENT elements rather than
+ * relying on the domain string, so hybrid structures and mis-classified domains
+ * are handled correctly. Cached on the css object to avoid repeated O(n) scans.
+ */
+function hasTunnelSegments(css) {
+  if (css._hasTunnelSegmentsCache !== undefined) return css._hasTunnelSegmentsCache;
+  const result = (css.elements || []).some(e => e.type === 'TUNNEL_SEGMENT');
+  // Cache on object so repeated calls within one pipeline pass are free
+  Object.defineProperty(css, '_hasTunnelSegmentsCache', { value: result, writable: true, configurable: true });
+  return result;
+}
 
 // ============================================================================
 // BUILDING ENVELOPE GUARANTEE (non-TUNNEL)
@@ -6,19 +19,22 @@ import { safe, clamp, elemId, vecNormalize, vecDot, vecCross, vecScale, vecAdd, 
 
 function guaranteeBuildingEnvelope(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const levels = css.levelsOrSegments || [];
-  const defaultLevel = levels[0] || { id: 'level-1', elevation_m: 0, height_m: 3.0 };
+  // Derive default storey height from occupancy rather than assuming 3m.
+  const _occupancy = (css.facilityMeta || css.metadata?.facilityMeta || {}).occupancy || '';
+  const _defaultH = storeyHeightFromOccupancy(_occupancy);
+  const defaultLevel = levels[0] || { id: 'level-1', elevation_m: 0, height_m: _defaultH };
   const allWalls = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL');
 
   // Build storey metadata
   const storeyInfo = {};
   for (const level of levels) {
-    storeyInfo[level.id] = { elevation: level.elevation_m || 0, height: level.height_m || 3.0 };
+    storeyInfo[level.id] = { elevation: level.elevation_m || 0, height: level.height_m || _defaultH };
   }
   if (!storeyInfo[defaultLevel.id]) {
-    storeyInfo[defaultLevel.id] = { elevation: 0, height: defaultLevel.height_m || 3.0 };
+    storeyInfo[defaultLevel.id] = { elevation: 0, height: defaultLevel.height_m || _defaultH };
   }
 
   // Group walls and slabs by container
@@ -270,7 +286,7 @@ function guaranteeBuildingEnvelope(css) {
 
 function validateOpeningPlacement(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const openingTypes = new Set(['DOOR', 'WINDOW', 'OPENING']);
   const openings = css.elements.filter(e => openingTypes.has((e.type || '').toUpperCase()));
@@ -397,7 +413,7 @@ function validateOpeningPlacement(css) {
 
 function cleanBuildingWallAxes(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const walls = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL');
   if (walls.length < 2) return;
@@ -518,7 +534,7 @@ function cleanBuildingWallAxes(css) {
 
 function clampWallsToEnvelope(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   // Compute envelope from exterior walls (or fallback to all-element bbox)
   const exteriorWalls = css.elements.filter(e =>
@@ -658,7 +674,7 @@ function clampAbsurdDimensions(css) {
 
 function mergeWalls(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') {
+  if (hasTunnelSegments(css)) {
     console.log('MergeWalls: skipping for TUNNEL domain (shell walls are independent)');
     return;
   }
@@ -947,7 +963,7 @@ function getWallEndpoints(wall) {
 function inferOpenings(css) {
   if (!css.elements || css.elements.length === 0) return;
 
-  const isTunnel = (css.domain || '').toUpperCase() === 'TUNNEL';
+  const isTunnel = hasTunnelSegments(css);
 
   // Tunnel domain: assign doors/windows to nearest valid host.
   // Search both STRUCTURAL TUNNEL_SEGMENTs and PORTAL_END_WALL closure walls.
@@ -1494,7 +1510,7 @@ function _skipOpeningVoids(css, opening, toRemove, structureClass, reason) {
 
 function inferSlabs(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') {
+  if (hasTunnelSegments(css)) {
     console.log('InferSlabs: skipping for TUNNEL domain (shell slabs pre-classified)');
     return;
   }
@@ -1574,7 +1590,7 @@ function inferSlabs(css) {
 
 function checkEnvelopeFallback(css) {
   if (!css.metadata) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const skippedOpenings = css.metadata.skippedOpenings || [];
   const totalOpeningsOriginal = skippedOpenings.length + css.elements.filter(e => {
@@ -1614,7 +1630,7 @@ function checkEnvelopeFallback(css) {
 
 function validateBuildingStructure(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const bbox = css.metadata?.bbox;
   if (!bbox) return;
@@ -1692,7 +1708,7 @@ function validateBuildingStructure(css) {
 
 function deduplicateRoofs(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const roofElements = css.elements.filter(e => (e.type || '').toUpperCase() === 'ROOF');
   const slabRoofs = css.elements.filter(e =>
@@ -1744,7 +1760,7 @@ function deduplicateRoofs(css) {
  */
 function validateSpaceContainment(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   // Build storey elevation map
   const storeyElevations = {};
@@ -1804,7 +1820,7 @@ function validateSpaceContainment(css) {
  */
 function inferSpaces(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   // Check if any SPACE elements already exist from extract
   const existingSpaces = css.elements.filter(e => (e.type || '').toUpperCase() === 'SPACE');
@@ -1937,7 +1953,7 @@ function countAmbiguousProfiles(css) {
  */
 function snapWallEndpoints(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   // Tiered snapping: Pass 1 at 50mm (high-confidence), Pass 2 at 300mm (repair orphans)
   const SNAP_PASS_1 = 0.05;  // 50mm — endpoints that are clearly the same point
@@ -2086,7 +2102,7 @@ function snapWallEndpoints(css) {
  */
 function deriveRoofElevation(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const walls = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL');
   const roofSlabs = css.elements.filter(e =>
@@ -2172,7 +2188,7 @@ function deriveRoofElevation(css) {
  */
 function snapSlabsToWallBases(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const walls = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL');
   const floorSlabs = css.elements.filter(e =>
@@ -2229,7 +2245,7 @@ function snapSlabsToWallBases(css) {
  */
 function alignSlabsToWalls(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() === 'TUNNEL') return;
+  if (hasTunnelSegments(css)) return;
 
   const walls = css.elements.filter(e => (e.type || '').toUpperCase() === 'WALL');
   const slabs = css.elements.filter(e => (e.type || '').toUpperCase() === 'SLAB' && !e.properties?.isFallbackEnvelope);
@@ -2312,7 +2328,7 @@ function alignSlabsToWalls(css) {
  */
 export function mergeShortTunnelSegments(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
+  if (!hasTunnelSegments(css)) return;
 
   const MIN_LENGTH = 0.5; // metres — stubs shorter than this are merged
   const CLOSE_THRESHOLD = 0.2; // endpoint proximity threshold for "connected"
@@ -2420,7 +2436,7 @@ export function mergeShortTunnelSegments(css) {
 
 function snapTunnelSegmentEndpoints(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
+  if (!hasTunnelSegments(css)) return;
 
   const SNAP_RADIUS = 0.05; // 50mm — high-precision engineering-grade snap for tunnel nodes
   const MAX_ADJUST = 0.20;  // 200mm max origin shift to prevent mangling long elements

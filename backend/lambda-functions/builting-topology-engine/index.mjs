@@ -9,12 +9,15 @@
  * Pipeline:
  *   ValidateCSS → RepairCSS → NormalizeGeometry →
  *   [TUNNEL] DecomposeTunnelShell pipeline →
+ *   [TUNNEL] SplitTunnelSubSegments (main/upper Z-grouping) →
  *   SnapWallEndpoints (tiered: 50mm → 150mm) →
+ *   [TUNNEL] BridgeVSMNodes (close coordinate gaps between VSM branches) →
  *   [BUILDING] MergeWalls → CleanWallAxes → BuildTopology →
  *   InferOpenings → CreateOpeningRelationships → InferSlabs →
  *   DeriveRoofElevation → AlignSlabsToWalls → GuaranteeBuildingEnvelope →
  *   ClampDimensions →
  *   BuildPathConnections → EquipmentMounting → AnnotateSweepGeometry →
+ *   [TUNNEL] FixRampOrientation (slope axis for segments with |ΔZ| > 0.5m) →
  *   CSSValidation → SafetyChecks → ValidateTopology →
  *   RunFullModelValidation →
  *   v2 Adapter (inferred.json + resolved.json + css_processed.json) →
@@ -24,7 +27,7 @@
  * Output: { cssS3Key, resolvedS3Key, validationReportS3Key, readinessScore, ... }
  */
 
-import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 
 // ── Structure modules ──
 import { validateCSS, repairCSS, normalizeGeometry } from './validation.mjs';
@@ -52,9 +55,13 @@ import { validateTopology } from './topology-validate.mjs';
 
 // ── Validation modules ──
 import { runFullValidation } from './model-validate.mjs';
+import { runRuleAssertions } from './rule-assertions.mjs';
 
 // ── v2 Adapters ──
 import { cssToInferred, cssToResolved, resolvedToLegacyCss } from './v2-adapter.mjs';
+
+// ── VSM / Tunnel bridge steps (TUNNEL domain only) ──
+import { splitTunnelSubSegments, bridgeVSMNodes, fixRampOrientation } from './vsm-bridge.mjs';
 
 const s3 = new S3Client({});
 
@@ -180,7 +187,15 @@ function annotateSweepGeometry(css) {
   if (!css.elements) return;
 
   let annotated = 0;
+  let depthFallbackCount = 0;
   const MAX_PATH_POINTS = 200;
+
+  // Derive default up-axis from facilityMeta rather than hardcoding Z-up
+  const facilityUp = css.facilityMeta?.upAxis || css.metadata?.facilityMeta?.upAxis;
+  const _defaultAxis = facilityUp === 'Y' ? { x: 0, y: 1, z: 0 }
+                     : facilityUp === 'X' ? { x: 1, y: 0, z: 0 }
+                     : { x: 0, y: 0, z: 1 };
+  if (!facilityUp) console.log('annotateSweepGeometry: no upAxis in facilityMeta — defaulting to Z-up');
 
   for (const elem of css.elements) {
     const geom = elem.geometry;
@@ -195,8 +210,11 @@ function annotateSweepGeometry(css) {
     const origin = placement.origin || { x: 0, y: 0, z: 0 };
 
     // Determine run axis: refDirection (CSS convention: axis=world-up, refDirection=bearing)
-    const runDir = placement.refDirection || geom.direction || placement.axis || { x: 0, y: 0, z: 1 };
-    const depth = geom.depth || 1.0;
+    // upAxis from facilityMeta drives the default — fall back to Z-up only if unspecified
+    const runDir = placement.refDirection || geom.direction || placement.axis || _defaultAxis;
+    const typicalDepth = css.facilityMeta?.typicalElementDepth || css.metadata?.facilityMeta?.typicalElementDepth;
+    const depth = geom.depth || typicalDepth || 1.0;
+    if (!geom.depth) depthFallbackCount++;
     if (depth <= 0) continue;
 
     const ax = runDir.x || 0, ay = runDir.y || 0, az = runDir.z || 0;
@@ -236,8 +254,10 @@ function annotateSweepGeometry(css) {
     annotated++;
   }
 
-  if (annotated > 0) {
-    console.log(`annotateSweepGeometry: ${annotated} PATH_SWEEP elements path-authored`);
+  if (annotated > 0 || depthFallbackCount > 0) {
+    const typicalDepth = css.facilityMeta?.typicalElementDepth || css.metadata?.facilityMeta?.typicalElementDepth;
+    const fallbackSrc = typicalDepth ? `facilityMeta.typicalElementDepth=${typicalDepth}` : '1.0m constant (no facilityMeta.typicalElementDepth)';
+    console.log(`annotateSweepGeometry: ${annotated} PATH_SWEEP elements path-authored; ${depthFallbackCount} used depth fallback → ${fallbackSrc}`);
   }
 }
 
@@ -362,8 +382,50 @@ export const handler = async (event) => {
     throw new Error('CSS loaded from S3 has no elements');
   }
 
+  // Idempotency: if output artifacts already exist, return cached result
+  const _processedKey = `uploads/${userId}/${renderId}/css/css_processed.json`;
+  const _engineReportKey = `uploads/${userId}/${renderId}/pipeline/v${revision}/topology_engine_report.json`;
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: _processedKey }));
+    console.log(`[idempotency] css_processed.json exists — returning cached result`);
+    const engineObj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: _engineReportKey }));
+    const engineReport = JSON.parse(await engineObj.Body.transformToString());
+    const mv = engineReport.modelValidation || {};
+    return {
+      cssS3Key: _processedKey,
+      resolvedS3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/resolved.json`,
+      validationReportS3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/validation_report.json`,
+      readinessScore: mv.readinessScore || 0,
+      exportReadiness: mv.exportReadiness || 'NOT_READY',
+      authoringSuitability: mv.authoringSuitability || null,
+      criticalIssueCount: mv.errorCount || 0,
+      warningCount: mv.warningCount || 0,
+      proxyRatio: mv.proxyRatio || 0,
+      generationModeRecommendation: mv.generationMode || null,
+      readinessDelta: 0,
+      geometryFidelity: mv.geometryFidelity || null,
+      inferredS3Key: `uploads/${userId}/${renderId}/pipeline/v${revision}/inferred.json`,
+      elementCount: engineReport.elementCountOut || 0,
+      domain: engineReport.domain || 'UNKNOWN',
+      validationResult: {
+        valid: engineReport.cssValidation?.valid || false,
+        errorCount: engineReport.cssValidation?.errorCount || 0,
+        warningCount: engineReport.cssValidation?.warningCount || 0,
+        errors: [],
+        warnings: [],
+      },
+      topology_report: null,
+    };
+  } catch (err) {
+    if (err.name !== 'NotFound' && err.$metadata?.httpStatusCode !== 404) throw err;
+  }
+
   const elementCountIn = css.elements.length;
   const domain = (css.domain || '').toUpperCase();
+  // Data-driven: pipeline branching is determined by element types, not the domain string.
+  // This correctly handles hybrid structures and cases where domain is missing or wrong.
+  const hasTunnelSegs = css.elements.some(e => e.type === 'TUNNEL_SEGMENT');
+  console.log(`TopologyEngine: domain=${domain}, hasTunnelSegs=${hasTunnelSegs}, elementCount=${elementCountIn}`);
 
   // ════════════════════════════════════════════════════════════════════════
   // PHASE 2: STRUCTURE RESOLVE (formerly builting-structure)
@@ -383,16 +445,18 @@ export const handler = async (event) => {
   // Step 3: Normalize geometry (origin shift, coordinate clamping)
   timedStep('normalizeGeometry', () => normalizeGeometry(css));
 
-  // Step 3B: Tunnel semantic pipeline (TUNNEL domain only)
+  // Step 3B: Tunnel semantic pipeline (runs when TUNNEL_SEGMENT elements are present)
   // Topology defines structure — generate creates geometry.
   // decomposeTunnelShell now annotates segments with shell metadata (profile, thickness, path)
   // instead of emitting geometry fragments. Shell-fragment steps are disabled.
-  if (domain === 'TUNNEL') {
-    console.log('TUNNEL domain: semantic annotation pipeline (no shell fragment emission)');
+  if (hasTunnelSegs) {
+    console.log('Tunnel segments detected: semantic annotation pipeline (no shell fragment emission)');
     timedStep('decomposeTunnelShell', () => decomposeTunnelShell(css));
     timedStep('generatePortalEndWalls', () => generatePortalEndWalls(css));
     // mergeShortTunnelSegments operates on segments, not fragments — keep it
     timedStep('mergeShortTunnelSegments', () => mergeShortTunnelSegments(css));
+    // Split flat segment into main/upper sub-segments by Z range (before bridges are created)
+    timedStep('splitTunnelSubSegments', () => splitTunnelSubSegments(css));
     // Detect disconnected orphan segments
     timedStep('auditOrphansAndBridgeGaps', () => auditOrphansAndBridgeGaps(css));
     // Validation passes
@@ -404,8 +468,16 @@ export const handler = async (event) => {
   // Step 3C: Snap wall endpoints (tiered: 50mm → 150mm)
   timedStep('snapWallEndpoints', () => snapWallEndpoints(css));
 
-  // Step 3E: Build topology graph (TUNNEL builds before merge, BUILDING after)
-  if (domain === 'TUNNEL') {
+  // Step 3D: Bridge VSM node coordinate gaps (tunnel structures only).
+  // Inserts TUNNEL_SEGMENT bridge elements between topologically connected branches
+  // whose endpoints are not coincident after snapping (gaps > 50mm, < 100m).
+  if (hasTunnelSegs) {
+    timedStep('bridgeVSMNodes', () => bridgeVSMNodes(css));
+  }
+
+  // Step 3E: Build topology graph — tunnel structures build before wall merge (no walls to merge);
+  // building structures build after merge so topology reflects merged wall endpoints.
+  if (hasTunnelSegs) {
     timedStep('buildTopologyGraph', () => buildTopologyGraph(css));
   }
 
@@ -415,8 +487,8 @@ export const handler = async (event) => {
   // Step 4B: Wall axis cleanup
   timedStep('cleanBuildingWallAxes', () => cleanBuildingWallAxes(css));
 
-  // Step 4C: Rebuild topology after merge (BUILDING)
-  if (domain !== 'TUNNEL') {
+  // Step 4C: Rebuild topology after merge (building structures — no TUNNEL_SEGMENT elements)
+  if (!hasTunnelSegs) {
     timedStep('buildTopologyGraph', () => buildTopologyGraph(css));
   }
 
@@ -485,7 +557,7 @@ export const handler = async (event) => {
   console.log('GeometryBuild phase — topology graph in memory, no S3 round-trip');
 
   // Step G0.5: Deduplicate overlapping tunnel segments (same entry+exit nodes, same direction)
-  if (domain === 'TUNNEL') {
+  if (hasTunnelSegs) {
     timedStep('deduplicateOverlappingSegments', () => {
       const seen = new Map();
       let removed = 0;
@@ -526,6 +598,13 @@ export const handler = async (event) => {
   // Step G2.6: Path-author PATH_SWEEP elements (ensure pathPoints, _runAxis, _pathLength)
   timedStep('annotateSweepGeometry', () => annotateSweepGeometry(css));
 
+  // Step G2.6B: Ramp orientation fix (tunnel structures only).
+  // For TUNNEL_SEGMENTs where |path ΔZ| > 0.5m, override the flat horizontal
+  // axis with the true 3D slope vector so generate extrudes along the incline.
+  if (hasTunnelSegs) {
+    timedStep('fixRampOrientation', () => fixRampOrientation(css));
+  }
+
   // Step G2.7: Guard invalid sweeps — use _geoBehavior for smarter decisions.
   // PATH_SWEEP elements missing pathPoints → flag for path generation (all domains).
   // Non-PATH_SWEEP elements with SWEEP method + no pathPoints → downgrade to EXTRUSION.
@@ -565,6 +644,13 @@ export const handler = async (event) => {
     }
     console.log(`guardInvalidSweeps: ${downgraded} downgraded, ${flaggedLinear} PATH_SWEEP flagged for path generation`);
   });
+
+  // Step G2.8: Rule assertion pass — physical correctness gates
+  // Runs after wall snapping (Phase 2) and MEP path routing (G1). Removes zero-height
+  // and floating elements, warns on wall connection gaps and MEP zone containment.
+  // Aborts pipeline with a structured error if > 20% of elements are removed.
+  let topologyReport = null;
+  timedStep('ruleAssertions', () => { topologyReport = runRuleAssertions(css, elementCountIn); });
 
   // Step G3: CSS validation
   let cssIssues;
@@ -699,8 +785,7 @@ export const handler = async (event) => {
       // Annotates elements with host validation status for generate lambda.
       // Does NOT strip — generate decides per output mode (HARD=suppress, SOFT=proxy).
       const geoBehavior = geom._geoBehavior || '';
-      const isTunnelDomain = (css.domain || '').toUpperCase() === 'TUNNEL';
-      if (isTunnelDomain && (geoBehavior === 'PATH_SWEEP' || type === 'EQUIPMENT')) {
+      if (hasTunnelSegs && (geoBehavior === 'PATH_SWEEP' || type === 'EQUIPMENT')) {
         if (!geom._isTunnelShell) { // skip tunnel shell segments (they ARE hosts)
           const hostKey = meta.parentSegment || meta.hostSegmentId ||
                           props.hostStructuralBranchMatched || props.derivedFromBranch ||
@@ -776,7 +861,7 @@ export const handler = async (event) => {
   // Step 4: Z convention dual tracking — store both source and normalized conventions
   // so generate lambda can skip its heuristic, and logs can reference source for debugging.
   css.metadata.zConvention = {
-    source: domain === 'TUNNEL' ? 'MINE_ABSOLUTE' : 'MIXED',
+    source: hasTunnelSegs ? 'MINE_ABSOLUTE' : 'MIXED',
     normalized: 'STOREY_RELATIVE',
     origin: 'topology_engine'
   };
@@ -937,7 +1022,9 @@ export const handler = async (event) => {
       authoringSuitability: readiness.authoringSuitability,
       generationMode: readiness.generationModeRecommendation,
       errorCount: validationReport.summary.errorCount,
-      warningCount: validationReport.summary.warningCount
+      warningCount: validationReport.summary.warningCount,
+      proxyRatio: semResult.summary.proxyRatio,
+      geometryFidelity: geomResult.summary.geometryFidelity || null,
     },
     roundTripFidelity: {
       mismatches: mismatches.length,
@@ -1019,6 +1106,9 @@ export const handler = async (event) => {
       warningCount: validationResult.warnings.length,
       errors: validationResult.errors.slice(0, 20),
       warnings: validationResult.warnings.slice(0, 20)
-    }
+    },
+
+    // Rule assertion findings (new top-level key — no existing schema changes)
+    topology_report: topologyReport
   };
 };

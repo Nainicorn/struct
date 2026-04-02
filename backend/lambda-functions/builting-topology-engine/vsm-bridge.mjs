@@ -1,0 +1,400 @@
+/**
+ * vsm-bridge.mjs — VSM (VentSim) network gap bridging and ramp orientation.
+ *
+ * TUNNEL domain only. Three post-processing steps for the topology engine:
+ *
+ *   1. splitTunnelSubSegments — split the flat levelsOrSegments into main/upper
+ *      groups based on element origin Z, before bridges are created.
+ *
+ *   2. bridgeVSMNodes — insert TUNNEL_SEGMENT bridge elements to close the
+ *      coordinate gaps between topologically connected VSM branches.
+ *      (VentSim branches share node IDs but store independent 3D endpoints.)
+ *
+ *   3. fixRampOrientation — annotate sloped TUNNEL_SEGMENTs (|ΔZ| > 0.5m)
+ *      with the true 3D slope axis so the generate lambda extrudes them along
+ *      the actual incline instead of flat horizontal.
+ *
+ * All three functions are no-ops outside TUNNEL domain.
+ */
+
+import { medianSegmentLength, structureZRange, shellThicknessFromProfile } from './shared.mjs';
+
+// ============================================================================
+// 1. SPLIT TUNNEL SUB-SEGMENTS
+// ============================================================================
+
+/**
+ * [TUNNEL] Partition the single flat levelsOrSegments entry into sub-segments
+ * by Z range:
+ *   z ≤ 0.5m  → existing main segment (unchanged)
+ *   z > 0.5m  → new 'upper passages' segment (appended)
+ *
+ * Element containers are updated to match. Run BEFORE bridgeVSMNodes so that
+ * bridges inherit the correct container from their exit segment.
+ *
+ * @param {object} css — live CSS object (mutated in place)
+ */
+export function splitTunnelSubSegments(css) {
+  // Data-driven: check for actual TUNNEL_SEGMENT elements
+  if (!(css.elements || []).some(e => e.type === 'TUNNEL_SEGMENT')) return;
+  if (!css.levelsOrSegments || !css.elements) return;
+
+  // Upper-zone threshold: 15% of total structure Z-range, clamped [0.3m, 3.0m].
+  // Scales with structure height so the split works for shallow mine tunnels (few metres)
+  // and deep urban tunnels (tens of metres) without a fixed constant.
+  const zRange = structureZRange(css.elements);
+  const UPPER_Z_THRESHOLD = zRange.range > 0
+    ? Math.min(3.0, Math.max(0.3, zRange.range * 0.15))
+    : 0.5;
+  console.log(`splitTunnelSubSegments: UPPER_Z_THRESHOLD=${UPPER_Z_THRESHOLD.toFixed(2)}m `
+    + `(derived from Z-range ${zRange.min.toFixed(1)}–${zRange.max.toFixed(1)}m)`);
+
+  // Scan elements for max upper-zone Z
+  let maxUpperZ = -Infinity;
+  for (const elem of css.elements) {
+    const z = elem.placement?.origin?.z ?? 0;
+    if (z > UPPER_Z_THRESHOLD && z > maxUpperZ) maxUpperZ = z;
+  }
+
+  if (maxUpperZ === -Infinity) {
+    // Nothing above threshold — single-level tunnel, no split needed
+    return;
+  }
+
+  // Identify the main segment (first SEGMENT entry, lowest elevation)
+  const mainSeg = css.levelsOrSegments.find(s => s.type === 'SEGMENT') ?? css.levelsOrSegments[0];
+  if (!mainSeg) return;
+
+  const upperSegId = `${mainSeg.id}-upper`;
+
+  // Create the upper segment entry if it doesn't already exist
+  if (!css.levelsOrSegments.some(s => s.id === upperSegId)) {
+    css.levelsOrSegments.push({
+      id:          upperSegId,
+      type:        'SEGMENT',
+      name:        'Upper Passages',
+      elevation_m: Math.round(maxUpperZ * 100) / 100,
+      // height_m: inherit from main segment; no occupancy-based default since tunnels
+      // are single-level — upper passages have the same headroom as the main bore.
+      height_m:    mainSeg.height_m ?? null,
+    });
+    console.log(`splitTunnelSubSegments: added "${upperSegId}" at elevation_m=${Math.round(maxUpperZ * 100) / 100}`);
+  }
+
+  // Reassign containers for elements whose origin is in the upper zone
+  let moved = 0;
+  for (const elem of css.elements) {
+    const z = elem.placement?.origin?.z ?? 0;
+    if (z > UPPER_Z_THRESHOLD && (!elem.container || elem.container === mainSeg.id)) {
+      elem.container = upperSegId;
+      moved++;
+    }
+  }
+
+  if (moved > 0) {
+    console.log(`splitTunnelSubSegments: moved ${moved} elements to "${upperSegId}"`);
+  }
+}
+
+// ============================================================================
+// 2. BRIDGE VSM NODES
+// ============================================================================
+
+/**
+ * [TUNNEL] Close coordinate gaps between topologically connected VSM branches.
+ *
+ * VentSim stores each branch as an independent 3D shape. Adjacent branches that
+ * share a node ID (entry_node of one = exit_node of another) frequently have
+ * endpoint coordinates that don't coincide — gaps range from centimetres to
+ * tens of metres. This step inserts a straight TUNNEL_SEGMENT bridge for every
+ * such pair to produce a physically connected IFC network.
+ *
+ * Rules:
+ *   • Only bridges gaps  >  50 mm  (COINCIDENCE_TOL — already coincident → skip)
+ *   • Only bridges gaps  < 100 m   (MAX_BRIDGE_LEN  — implausible gap     → skip)
+ *   • Inherits cross-section profile of the smaller-area segment
+ *   • Z path interpolates linearly between the two endpoint Z values
+ *   • source: 'BRIDGE_INFERRED', confidence: 0.6
+ *   • Uses unique synthetic entry_node/exit_node IDs so the G0.5 overlap-
+ *     deduplication step does not collapse multiple bridges at the same node
+ *
+ * Run AFTER splitTunnelSubSegments (so bridges inherit updated containers) and
+ * AFTER snapWallEndpoints, BEFORE buildTopologyGraph.
+ *
+ * @param {object} css — live CSS object (mutated in place)
+ */
+export function bridgeVSMNodes(css) {
+  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
+  if (!css.elements) return;
+
+  const COINCIDENCE_TOL = 0.05;   // 50 mm — already touching, skip
+  // MAX_BRIDGE_LEN: derived from median segment length × 1.5 so it scales with the structure.
+  // A 5 m cap is suitable for a small mine; a large rail tunnel may have 50 m transition gaps.
+  // Capped at 100 m to guard against clearly unconnected branches in sparse VSM models.
+  const MAX_BRIDGE_LEN  = Math.min(100, Math.max(5, medianSegmentLength(css.elements) * 1.5));
+  console.log(`bridgeVSMNodes: MAX_BRIDGE_LEN=${MAX_BRIDGE_LEN.toFixed(1)}m `
+    + `(derived from median segment length)`);
+  const COS_45          = Math.SQRT1_2; // cos(45°) ≈ 0.7071 — arccos(0.707) = 45°
+
+  // Only consider segments that have a valid path
+  const tunnelSegs = css.elements.filter(
+    e => e.type === 'TUNNEL_SEGMENT' &&
+         Array.isArray(e.geometry?.path) &&
+         e.geometry.path.length >= 2
+  );
+
+  // Build nodeId → [ { seg, endpointType:'entry'|'exit', point } ]
+  const nodeMap = new Map();
+  for (const seg of tunnelSegs) {
+    const path      = seg.geometry.path;
+    const entryNode = seg.properties?.entry_node;
+    const exitNode  = seg.properties?.exit_node;
+
+    if (entryNode) {
+      if (!nodeMap.has(entryNode)) nodeMap.set(entryNode, []);
+      nodeMap.get(entryNode).push({ seg, endpointType: 'entry', point: path[0] });
+    }
+    if (exitNode) {
+      if (!nodeMap.has(exitNode)) nodeMap.set(exitNode, []);
+      nodeMap.get(exitNode).push({ seg, endpointType: 'exit', point: path[path.length - 1] });
+    }
+  }
+
+  // Direction vector for each segment (path start → end, normalised)
+  const segDirMap = new Map();
+  for (const seg of tunnelSegs) {
+    const p  = seg.geometry.path;
+    const sx = (p[p.length - 1].x ?? 0) - (p[0].x ?? 0);
+    const sy = (p[p.length - 1].y ?? 0) - (p[0].y ?? 0);
+    const sz = (p[p.length - 1].z ?? 0) - (p[0].z ?? 0);
+    const sl = Math.sqrt(sx * sx + sy * sy + sz * sz);
+    segDirMap.set(seg.id, sl > 1e-6 ? { x: sx / sl, y: sy / sl, z: sz / sl } : { x: 1, y: 0, z: 0 });
+  }
+
+  // Segment IDs that already have equipment (FAN/PUMP/DAMPER/VALVE) assigned to them
+  const EQUIPMENT_TYPES = new Set(['FAN', 'PUMP', 'DAMPER', 'VALVE']);
+  const equipmentContainers = new Set(
+    css.elements
+      .filter(e => EQUIPMENT_TYPES.has(e.type) && e.container)
+      .map(e => e.container)
+  );
+
+  const bridges        = [];
+  const seen           = new Set(); // dedup key: 'exitId→entryId@nodeId'
+  let   skippedGaps    = 0;
+  let   skippedEquip   = 0;
+  let   skippedAngle   = 0;
+
+  for (const [nodeId, endpoints] of nodeMap) {
+    const exits   = endpoints.filter(e => e.endpointType === 'exit');
+    const entries = endpoints.filter(e => e.endpointType === 'entry');
+
+    for (const exitEp of exits) {
+      for (const entryEp of entries) {
+        if (exitEp.seg === entryEp.seg) continue;
+
+        const dedupeKey = `${exitEp.seg.id}→${entryEp.seg.id}@${nodeId}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        const p0 = exitEp.point;
+        const p1 = entryEp.point;
+        const dx = (p1.x ?? 0) - (p0.x ?? 0);
+        const dy = (p1.y ?? 0) - (p0.y ?? 0);
+        const dz = (p1.z ?? 0) - (p0.z ?? 0);
+        const gap = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (gap < COINCIDENCE_TOL) continue;
+        if (gap > MAX_BRIDGE_LEN) {
+          console.warn(`bridgeVSMNodes: ${exitEp.seg.id}→${entryEp.seg.id} gap=${gap.toFixed(1)}m > ${MAX_BRIDGE_LEN}m, skipping`);
+          skippedGaps++;
+          continue;
+        }
+
+        // Equipment filter — if either segment hosts a FAN/PUMP/DAMPER/VALVE they
+        // connect via that equipment, not a raw bridge
+        if (equipmentContainers.has(exitEp.seg.id) || equipmentContainers.has(entryEp.seg.id)) {
+          skippedEquip++;
+          continue;
+        }
+
+        // Angle filter — segments must be pointing within 45° of each other
+        const exitDir  = segDirMap.get(exitEp.seg.id);
+        const entryDir = segDirMap.get(entryEp.seg.id);
+        const dot = exitDir.x * entryDir.x + exitDir.y * entryDir.y + exitDir.z * entryDir.z;
+        if (dot < COS_45) {
+          skippedAngle++;
+          continue;
+        }
+
+        // Profile: inherit from the smaller-area segment
+        const exitProf  = exitEp.seg.geometry?.profile  ?? {};
+        const entryProf = entryEp.seg.geometry?.profile ?? {};
+        const area = p => p.type === 'CIRCLE'
+          ? Math.PI * (p.radius ?? 0) ** 2
+          : (p.width ?? 0) * (p.height ?? 0);
+        const profile = area(exitProf) <= area(entryProf)
+          ? { ...exitProf }
+          : { ...entryProf };
+
+        // Normalised 3D direction (used by generate for extrusion axis)
+        const nx = dx / gap, ny = dy / gap, nz = dz / gap;
+        // Guard: gap > COINCIDENCE_TOL guarantees gap > 0 but floating-point edge
+        // cases can still produce NaN/Inf — skip rather than emit corrupt geometry.
+        if (!isFinite(nx) || !isFinite(ny) || !isFinite(nz)) {
+          console.warn(`bridgeVSMNodes: non-finite direction for ${exitEp.seg.id}→${entryEp.seg.id} `
+            + `gap=${gap}, skipping`);
+          continue;
+        }
+        // Horizontal bearing (for placement refDirection — XY plane only)
+        const hLen = Math.sqrt(dx * dx + dy * dy);
+        const bx   = hLen > 1e-6 ? dx / hLen : 1;
+        const by   = hLen > 1e-6 ? dy / hLen : 0;
+
+        // Unique synthetic node IDs prevent G0.5 overlap-deduplication from
+        // collapsing multiple bridges sharing the same real node.
+        const bridgeIdx = bridges.length;
+        const bridgeId  = `bridge_${nodeId}_${bridgeIdx}`;
+
+        bridges.push({
+          id:           bridgeId,
+          element_key:  bridgeId,
+          canonical_id: bridgeId,
+          type:         'TUNNEL_SEGMENT',
+          semanticType: 'IfcBuildingElementProxy',
+          name:         `Bridge_${nodeId}`,
+          placement: {
+            origin:       { x: p0.x ?? 0, y: p0.y ?? 0, z: p0.z ?? 0 },
+            axis:         { x: 0, y: 0, z: 1 },
+            refDirection: { x: bx, y: by, z: 0 },
+          },
+          geometry: Math.abs(dz) > 0.3
+            ? {
+                method:       'SWEEP',
+                _geoBehavior: 'PATH_SWEEP',
+                profile:      { ...profile, wallThickness: profile.wallThickness ?? shellThicknessFromProfile({ geometry: { profile }, properties: {} }, null) },
+                depth:        gap,
+                direction:    { x: nx, y: ny, z: nz },
+                pathPoints: [
+                  { x: p0.x ?? 0, y: p0.y ?? 0, z: p0.z ?? 0 },
+                  { x: p1.x ?? 0, y: p1.y ?? 0, z: p1.z ?? 0 },
+                ],
+                path: [
+                  { x: p0.x ?? 0, y: p0.y ?? 0, z: p0.z ?? 0 },
+                  { x: p1.x ?? 0, y: p1.y ?? 0, z: p1.z ?? 0 },
+                ],
+              }
+            : {
+                method:    'EXTRUSION',
+                profile:   { ...profile, wallThickness: profile.wallThickness ?? shellThicknessFromProfile({ geometry: { profile }, properties: {} }, null) },
+                depth:     gap,
+                direction: { x: nx, y: ny, z: nz },
+                path: [
+                  { x: p0.x ?? 0, y: p0.y ?? 0, z: p0.z ?? 0 },
+                  { x: p1.x ?? 0, y: p1.y ?? 0, z: p1.z ?? 0 },
+                ],
+              },
+          container:     exitEp.seg.container ?? 'seg-tunnel-main',
+          relationships: [],
+          properties: {
+            entry_node:          `${bridgeId}_in`,
+            exit_node:           `${bridgeId}_out`,
+            branchClass:         'STRUCTURAL',
+            shellThickness_m:    profile.wallThickness ?? shellThicknessFromProfile({ geometry: { profile }, properties: {} }, null),
+            shellMode:           exitEp.seg.properties?.shellMode ?? 'HOLLOW_PROFILE',
+            decompositionMethod: 'BRIDGE_INFERRED',
+            _isBridgeSegment:    true,
+          },
+          material: exitEp.seg.material
+            ? { ...exitEp.seg.material }
+            : { name: 'concrete', color: [0.75, 0.75, 0.75], transparency: 0 },
+          confidence:  0.6,
+          source:      'BRIDGE_INFERRED',
+          sourceFile:  null,
+          metadata: {
+            bridgeForNode:      nodeId,
+            bridgeFromSegment:  exitEp.seg.id,
+            bridgeToSegment:    entryEp.seg.id,
+            gapMm:              Math.round(gap * 1000),
+            geometryExportable: true,
+          },
+        });
+      }
+    }
+  }
+
+  if (bridges.length > 0) {
+    css.elements.push(...bridges);
+  }
+  console.log(`bridgeVSMNodes: inserted ${bridges.length} bridge segments (${skippedGaps} exceeded 5m, ${skippedEquip} had equipment, ${skippedAngle} angle >45°)`);
+}
+
+// ============================================================================
+// 3. FIX RAMP ORIENTATION
+// ============================================================================
+
+/**
+ * [TUNNEL] Annotate sloped TUNNEL_SEGMENTs with their true 3D slope axis.
+ *
+ * Segments where |path[end].z − path[start].z| > 0.5m are currently rendered
+ * as flat horizontal extrusions placed at the wrong elevation, because
+ * annotateSweepGeometry skips isTunnelShell elements. This step:
+ *
+ *   • Sets _geoBehavior = 'PATH_SWEEP' (overrides flat classification)
+ *   • Sets _isRamp = true (flag for generate lambda)
+ *   • Sets _slopeAxis / _runAxis = normalised 3D slope vector
+ *   • Sets geometry.direction = slope vector (generate reads this for extrusion)
+ *   • Writes pathPoints from the existing path so generate has a clean directrix
+ *
+ * Run AFTER annotateSweepGeometry so any flat-axis that step wrote for
+ * isTunnelShell elements is correctly overridden for ramps.
+ *
+ * @param {object} css — live CSS object (mutated in place)
+ */
+export function fixRampOrientation(css) {
+  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
+  if (!css.elements) return;
+
+  const RAMP_Z_THRESHOLD = 0.5; // 500 mm Z variation triggers ramp treatment
+
+  let count = 0;
+
+  for (const elem of css.elements) {
+    if (elem.type !== 'TUNNEL_SEGMENT') continue;
+    const geom = elem.geometry;
+    if (!geom) continue;
+
+    const path = geom.path;
+    if (!Array.isArray(path) || path.length < 2) continue;
+
+    const startZ = path[0].z ?? 0;
+    const endZ   = path[path.length - 1].z ?? 0;
+    if (Math.abs(endZ - startZ) <= RAMP_Z_THRESHOLD) continue;
+
+    // True 3D slope vector
+    const dx  = (path[path.length - 1].x ?? 0) - (path[0].x ?? 0);
+    const dy  = (path[path.length - 1].y ?? 0) - (path[0].y ?? 0);
+    const dz  = endZ - startZ;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-6) continue;
+
+    const slopeAxis = { x: dx / len, y: dy / len, z: dz / len };
+
+    geom._geoBehavior  = 'PATH_SWEEP';
+    geom._isTunnelShell = true;
+    geom._isRamp       = true;
+    geom._slopeAxis    = slopeAxis;
+    geom._runAxis      = slopeAxis;
+    geom._pathAuthored = true;
+    geom._pathLength   = len;
+    // Carry slope into geometry.direction so the generate lambda can read it
+    // without needing to recompute from the path.
+    geom.direction  = slopeAxis;
+    // Ensure pathPoints exist and mirror the geometry path for the directrix
+    geom.pathPoints = path.map(p => ({ x: p.x ?? 0, y: p.y ?? 0, z: p.z ?? 0 }));
+
+    count++;
+  }
+
+  if (count > 0) console.log(`fixRampOrientation: annotated ${count} ramp segment(s) with slope axis`);
+}

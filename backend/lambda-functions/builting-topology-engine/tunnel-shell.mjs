@@ -4,7 +4,7 @@
  * Shared between builting-structure Lambda.
  */
 
-import { safe, clamp, sanitizeDir, elemId, vecNormalize, vecDot, vecCross, vecScale, vecAdd, vecSub, vecDist, vecLen, computeBisectorPlane, intersectLineWithPlane, generateChamferedRectProfile, generateCirclePoints, generateHorseshoePoints, generateLeftWallArcProfile, generateRightWallArcProfile, generateRoofArcProfile, buildTunnelFrame, validateTunnelFrame } from './shared.mjs';
+import { safe, clamp, sanitizeDir, elemId, vecNormalize, vecDot, vecCross, vecScale, vecAdd, vecSub, vecDist, vecLen, computeBisectorPlane, intersectLineWithPlane, generateChamferedRectProfile, generateCirclePoints, generateHorseshoePoints, generateLeftWallArcProfile, generateRightWallArcProfile, generateRoofArcProfile, buildTunnelFrame, validateTunnelFrame, shellThicknessFromProfile } from './shared.mjs';
 
 // ============================================================================
 // R1: DECOMPOSITION ELIGIBILITY CHECK
@@ -38,19 +38,23 @@ function canDecomposeTunnelSegment(elem) {
   const W = profile.width || 0;
   const H = profile.height || 0;
   const depth = geometry.depth || 0;
-  if (W <= 0.6) reasons.push('width_too_small');
-  if (H <= 0.6) reasons.push('height_too_small');
-  if (depth <= 0.5) reasons.push('depth_too_short');
+  // Minimum viable dimensions: reject only clearly degenerate (placeholder) geometry.
+  // Original 0.6m thresholds excluded valid narrow-gauge mine tunnels (~0.7m wide).
+  // 0.1m minimum catches zero/near-zero placeholders without blocking real small tunnels.
+  // Minimum depth of 0.1m prevents zero-extrusion artefacts without excluding short transition pieces.
+  if (W < 0.10) reasons.push('width_too_small');
+  if (H < 0.10) reasons.push('height_too_small');
+  if (depth <= 0.1) reasons.push('depth_too_short');
 
   // 3. Thickness evidence — informational only, no longer blocks decomposition.
-  //    VentSim data typically omits explicit wall thickness. Using DEFAULT_WALL_THICKNESS
-  //    (0.3m) produces correct hollow shells; solid ARCH fallback is always worse.
-  //    The decomposition body at R2 will set thicknessBasis='DEFAULT' when absent.
+  //    VentSim data typically omits explicit wall thickness. deriveThickness(W,H)
+  //    computes a structurally appropriate value from cross-section dimensions.
+  //    The decomposition body at R2 will set thicknessBasis='DERIVED' when absent.
   const hasThicknessEvidence = props.wallThickness || props.shellThickness ||
     props.liningThickness || profile.thickness ||
     props.wallThickness_m || props.shell_thickness;
   // NOTE: no_thickness_evidence intentionally removed from blocking reasons.
-  // A missing thickness uses DEFAULT_WALL_THICKNESS and is tracked via thicknessBasis.
+  // A missing thickness uses deriveThickness(W,H) and is tracked via thicknessBasis='DERIVED'.
 
   // If any blocking reason exists, bail early
   if (reasons.length > 0) return { eligible: false, reasons };
@@ -76,7 +80,24 @@ function canDecomposeTunnelSegment(elem) {
 // R2: THICKNESS SANITY CHECKS
 // ============================================================================
 
-const DEFAULT_WALL_THICKNESS = 0.3;
+// No DEFAULT_WALL_THICKNESS constant — all thickness values are derived via
+// shellThicknessFromProfile(elem, facilityMeta) so they scale with structure size
+// and material. See shared.mjs for the derivation rules.
+
+/**
+ * Convenience wrapper: derive shell thickness from raw profile width and height.
+ * Avoids constructing a full element object at every call site.
+ * @param {number} W — profile width in meters
+ * @param {number} H — profile height in meters
+ * @param {string} [mat] — material name hint (e.g. 'concrete', 'steel')
+ */
+function deriveThickness(W, H, mat) {
+  return shellThicknessFromProfile(
+    { geometry: { profile: { width: W || 1, height: H || 1 } }, properties: { material: mat || '' } },
+    null
+  );
+}
+
 const MIN_THICKNESS_RATIO = 0.02; // thickness must be >= 2% of smallest profile dim
 const MAX_THICKNESS_RATIO = 0.45; // thickness must be <= 45% of smallest profile dim
 
@@ -84,21 +105,26 @@ const MAX_THICKNESS_RATIO = 0.45; // thickness must be <= 45% of smallest profil
  * Validates whether a shell thickness is sane relative to the profile dimensions.
  * Returns { valid: true, thickness } or { valid: false, reason, fallbackThickness }.
  */
-function validateShellThickness(thickness, profileWidth, profileHeight) {
+function validateShellThickness(thickness, profileWidth, profileHeight, elem, facilityMeta) {
   const minDim = Math.min(profileWidth, profileHeight);
-  if (minDim <= 0) return { valid: false, reason: 'zero_profile_dim', fallbackThickness: DEFAULT_WALL_THICKNESS };
+  // Derive a structurally appropriate fallback for this specific profile
+  const fallbackThickness = shellThicknessFromProfile(
+    elem || { geometry: { profile: { width: profileWidth, height: profileHeight } } },
+    facilityMeta || null
+  );
+  if (minDim <= 0) return { valid: false, reason: 'zero_profile_dim', fallbackThickness };
 
   const ratio = thickness / minDim;
   if (ratio < MIN_THICKNESS_RATIO) {
-    return { valid: false, reason: 'thickness_too_thin', fallbackThickness: DEFAULT_WALL_THICKNESS };
+    return { valid: false, reason: 'thickness_too_thin', fallbackThickness };
   }
   if (ratio > MAX_THICKNESS_RATIO) {
-    return { valid: false, reason: 'thickness_too_thick', fallbackThickness: DEFAULT_WALL_THICKNESS };
+    return { valid: false, reason: 'thickness_too_thick', fallbackThickness };
   }
 
   // Check that shell pieces wouldn't overlap (2*thickness must be < each dim)
   if (2 * thickness >= profileWidth || 2 * thickness >= profileHeight) {
-    return { valid: false, reason: 'thickness_causes_overlap', fallbackThickness: DEFAULT_WALL_THICKNESS };
+    return { valid: false, reason: 'thickness_causes_overlap', fallbackThickness };
   }
 
   return { valid: true, thickness };
@@ -441,7 +467,7 @@ function decomposeMergedRuns(css) {
     const W = run.W;
     const H = run.H;
     const depth = run.mergedDepth;
-    if (!W || W <= 0.6 || !H || H <= 0.6 || depth <= 0.5) continue;
+    if (!W || W < 0.10 || !H || H < 0.10 || depth <= 0.1) continue;
 
     // R3: Use stable frame builder instead of ad-hoc construction
     const startPoint = vecAdd(run.mergedOrigin, vecScale(run.mergedAxis, -depth / 2));
@@ -458,14 +484,17 @@ function decomposeMergedRuns(css) {
     const side = frame.lateral;
     const up = frame.up;
 
-    // R2: Thickness validation
-    let t = DEFAULT_WALL_THICKNESS;
-    let thicknessBasis = 'DEFAULT';
-    let usedDefaultThickness = true;
-    const thicknessCheck = validateShellThickness(t, W, H);
+    // R2: Thickness — derive from profile dimensions and material rather than using a fixed constant
+    const _runElem = { geometry: { profile: { width: W, height: H } }, properties: { material: run.material?.name } };
+    let t = shellThicknessFromProfile(_runElem, css.facilityMeta ?? css.metadata?.facilityMeta ?? null);
+    let thicknessBasis = 'DERIVED';
+    let usedDefaultThickness = false;
+    const thicknessCheck = validateShellThickness(t, W, H, _runElem, css.facilityMeta ?? null);
     if (!thicknessCheck.valid) {
       t = thicknessCheck.fallbackThickness;
       thicknessBasis = 'SANITY_FALLBACK';
+      console.log(`decomposeMergedRuns: thickness sanity fallback for run ${run.id} `
+        + `(${thicknessCheck.reason}): t=${t.toFixed(4)}m`);
     }
     const slabW = W - 2 * t;
     const parentKey = run.segKeys[0]; // first segment key for backward compat
@@ -586,9 +615,9 @@ function decomposeMergedRuns(css) {
     const W = profile.width || 0;
     const H = profile.height || 0;
     const depth = geometry.depth || 0;
-    if (W <= 0.6 || H <= 0.6 || depth <= 0.5) continue;
+    if (W < 0.10 || H < 0.10 || depth <= 0.1) continue;
 
-    const voidT = DEFAULT_WALL_THICKNESS;
+    const voidT = deriveThickness(W, H, seg.properties?.material);
     const innerW = W - 2 * voidT;
     const innerH = H - 2 * voidT;
     if (innerW <= 0.1 || innerH <= 0.1) continue;
@@ -648,9 +677,9 @@ function decomposeMergedRuns(css) {
         derivedFromBranch: parentKey,
         shellPiece: 'VOID',
         decompositionMethod: 'skeleton_first_v1',
-        shellThickness_m: DEFAULT_WALL_THICKNESS,
-        shellThicknessBasis: 'DEFAULT',
-        usedDefaultThickness: true,
+        shellThickness_m: voidT,
+        shellThicknessBasis: 'DERIVED',
+        usedDefaultThickness: false,
         entry_node: seg.properties?.entry_node,
         exit_node: seg.properties?.exit_node,
         branchClass: 'STRUCTURAL'
@@ -913,7 +942,9 @@ function generateJunctionFills(css) {
   if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
 
   const { nodes } = css.skeleton;
-  const WALL_THICKNESS = DEFAULT_WALL_THICKNESS;
+  // Thickness is derived per-element from profile dimensions; this is a working default
+  // for fill geometry that doesn't yet have a profile assigned.
+  const WALL_THICKNESS = deriveThickness(2.0, 2.0);
   const GAP_THRESHOLD = 0.05;
   const FILL_MARGIN = 0.05;
   const fillElements = [];
@@ -1162,11 +1193,14 @@ function decomposeTunnelShell(css) {
       if (!elem.properties) elem.properties = {};
       elem.properties.decompositionMethod = 'SEGMENT_FALLBACK';
       elem.properties.fallbackReasons = eligibility.reasons;
-      elem.properties.shellThicknessBasis = 'DEFAULT';
-      elem.properties.shellThickness_m = DEFAULT_WALL_THICKNESS;
+      const _fbW = elem.geometry?.profile?.width || 1;
+      const _fbH = elem.geometry?.profile?.height || 1;
+      const _fbT = deriveThickness(_fbW, _fbH, elem.properties?.material);
+      elem.properties.shellThicknessBasis = 'DERIVED';
+      elem.properties.shellThickness_m = _fbT;
       elem.properties.shellMode = 'HOLLOW_PROFILE';
       if (elem.geometry?.profile) {
-        elem.geometry.profile.wallThickness = DEFAULT_WALL_THICKNESS;
+        elem.geometry.profile.wallThickness = _fbT;
       }
       // Lower confidence for fallback elements
       elem.confidence = Math.min(elem.confidence || 0.7, 0.45);
@@ -1206,10 +1240,12 @@ function decomposeTunnelShell(css) {
     let approximationType = null;
 
     // ---- R2: Determine thickness ----
-    // Prefer explicit thickness data from properties; fall back to default only when needed
-    let WALL_THICKNESS = DEFAULT_WALL_THICKNESS;
-    let thicknessBasis = 'DEFAULT';
-    let usedDefaultThickness = true;
+    // Prefer explicit thickness data from properties; derive from profile if absent.
+    const _elemW = elem.geometry?.profile?.width || 1;
+    const _elemH = elem.geometry?.profile?.height || 1;
+    let WALL_THICKNESS = deriveThickness(_elemW, _elemH, props.material);
+    let thicknessBasis = 'DERIVED';
+    let usedDefaultThickness = false;
 
     const explicitThickness = props.wallThickness || props.shellThickness ||
       props.liningThickness || elem.geometry?.profile?.thickness;
@@ -1341,8 +1377,8 @@ function decomposeTunnelShell(css) {
       key, cx: o.x, cy: o.y, cz: o.z,
       ax: bx, ay: by, az: bz,
       halfDepth: depth / 2,
-      innerW: (seg.geometry?.profile?.width || 5) - 2 * (seg.properties?.shellThickness_m || DEFAULT_WALL_THICKNESS),
-      innerH: (seg.geometry?.profile?.height || 5) - 2 * (seg.properties?.shellThickness_m || DEFAULT_WALL_THICKNESS)
+      innerW: (seg.geometry?.profile?.width || 5) - 2 * (seg.properties?.shellThickness_m || deriveThickness(seg.geometry?.profile?.width || 5, seg.geometry?.profile?.height || 5, seg.properties?.material)),
+      innerH: (seg.geometry?.profile?.height || 5) - 2 * (seg.properties?.shellThickness_m || deriveThickness(seg.geometry?.profile?.width || 5, seg.geometry?.profile?.height || 5, seg.properties?.material))
     });
   }
 
@@ -1455,7 +1491,7 @@ function decomposeTunnelShell(css) {
     infrastructureLinkedCount,
     noSegmentAvailableCount,
     segmentCenterlineCount: segmentCenterlines.length,
-    wallThickness_m: DEFAULT_WALL_THICKNESS,
+    wallThickness_m: 'derived-per-element',
     method: 'semantic_annotation_v1',
     placementCorrectedCount
   };
@@ -1473,7 +1509,8 @@ function auditShellCompleteness(css) {
   if (!css.elements || css.elements.length === 0) return;
   if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
 
-  const WALL_THICKNESS = DEFAULT_WALL_THICKNESS;
+  // Thickness derived per-segment below; this default is only for reconstructed missing pieces
+  // and will be replaced by the segment's own shellThickness_m when available.
   const REQUIRED_ROLES = ['LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF'];
 
   const parentSegments = css.elements.filter(e =>
@@ -2378,13 +2415,13 @@ function getTunnelBearing(seg) {
 
 function generateJunctionTransitions(css) {
   if (!css.elements || css.elements.length === 0) return;
-  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
-  // F6: Skip if no shell pieces exist
-  const hasShells = css.elements.some(e => e.properties?.shellPiece && e.properties.shellPiece !== 'VOID');
-  if (!hasShells) { console.log('generateJunctionTransitions: no shell pieces, skipping'); return; }
-
-  const WALL_THICKNESS = DEFAULT_WALL_THICKNESS;
+  // Data-driven: check for actual TUNNEL_SEGMENT elements rather than relying on domain string
+  if (!css.elements.some(e => e.type === 'TUNNEL_SEGMENT')) return;
   const parentSegments = css.elements.filter(e => e.type === 'TUNNEL_SEGMENT' && e.properties?.branchClass === 'STRUCTURAL');
+  // In v2 (skeleton-first), topology annotates TUNNEL_SEGMENT elements — no shell piece sub-elements are emitted.
+  // Guard on structural segments instead of shell pieces so junction fills are generated in both v1 and v2.
+  if (parentSegments.length === 0) { console.log('generateJunctionTransitions: no structural segments, skipping'); return; }
+  // Legacy v1 shell pieces (empty in v2 — kept for compatibility)
   const shellPieces = css.elements.filter(e => e.properties?.shellPiece && e.properties?.derivedFromBranch);
 
   // Build node adjacency
@@ -2564,11 +2601,14 @@ function generateJunctionTransitions(css) {
     };
     transitionElements.push(plugElem);
 
-    // Conditionally generate companion void
-    const hasVoids = branchEndpoints.some(b => !!voidByBranch[b.key]);
-    const needsVoid = hasVoids || maxGap > 0.5;
+    // Generate companion void — in v2 (skeleton-first), structural junctions are always hollow
+    // so the void is always needed. In v1, we check for legacy VOID shell pieces or gap size.
+    const hasVoidsByLegacy = branchEndpoints.some(b => !!voidByBranch[b.key]);
+    const hasStructuralBranch = branchEndpoints.some(b => segByKey[b.key]?.properties?.branchClass === 'STRUCTURAL');
+    const needsVoid = hasVoidsByLegacy || maxGap > 0.5 || hasStructuralBranch;
 
     if (needsVoid) {
+      const WALL_THICKNESS = deriveThickness(jW, jH);
       const innerW = jW - 2 * WALL_THICKNESS;
       const innerH = jH - 2 * WALL_THICKNESS;
       if (innerW > 0.1 && innerH > 0.1) {

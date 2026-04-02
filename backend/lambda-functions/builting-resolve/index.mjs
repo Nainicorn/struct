@@ -10,11 +10,12 @@
  * Transform Lambda still reads CSS — this Lambda writes new artifacts in parallel.
  */
 
-import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { normalizeClaims } from './normalize.mjs';
 import { resolveClaims } from './resolve.mjs';
 import { assignIdentities } from './identity.mjs';
 import { buildCanonicalObservedEnvelope } from './schemas.mjs';
+import { validateSpatialSchema } from './spatialValidation.mjs';
 
 const s3 = new S3Client({});
 const DATA_BUCKET = process.env.DATA_BUCKET || 'builting-data';
@@ -30,6 +31,27 @@ export const handler = async (event) => {
   const { claimsS3Key, userId, renderId, bucket } = event;
   const dataBucket = bucket || DATA_BUCKET;
   const revision = event.renderRevision || 1;
+
+  // Idempotency: if output artifacts already exist, return cached result
+  const prefix = `uploads/${userId}/${renderId}/pipeline/v${revision}`;
+  const idempotencyKey = `${prefix}/normalized_claims.json`;
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: dataBucket, Key: idempotencyKey }));
+    console.log(`[idempotency] normalized_claims.json exists — returning cached result`);
+    const reportObj = await s3.send(new GetObjectCommand({ Bucket: dataBucket, Key: `${prefix}/resolution_report.json` }));
+    const report = JSON.parse(await reportObj.Body.transformToString());
+    return {
+      normalizedClaimsS3Key: `${prefix}/normalized_claims.json`,
+      canonicalObservedS3Key: `${prefix}/canonical_observed.json`,
+      resolutionReportS3Key: `${prefix}/resolution_report.json`,
+      identityMapS3Key: `${prefix}/identity_map.json`,
+      observationCount: report.summary?.observationsProduced || 0,
+      rejectedCount: report.droppedClaims?.length || 0,
+      ambiguousCount: report.summary?.ambiguousGroups || 0,
+    };
+  } catch (err) {
+    if (err.name !== 'NotFound' && err.$metadata?.httpStatusCode !== 404) throw err;
+  }
 
   // No-op if claims weren't produced (legacy renders before Phase 1)
   if (!claimsS3Key) {
@@ -61,10 +83,13 @@ export const handler = async (event) => {
     // 2. Normalize claims
     const normalizedDoc = normalizeClaims(claimsDoc);
 
-    // 3. Resolve claims → observations + report
-    const { observations, resolutionReport } = resolveClaims(normalizedDoc);
+    // 3. Spatial schema validation — after normalization, before resolve
+    const { validatedDoc, validationSummary } = validateSpatialSchema(normalizedDoc);
 
-    // 4. Assign identities
+    // 4. Resolve claims → observations + report
+    const { observations, resolutionReport } = resolveClaims(validatedDoc);
+
+    // 5. Assign identities
     const { identityMap, observationsWithIds } = assignIdentities(observations, { revision });
 
     // Update resolution report with identity assignments
@@ -78,28 +103,31 @@ export const handler = async (event) => {
       newAssignment: true,
     }));
 
-    // 5. Build canonical_observed envelope
-    const facility = normalizedDoc.facilityMeta ? {
-      name: normalizedDoc.facilityMeta.name,
-      type: normalizedDoc.facilityMeta.type,
-      description: normalizedDoc.facilityMeta.description,
-      units: normalizedDoc.facilityMeta.units || 'M',
-      origin: normalizedDoc.facilityMeta.origin || { x: 0, y: 0, z: 0 },
-      axes: normalizedDoc.facilityMeta.axes || 'RIGHT_HANDED_Z_UP',
+    // 6. Build canonical_observed envelope (validatedDoc carries the validated claims)
+    const facility = validatedDoc.facilityMeta ? {
+      name: validatedDoc.facilityMeta.name,
+      type: validatedDoc.facilityMeta.type,
+      description: validatedDoc.facilityMeta.description,
+      units: validatedDoc.facilityMeta.units || 'M',
+      origin: validatedDoc.facilityMeta.origin || { x: 0, y: 0, z: 0 },
+      axes: validatedDoc.facilityMeta.axes || 'RIGHT_HANDED_Z_UP',
     } : null;
 
-    const canonicalObserved = buildCanonicalObservedEnvelope(
-      observationsWithIds,
-      normalizedDoc.domain,
-      facility,
-      {
-        claimsConsumed: normalizedDoc.claims?.length || 0,
-        observationsProduced: observationsWithIds.length,
-        rejectedClaims: resolutionReport.droppedClaims.length,
-      }
-    );
+    const canonicalObserved = {
+      ...buildCanonicalObservedEnvelope(
+        observationsWithIds,
+        validatedDoc.domain,
+        facility,
+        {
+          claimsConsumed: validatedDoc.claims?.length || 0,
+          observationsProduced: observationsWithIds.length,
+          rejectedClaims: resolutionReport.droppedClaims.length,
+        }
+      ),
+      validation_summary: validationSummary,
+    };
 
-    // 6. Write all 4 artifacts to S3 in parallel
+    // 7. Write all 4 artifacts to S3 in parallel
     const prefix = `uploads/${userId}/${renderId}/pipeline/v${revision}`;
     const keys = {
       normalizedClaims: `${prefix}/normalized_claims.json`,
@@ -109,7 +137,7 @@ export const handler = async (event) => {
     };
 
     await Promise.all([
-      writeToS3(dataBucket, keys.normalizedClaims, normalizedDoc),
+      writeToS3(dataBucket, keys.normalizedClaims, validatedDoc),
       writeToS3(dataBucket, keys.canonicalObserved, canonicalObserved),
       writeToS3(dataBucket, keys.resolutionReport, resolutionReport),
       writeToS3(dataBucket, keys.identityMap, identityMap),
