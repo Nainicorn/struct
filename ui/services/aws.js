@@ -27,11 +27,15 @@ const aws = {
       ...options,
     });
 
-    // Session expired or token invalid — clear cookie and redirect to login
+    // 401 on the auth endpoint = wrong credentials, not session expiry
     if (response.status === 401) {
-      cookieService.delete('builting-user');
-      window.location.href = '/';
-      throw new Error('Session expired. Please log in again.');
+      const isAuthEndpoint = endpoint === '/api/auth';
+      const errBody = await response.json().catch(() => ({}));
+      if (!isAuthEndpoint) {
+        cookieService.delete('builting-user');
+        window.location.href = '/';
+      }
+      throw new Error(errBody.error || errBody.message || (isAuthEndpoint ? 'Invalid credentials.' : 'Session expired. Please log in again.'));
     }
 
     if (!response.ok) {

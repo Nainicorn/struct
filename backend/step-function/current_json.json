@@ -7,7 +7,7 @@
       "Resource": "arn:aws-us-gov:lambda:us-gov-east-1:008368474482:function:builting-read",
       "ResultPath": "$.metadata",
       "Next": "ExtractBuildingSpec",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2, "MaxDelaySeconds": 30, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
@@ -25,7 +25,7 @@
       },
       "ResultPath": "$.specResult",
       "Next": "ResolveClaims",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 2, "MaxDelaySeconds": 60, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
@@ -41,7 +41,7 @@
       },
       "ResultPath": "$.resolveResult",
       "Next": "TopologyEngine",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2, "MaxDelaySeconds": 30, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
@@ -58,7 +58,7 @@
       },
       "ResultPath": "$.topologyResult",
       "Next": "GenerateIFC",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 1, "BackoffRate": 2 }],
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 2, "MaxDelaySeconds": 60, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
@@ -73,7 +73,7 @@
       },
       "ResultPath": "$.ifcResult",
       "Next": "StoreIFC",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }],
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 2, "MaxDelaySeconds": 60, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "HandleFailure" }]
     },
 
@@ -111,7 +111,7 @@
         "exportFiles.$": "$.ifcResult.exportFiles"
       },
       "Next": "SeedSensors",
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2, "MaxDelaySeconds": 30, "JitterStrategy": "FULL" }]
     },
 
     "SeedSensors": {
@@ -124,7 +124,7 @@
       },
       "ResultPath": "$.sensorResult",
       "End": true,
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 1, "BackoffRate": 2 }],
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 1, "BackoffRate": 2, "MaxDelaySeconds": 30, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.sensorError", "Next": "SensorSeedFailed" }]
     },
 
@@ -144,7 +144,7 @@
         "error.$": "$.error"
       },
       "End": true,
-      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2 }]
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2, "MaxDelaySeconds": 30, "JitterStrategy": "FULL" }]
     }
   }
 }

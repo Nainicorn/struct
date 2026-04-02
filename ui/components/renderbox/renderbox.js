@@ -155,6 +155,16 @@ const renderbox = {
             // Load via ArrayBuffer (xeokit will handle it directly without HTTP fetch)
             await ifcViewer.loadIFC(arrayBuffer);
 
+            // Race-condition guard: if telemetry was toggled on before the model finished
+            // loading, the overlay callback would have bailed out in applyTelemetryOverlay.
+            // Now that the model is ready, re-apply with the most recent sensor data.
+            if (this._telemetryActive && this._currentSensors && this._currentSensors.length > 0) {
+                const typeSelect = this.element.querySelector('.__renderbox-telemetry-type');
+                const filterType = typeSelect?.value || 'all';
+                console.log('[Telemetry] Model loaded — re-applying overlay with cached sensor data');
+                ifcViewer.applyTelemetryOverlay(this._currentSensors, filterType);
+            }
+
             // Resize viewer after layout change and focus canvas for interaction
             ifcViewer.resize();
             const canvas = this.element.querySelector('#ifc-viewer-canvas');
@@ -240,6 +250,7 @@ const renderbox = {
                 this._updateInputLabel('Refinement');
                 this._clearDescriptionInput();
 
+                this._hideTelemetryControls(); // Reset any active telemetry from previous render
                 this._showTelemetryControls();
                 this._updateExportFormats(render);
 
@@ -498,38 +509,136 @@ const renderbox = {
     },
 
     /**
-     * Bind element pick events from IFC viewer — show/hide element info chip
+     * Bind element pick events from IFC viewer — show/hide element metadata panel
      */
     _bindPickEvents() {
         // Remove any previously bound pick listeners to avoid duplicates
         if (this._onElementPicked) document.removeEventListener('elementPicked', this._onElementPicked);
         if (this._onElementPickCleared) document.removeEventListener('elementPickCleared', this._onElementPickCleared);
 
-        const chip = this.element.querySelector('.__renderbox-element-chip');
-        const chipType = this.element.querySelector('.__renderbox-element-chip-type');
-        const chipName = this.element.querySelector('.__renderbox-element-chip-name');
-        const chipId = this.element.querySelector('.__renderbox-element-chip-id');
+        const panel     = this.element.querySelector('.__renderbox-element-panel');
+        const panelType = this.element.querySelector('.__renderbox-panel-type-badge');
+        const panelName = this.element.querySelector('.__renderbox-panel-name');
+        const closeBtn  = this.element.querySelector('.__renderbox-panel-close');
 
-        this._onElementPicked = (e) => {
-            if (!chip || !chipType || !chipName) return;
+        // Bind close button exactly once — guard against re-binding on repeated IFC loads
+        if (closeBtn && !closeBtn.dataset.closeBound) {
+            closeBtn.dataset.closeBound = '1';
+            closeBtn.addEventListener('click', () => {
+                if (panel) panel.classList.add('hidden');
+            });
+        }
+
+        // Provenance detection: pset names or property keys that signal source/confidence data
+        const PROVENANCE_PSET_RE = /source|provenance|evidence|confidence|builting/i;
+        const PROVENANCE_PROP_RE = /^(confidence|evidence_quote|source_file|source_page)$/i;
+
+        const esc = (s) => String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+        const buildRow = (key, val) =>
+            `<div class="__renderbox-panel-row">` +
+            `<span class="__renderbox-panel-row-key">${esc(key)}</span>` +
+            `<span class="__renderbox-panel-row-val">${esc(val)}</span>` +
+            `</div>`;
+
+        this._onElementPicked = async (e) => {
+            if (!panel || !panelType || !panelName) return;
             const { type, name, id } = e.detail;
-            // Readable type: IfcWallStandardCase → Wall Standard Case
+
+            // Show panel immediately with header — body fills asynchronously
             const readableType = type.replace(/^Ifc/, '').replace(/([a-z])([A-Z])/g, '$1 $2');
-            chipType.textContent = readableType;
-            // Show name only if meaningful
+            panelType.textContent = readableType;
             const readableName = name && name.length < 80 && !name.startsWith('#') ? name : '';
-            chipName.textContent = readableName;
-            chipName.style.display = readableName ? 'block' : 'none';
-            // Show IFC class as a subtle label
-            if (chipId) {
-                chipId.textContent = type;
-                chipId.style.display = 'block';
+            panelName.textContent = readableName || readableType;
+            panel.classList.remove('hidden');
+
+            // Clear all sections while fetch is in flight
+            const geoEl  = panel.querySelector('.__renderbox-panel-geometry');
+            const relEl  = panel.querySelector('.__renderbox-panel-relationships');
+            const provEl = panel.querySelector('.__renderbox-panel-provenance');
+            const psetsEl = panel.querySelector('.__renderbox-panel-psets');
+            [geoEl, relEl, provEl, psetsEl].forEach(el => {
+                if (el) { el.innerHTML = ''; el.classList.remove('has-separator'); }
+            });
+
+            try {
+                const result = await ifcViewer.getElementProperties(id);
+                if (!result) return;
+
+                const { groups, geometry, relationships } = result;
+
+                // ── Geometry ──────────────────────────────────────────────
+                if (geoEl && geometry) {
+                    geoEl.innerHTML =
+                        `<div class="__renderbox-panel-section-label">Geometry</div>` +
+                        buildRow('Width',  geometry.width  + ' m') +
+                        buildRow('Depth',  geometry.depth  + ' m') +
+                        buildRow('Height', geometry.height + ' m') +
+                        buildRow('Center', geometry.center + ' m');
+                }
+
+                // ── Relationships ─────────────────────────────────────────
+                if (relEl && relationships && relationships.length > 0) {
+                    relEl.innerHTML =
+                        `<div class="__renderbox-panel-section-label">Relationships</div>` +
+                        relationships.map(r => buildRow(r.name, r.value)).join('');
+                }
+
+                // ── Partition psets: provenance vs regular ────────────────
+                const provGroups = [], regularGroups = [];
+                for (const group of (groups || [])) {
+                    if (PROVENANCE_PSET_RE.test(group.name)) {
+                        provGroups.push(group);
+                    } else {
+                        const prov = group.props.filter(p => PROVENANCE_PROP_RE.test(p.name));
+                        const norm = group.props.filter(p => !PROVENANCE_PROP_RE.test(p.name));
+                        if (prov.length > 0) provGroups.push({ name: group.name, props: prov });
+                        if (norm.length > 0) regularGroups.push({ name: group.name, props: norm });
+                    }
+                }
+
+                // ── Source Provenance ─────────────────────────────────────
+                if (provEl && provGroups.length > 0) {
+                    let html = `<div class="__renderbox-panel-section-label">Source Provenance</div>`;
+                    for (const g of provGroups) {
+                        const rows = g.props.map(p => buildRow(p.name, p.value)).join('');
+                        if (!rows) continue;
+                        html += `<div class="__renderbox-panel-pset-group">` +
+                            `<div class="__renderbox-panel-pset-name">${esc(g.name)}</div>` +
+                            rows + `</div>`;
+                    }
+                    provEl.innerHTML = html;
+                }
+
+                // ── Property Sets ─────────────────────────────────────────
+                if (psetsEl && regularGroups.length > 0) {
+                    let html = `<div class="__renderbox-panel-section-label">Properties</div>`;
+                    for (const g of regularGroups) {
+                        const rows = g.props.map(p => buildRow(p.name, p.value)).join('');
+                        if (!rows) continue;
+                        html += `<div class="__renderbox-panel-pset-group">` +
+                            `<div class="__renderbox-panel-pset-name">${esc(g.name)}</div>` +
+                            rows + `</div>`;
+                    }
+                    psetsEl.innerHTML = html;
+                }
+
+                // Add visual separators between populated sections
+                let firstFilled = true;
+                for (const el of [geoEl, relEl, provEl, psetsEl]) {
+                    if (!el || !el.innerHTML) continue;
+                    if (!firstFilled) el.classList.add('has-separator');
+                    firstFilled = false;
+                }
+
+            } catch (_) {
+                // Non-fatal — panel still shows type/name in header
             }
-            chip.classList.remove('hidden');
         };
 
         this._onElementPickCleared = () => {
-            if (chip) chip.classList.add('hidden');
+            if (panel) panel.classList.add('hidden');
         };
 
         document.addEventListener('elementPicked', this._onElementPicked);
@@ -1010,6 +1119,7 @@ const renderbox = {
             this.currentRenderTitle = render.ai_generated_title || render.title || null;
             this._updateInputPlaceholder('Describe refinements to apply...');
             this._updateInputLabel('Refinement');
+            this._hideTelemetryControls(); // Reset any active telemetry from previous render
             this._showTelemetryControls();
             this._updateExportFormats(render);
 

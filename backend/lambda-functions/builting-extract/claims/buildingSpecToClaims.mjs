@@ -41,7 +41,8 @@ export function buildingSpecToClaims(css, sourceFiles = [], options = {}) {
       extractionMethod,
       coordSource,
       {
-        excerpt: el.metadata?.evidence?.sourceExcerpt || null,
+        excerpt: el.evidence_quote || el.metadata?.evidence?.sourceExcerpt || null,
+        page: el.source_page ?? null,
       }
     ));
 
