@@ -96,3 +96,32 @@
 - Format-aware download endpoint (`?format=ifc|glb|obj`)
 - Frontend download dropdown with all available formats
 - Conversion guard: skipped when >50k triangles or >500 products
+
+## Universal Pipeline Refactor — Data-Driven Engineering (v2)
+
+**Goal:** Eliminate all hardcoded constants and replace with physics/engineering-derived values. Pipeline works for any structure type (tunnel, hospital, office, warehouse, etc.).
+
+### generate lambda (`lambda_function.py`)
+- Added 5 engineering utility functions: `derive_shell_thickness`, `derive_slab_thickness`, `derive_storey_height`, `derive_duct_profile`, `derive_junction_overlap`
+- Replaced 8 hardcodes: `max_radius=0.781` (VentSim-specific), duct fallback `1.2×0.8`, `JUNCTION_OVERLAP_M=0.3`, `END_CAP=0.5`, slab depth cap `max_storey_h×0.15`, duct AR `max_side×0.6`, `wt=0.4` shell thickness, `storey_height_map` default 5.0m
+- Fixed 4 bugs: shaft_ref empty dict → direction fallback, tunnel_segments_index KeyError guards, `is_placeholder` tolerance widened to 0.05, storey height uses `derive_storey_height(occupancy_type)`
+- Engineering basis: concrete shell 8% rule, ASHRAE duct AR ≤4:1/6:1, RC slab span/20-30, junction overlap tan(turn/2) formula
+
+### topology-engine
+- **shared.mjs**: Added 6 exported math utilities: `medianSegmentLength`, `structureZRange`, `shellThicknessFromProfile`, `junctionOverlapFromProfile`, `slabThicknessFromSpan`, `storeyHeightFromOccupancy`
+- **vsm-bridge.mjs**: `MAX_BRIDGE_LEN` derived from median segment length × 1.5; `UPPER_Z_THRESHOLD` derived from z-range × 0.15; NaN guard on bridge direction; shell thickness from profile
+- **tunnel-shell.mjs**: Removed `DEFAULT_WALL_THICKNESS` constant — all thickness via `deriveThickness(W,H)`; min-dimension thresholds data-driven (`< 0.1m` not `<= 0.6m`); `generateJunctionTransitions` uses per-junction derived thickness; domain string check replaced with element-type check
+- **building-envelope.mjs**: All 9× `domain === 'TUNNEL'` string checks → `hasTunnelSegments(css)` (data-driven, cached); storey height default from `storeyHeightFromOccupancy(occupancy)`
+- **rule-assertions.mjs**: Storey elevation null fix (`!== undefined && !== null`); wall gap check `console.warn`; domain check → element-type check
+- **index.mjs**: `hasTunnelSegs` boolean replaces all `domain === 'TUNNEL'` pipeline branching; `annotateSweepGeometry` reads `facilityMeta.upAxis` for default axis; depth fallback reads `facilityMeta.typicalElementDepth` before 1.0m constant
+
+### extract lambda (`index.mjs`)
+- Map key collision fix in `buildRefinementReport`: `e.id || e.element_key || e.css_id || \`anon_${i}\``
+- DWG warning: `downloadFile` emits `console.warn` for `.dwg` files explaining DWG ≠ DXF and LLM-vision-only fallback
+- Richer extraction prompts: `EXTRACTION_SYSTEM_PROMPT` gains "ENGINEERING DERIVATION FIELDS" section instructing Claude to extract structural system type (masonry/concrete/steel/timber), occupancy/function, per-storey heights, wall types (isExternal/isLoadBearing/material), typical element depth, structural cross-section dimensions
+- `EXTRACTION_TOOL` schema: added `structuralSystem`, `occupancy`, `typicalElementDepth_m` to the structural section; `isLoadBearing`, `isExternal`, `material` to interior_walls and perimeter_walls items
+
+### Deployed
+- topology-engine: `node build-zip.mjs` → `builting-topology-engine.zip` (136KB) → AWS Lambda
+- extract: `npm run build` (esbuild, 5.9MB) → targeted zip with sharp native binaries (16MB) → AWS Lambda
+- generate: Docker → ECR (deployed in prior session)
