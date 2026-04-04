@@ -260,10 +260,51 @@ export function normalizeGeometry(css) {
           v.z = clamp(safe(v.z) + shiftZ, MAX_COORD);
         }
       }
+      if (elem.geometry.pathPoints) {
+        for (const p of elem.geometry.pathPoints) {
+          p.x = clamp(safe(p.x) + shiftX, MAX_COORD);
+          p.y = clamp(safe(p.y) + shiftY, MAX_COORD);
+          p.z = clamp(safe(p.z) + shiftZ, MAX_COORD);
+        }
+      }
     }
   }
 
   if (css.facility) css.facility.origin = { x: 0, y: 0, z: 0 };
+
+  // Shift storey/segment elevations by the same Z-offset so they stay consistent
+  // with the shifted element Z-coordinates.
+  if (shiftZ !== 0 && css.levelsOrSegments) {
+    for (const level of css.levelsOrSegments) {
+      if (level.elevation_m !== undefined) {
+        level.elevation_m = level.elevation_m + shiftZ;
+      }
+    }
+  }
+
+  // Normalize wall depths to storey height.
+  // The LLM sometimes sets geometry.depth equal to the wall's own length (profile.width)
+  // rather than the storey floor-to-floor height — catch and correct that here.
+  const levelHeightMap = {};
+  for (const level of (css.levelsOrSegments || [])) {
+    if (level.height_m > 0) levelHeightMap[level.id] = level.height_m;
+  }
+  if (Object.keys(levelHeightMap).length > 0) {
+    for (const elem of css.elements) {
+      if ((elem.type || '').toUpperCase() !== 'WALL') continue;
+      const geom = elem.geometry;
+      if (!geom || geom.depth === undefined) continue;
+      const levelHeight = levelHeightMap[elem.container];
+      if (!levelHeight) continue;
+      const profileWidth = geom.profile?.width || 0;
+      const depthEqualsLength = profileWidth > 0 && Math.abs(geom.depth - profileWidth) < 0.02;
+      const depthTooShort = geom.depth < 0.8;
+      const depthTooTall = geom.depth > levelHeight * 1.6;
+      if (depthEqualsLength || depthTooShort || depthTooTall) {
+        geom.depth = levelHeight;
+      }
+    }
+  }
 
   // Recalculate bbox
   let nMinX = Infinity, nMinY = Infinity, nMinZ = Infinity;

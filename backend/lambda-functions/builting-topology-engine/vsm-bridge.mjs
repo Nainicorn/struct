@@ -73,12 +73,12 @@ export function splitTunnelSubSegments(css) {
       id:          upperSegId,
       type:        'SEGMENT',
       name:        'Upper Passages',
-      elevation_m: Math.round(maxUpperZ * 100) / 100,
+      elevation_m: 0,
       // height_m: inherit from main segment; no occupancy-based default since tunnels
       // are single-level — upper passages have the same headroom as the main bore.
       height_m:    mainSeg.height_m ?? null,
     });
-    console.log(`splitTunnelSubSegments: added "${upperSegId}" at elevation_m=${Math.round(maxUpperZ * 100) / 100}`);
+    console.log(`splitTunnelSubSegments: added "${upperSegId}" at elevation_m=0 (maxUpperZ was ${Math.round(maxUpperZ * 100) / 100})`);
   }
 
   // Reassign containers for elements whose origin is in the upper zone
@@ -128,6 +128,10 @@ export function bridgeVSMNodes(css) {
   if (!css.elements) return;
 
   const COINCIDENCE_TOL = 0.05;   // 50 mm — already touching, skip
+  // MIN_BRIDGE_LEN: gaps shorter than this are floating-point jitter, not real structural gaps.
+  // The generate lambda's END_CAP overlap covers these; inserting a sub-0.5m bridge
+  // creates degenerate geometry that fails the "depth < 0.5m" validation contract.
+  const MIN_BRIDGE_LEN  = 0.5;    // 500 mm — below this, skip and let END_CAP handle it
   // MAX_BRIDGE_LEN: derived from median segment length × 1.5 so it scales with the structure.
   // A 5 m cap is suitable for a small mine; a large rail tunnel may have 50 m transition gaps.
   // Capped at 100 m to guard against clearly unconnected branches in sparse VSM models.
@@ -205,6 +209,14 @@ export function bridgeVSMNodes(css) {
         const gap = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
         if (gap < COINCIDENCE_TOL) continue;
+        if (gap < MIN_BRIDGE_LEN) {
+          // Sub-minimum gap: floating-point jitter between nearly-coincident endpoints.
+          // Inserting a bridge this short creates degenerate geometry. Skip — the
+          // generate lambda's END_CAP overlap (junction extension) covers the gap.
+          console.log(`bridgeVSMNodes: ${exitEp.seg.id}→${entryEp.seg.id} gap=${gap.toFixed(3)}m < MIN_BRIDGE_LEN, skipping (END_CAP covers)`);
+          skippedGaps++;
+          continue;
+        }
         if (gap > MAX_BRIDGE_LEN) {
           console.warn(`bridgeVSMNodes: ${exitEp.seg.id}→${entryEp.seg.id} gap=${gap.toFixed(1)}m > ${MAX_BRIDGE_LEN}m, skipping`);
           skippedGaps++;
@@ -237,6 +249,24 @@ export function bridgeVSMNodes(css) {
           ? { ...exitProf }
           : { ...entryProf };
 
+        // Fix #2 — ensure profile has valid dimensions; undefined radius/width
+        // blocks IFC export entirely for the affected segments.
+        // Lookup order: profile field → properties.cross_section → 2.0m fallback.
+        const _getCrossDim = (seg) =>
+          seg.properties?.cross_section?.radius ||
+          (seg.properties?.cross_section?.hydraulic_diameter != null
+            ? seg.properties.cross_section.hydraulic_diameter / 2 : null) ||
+          seg.properties?.cross_section?.width ||
+          null;
+        if (profile.type === 'CIRCLE') {
+          if (!profile.radius) {
+            profile.radius = _getCrossDim(exitEp.seg) || _getCrossDim(entryEp.seg) || 2.0;
+          }
+        } else {
+          if (!profile.width)  profile.width  = _getCrossDim(exitEp.seg) || _getCrossDim(entryEp.seg) || 2.0;
+          if (!profile.height) profile.height = profile.width;
+        }
+
         // Normalised 3D direction (used by generate for extrusion axis)
         const nx = dx / gap, ny = dy / gap, nz = dz / gap;
         // Guard: gap > COINCIDENCE_TOL guarantees gap > 0 but floating-point edge
@@ -251,10 +281,13 @@ export function bridgeVSMNodes(css) {
         const bx   = hLen > 1e-6 ? dx / hLen : 1;
         const by   = hLen > 1e-6 ? dy / hLen : 0;
 
-        // Unique synthetic node IDs prevent G0.5 overlap-deduplication from
-        // collapsing multiple bridges sharing the same real node.
-        const bridgeIdx = bridges.length;
-        const bridgeId  = `bridge_${nodeId}_${bridgeIdx}`;
+        // Fix #3 — deterministic bridge ID: sort the two segment IDs so that
+        // bridge_A_B and bridge_B_A produce the same key, preventing duplicate
+        // bridge insertion when the same pair appears in both exit→entry orders.
+        const [segA, segB] = [exitEp.seg.id, entryEp.seg.id].sort();
+        const bridgeId = `bridge_${segA}_${segB}`;
+        // Skip if a bridge for this segment pair was already queued this pass
+        if (bridges.some(b => b.id === bridgeId)) continue;
 
         bridges.push({
           id:           bridgeId,
@@ -323,10 +356,26 @@ export function bridgeVSMNodes(css) {
     }
   }
 
-  if (bridges.length > 0) {
-    css.elements.push(...bridges);
+  // Position-based dedup: different node traversals can produce bridges at
+  // nearly the same 3D location via different node IDs. Round to 10cm grid.
+  const posIndex = new Map();
+  let posDuplicates = 0;
+  const dedupedBridges = bridges.filter(b => {
+    const o = b.placement?.origin ?? {};
+    const pk = `${Math.round((o.x ?? 0) * 10)}_${Math.round((o.y ?? 0) * 10)}_${Math.round((o.z ?? 0) * 10)}`;
+    if (posIndex.has(pk)) {
+      console.log(`bridgeVSMNodes: positional duplicate removed: ${b.id} at (${(o.x??0).toFixed(1)},${(o.y??0).toFixed(1)},${(o.z??0).toFixed(1)}) — kept ${posIndex.get(pk)}`);
+      posDuplicates++;
+      return false;
+    }
+    posIndex.set(pk, b.id);
+    return true;
+  });
+
+  if (dedupedBridges.length > 0) {
+    css.elements.push(...dedupedBridges);
   }
-  console.log(`bridgeVSMNodes: inserted ${bridges.length} bridge segments (${skippedGaps} exceeded 5m, ${skippedEquip} had equipment, ${skippedAngle} angle >45°)`);
+  console.log(`bridgeVSMNodes: inserted ${dedupedBridges.length} bridge segments (${posDuplicates} positional duplicates removed, ${skippedGaps} exceeded 5m, ${skippedEquip} had equipment, ${skippedAngle} angle >45°)`);
 }
 
 // ============================================================================

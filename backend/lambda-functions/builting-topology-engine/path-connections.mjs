@@ -12,16 +12,48 @@ const PATH_CONNECT_COMPATIBLE = {
 };
 
 /**
- * Compute connection angle between two wall elements at a shared node.
+ * Extract run direction from any element (WALL, TUNNEL_SEGMENT, etc.).
+ * For tunnel segments, axis={0,0,1} (extrusion up) and refDirection holds
+ * the horizontal run direction. Projects to XY plane and normalizes.
+ * Returns {x,y,z} or null.
+ */
+function getElementRunDirection(elem) {
+  // 1. refDirection — for CSS convention this IS the horizontal bearing.
+  //    Skip near-vertical vectors (world-up indicator) via horizontal magnitude check.
+  const ref = elem.placement?.refDirection;
+  if (ref) {
+    const rx = ref.x || 0, ry = ref.y || 0;
+    const hMag = Math.sqrt(rx * rx + ry * ry);
+    if (hMag > 0.1) return vecNormalize(ref); // full 3D — preserves slope for ramps
+  }
+
+  // 2. Try canonicalWallDirection (works for architectural walls via wallSide, profile, etc.)
+  const wallDir = canonicalWallDirection(elem);
+  if (wallDir) return wallDir;
+
+  // 3. Fallback: axis (VentSim convention: axis=bearing). Skip near-vertical.
+  const axis = elem.placement?.axis;
+  if (axis) {
+    const ax = axis.x || 0, ay = axis.y || 0;
+    const hMag = Math.sqrt(ax * ax + ay * ay);
+    if (hMag > 0.1) return vecNormalize(axis); // full 3D
+  }
+
+  return null;
+}
+
+/**
+ * Compute connection angle between two elements at a shared node.
  * Returns { angleDeg, connectionType } where connectionType is:
- *   'MITRE'   — angle 10°–170° (walls meet at an angle, bisector cut)
+ *   'MITRE'   — angle 10°–170° (elements meet at an angle, bisector cut)
  *   'BUTT'    — angle ~180° (collinear continuation, square end)
  *   'TEE'     — angle ~90° (perpendicular junction)
  * Falls back to null if direction cannot be determined.
  */
 function computeWallConnectionAngle(elemA, elemB) {
-  const dirA = canonicalWallDirection(elemA);
-  const dirB = canonicalWallDirection(elemB);
+  const dirA = getElementRunDirection(elemA);
+  const dirB = getElementRunDirection(elemB);
+  console.log('ANGLE_COMPUTE', JSON.stringify({ a: elemA?.element_key, b: elemB?.element_key, dirA, dirB }));
   if (!dirA || !dirB) return null;
 
   const nA = vecNormalize(dirA);
@@ -52,157 +84,163 @@ function buildPathConnections(css) {
   const SHELL_ROLES = ['LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF'];
   let pathConnectCount = 0;
 
-  // --- TUNNEL/LINEAR: Connect shell pieces at degree-2 nodes ---
+  // --- TUNNEL/LINEAR: Connect shell pieces at degree-2+ nodes (all pairs) ---
   for (const node of css.topology.nodes) {
-    if (node.degree !== 2) continue;
+    if (node.degree < 2) continue;
 
     const uniqueBranches = [...new Set(node.connectedBranches)];
-    if (uniqueBranches.length !== 2) continue;
+    if (uniqueBranches.length < 2) continue;
 
-    const [runA, runB] = uniqueBranches.map(b => runsByBranch.get(b)).filter(Boolean);
-    if (!runA || !runB) continue;
+    const runs = uniqueBranches.map(b => runsByBranch.get(b)).filter(Boolean);
+    if (runs.length < 2) continue;
 
-    // For linear topology (tunnel shells)
-    if (runA.shellPieces && runB.shellPieces) {
-      for (const role of SHELL_ROLES) {
-        const aKey = runA.shellPieces[role];
-        const bKey = runB.shellPieces[role];
-        if (!aKey || !bKey) continue;
+    // Iterate all pairs of runs at this node
+    for (let pi = 0; pi < runs.length; pi++) {
+      for (let pj = pi + 1; pj < runs.length; pj++) {
+        const runA = runs[pi];
+        const runB = runs[pj];
 
-        const a = elemByKey.get(aKey);
-        const b = elemByKey.get(bKey);
-        if (!a || !b) continue;
+        // For linear topology (tunnel shells)
+        if (runA.shellPieces && runB.shellPieces) {
+          for (const role of SHELL_ROLES) {
+            const aKey = runA.shellPieces[role];
+            const bKey = runB.shellPieces[role];
+            if (!aKey || !bKey) continue;
 
-        // Compatibility check
-        const aType = a.type || 'UNKNOWN';
-        const bType = b.type || 'UNKNOWN';
-        const compatible = PATH_CONNECT_COMPATIBLE[aType];
-        if (compatible && !compatible.has(bType)) continue;
+            const a = elemByKey.get(aKey);
+            const b = elemByKey.get(bKey);
+            if (!a || !b) continue;
 
-        // Proxy check for authoring_safe
-        if (exportProfile === 'authoring_safe') {
-          if ((aType === 'PROXY' && !a.properties?.isProxyFallback) ||
-              (bType === 'PROXY' && !b.properties?.isProxyFallback)) continue;
+            // Compatibility check
+            const aType = a.type || 'UNKNOWN';
+            const bType = b.type || 'UNKNOWN';
+            const compatible = PATH_CONNECT_COMPATIBLE[aType];
+            if (compatible && !compatible.has(bType)) continue;
+
+            // Proxy check for authoring_safe
+            if (exportProfile === 'authoring_safe') {
+              if ((aType === 'PROXY' && !a.properties?.isProxyFallback) ||
+                  (bType === 'PROXY' && !b.properties?.isProxyFallback)) continue;
+            }
+
+            const aEnd = inferRunEnd(runA, node.id);
+            const bEnd = inferRunEnd(runB, node.id);
+
+            // Compute bend angle between shell pieces so generate can apply mitre clips.
+            let shellConnectionAngle = null;
+            if (aType === 'WALL' && bType === 'WALL') {
+              shellConnectionAngle = computeWallConnectionAngle(a, b);
+            }
+
+            if (!a.relationships) a.relationships = [];
+            if (!b.relationships) b.relationships = [];
+
+            a.relationships.push({
+              type: 'PATH_CONNECTS',
+              target: b.element_key || b.id,
+              sourceInterface: { kind: aEnd, node: node.id },
+              targetInterface: { kind: bEnd, node: node.id },
+              role: 'STRUCTURAL_CONTINUITY',
+              metadata: { shellRole: role, sourceElementType: aType, targetElementType: bType, connectionAngle: shellConnectionAngle }
+            });
+
+            b.relationships.push({
+              type: 'PATH_CONNECTS',
+              target: a.element_key || a.id,
+              sourceInterface: { kind: bEnd, node: node.id },
+              targetInterface: { kind: aEnd, node: node.id },
+              role: 'STRUCTURAL_CONTINUITY',
+              metadata: { shellRole: role, sourceElementType: bType, targetElementType: aType, connectionAngle: shellConnectionAngle }
+            });
+
+            pathConnectCount++;
+          }
         }
 
-        const aEnd = inferRunEnd(runA, node.id);
-        const bEnd = inferRunEnd(runB, node.id);
+        // For tunnel topology: also connect the PARENT TUNNEL_SEGMENT elements (hollow manifold).
+        // Shell piece PATH_CONNECTS above are skipped in generate because shell pieces are replaced
+        // by a single hollow solid — so we must add connections on the parent elements too.
+        // Tunnel runs use branchKey (not elementKey) as their structural parent identifier.
+        if (runA.shellPieces && runB.shellPieces && runA.branchKey && runB.branchKey) {
+          const a = elemByKey.get(runA.branchKey);
+          const b = elemByKey.get(runB.branchKey);
+          if (a && b) {
+            const aType = a.type || 'UNKNOWN';
+            const bType = b.type || 'UNKNOWN';
+            const aEnd = inferRunEnd(runA, node.id);
+            const bEnd = inferRunEnd(runB, node.id);
+            // Connection angle between parent segments (may be null for non-wall types)
+            const parentAngle = (aType === 'WALL' || aType === 'TUNNEL_SEGMENT')
+              ? computeWallConnectionAngle(a, b)
+              : null;
 
-        // Compute bend angle between shell pieces so generate can apply mitre clips.
-        // Same lateral-direction comparison as architectural walls — angle magnitude is identical
-        // whether we compare run dirs or lateral dirs (they're perpendicular to each other).
-        let shellConnectionAngle = null;
-        if (aType === 'WALL' && bType === 'WALL') {
-          shellConnectionAngle = computeWallConnectionAngle(a, b);
+            if (!a.relationships) a.relationships = [];
+            if (!b.relationships) b.relationships = [];
+
+            a.relationships.push({
+              type: 'PATH_CONNECTS',
+              target: b.element_key || b.id,
+              sourceInterface: { kind: aEnd, node: node.id },
+              targetInterface: { kind: bEnd, node: node.id },
+              role: 'STRUCTURAL_CONTINUITY',
+              metadata: { shellRole: null, sourceElementType: aType, targetElementType: bType, connectionAngle: parentAngle }
+            });
+            b.relationships.push({
+              type: 'PATH_CONNECTS',
+              target: a.element_key || a.id,
+              sourceInterface: { kind: bEnd, node: node.id },
+              targetInterface: { kind: aEnd, node: node.id },
+              role: 'STRUCTURAL_CONTINUITY',
+              metadata: { shellRole: null, sourceElementType: bType, targetElementType: aType, connectionAngle: parentAngle }
+            });
+            pathConnectCount++;
+          }
         }
+        // For architectural topology (wall endpoints)
+        if (runA.elementKey && runB.elementKey && !runA.shellPieces?.LEFT_WALL) {
+          const a = elemByKey.get(runA.elementKey);
+          const b = elemByKey.get(runB.elementKey);
+          if (!a || !b) continue;
 
-        if (!a.relationships) a.relationships = [];
-        if (!b.relationships) b.relationships = [];
+          const aType = a.type || 'UNKNOWN';
+          const bType = b.type || 'UNKNOWN';
+          const compatible = PATH_CONNECT_COMPATIBLE[aType];
+          if (compatible && !compatible.has(bType)) continue;
 
-        a.relationships.push({
-          type: 'PATH_CONNECTS',
-          target: b.element_key || b.id,
-          sourceInterface: { kind: aEnd, node: node.id },
-          targetInterface: { kind: bEnd, node: node.id },
-          role: 'STRUCTURAL_CONTINUITY',
-          metadata: { shellRole: role, sourceElementType: aType, targetElementType: bType, connectionAngle: shellConnectionAngle }
-        });
+          const aEnd = inferRunEnd(runA, node.id);
+          const bEnd = inferRunEnd(runB, node.id);
 
-        b.relationships.push({
-          type: 'PATH_CONNECTS',
-          target: a.element_key || a.id,
-          sourceInterface: { kind: bEnd, node: node.id },
-          targetInterface: { kind: aEnd, node: node.id },
-          role: 'STRUCTURAL_CONTINUITY',
-          metadata: { shellRole: role, sourceElementType: bType, targetElementType: aType, connectionAngle: shellConnectionAngle }
-        });
+          // Compute connection angle for structural junctions (mitre/bevel/butt)
+          const ANGLED_TYPES = ['WALL', 'TUNNEL_SEGMENT', 'DUCT', 'PIPE'];
+          let connectionAngle = null;
+          if (ANGLED_TYPES.includes(aType) && ANGLED_TYPES.includes(bType)) {
+            connectionAngle = computeWallConnectionAngle(a, b);
+          }
 
-        pathConnectCount++;
+          if (!a.relationships) a.relationships = [];
+          if (!b.relationships) b.relationships = [];
+
+          a.relationships.push({
+            type: 'PATH_CONNECTS',
+            target: b.element_key || b.id,
+            sourceInterface: { kind: aEnd, node: node.id },
+            targetInterface: { kind: bEnd, node: node.id },
+            role: 'STRUCTURAL_CONTINUITY',
+            metadata: { shellRole: null, sourceElementType: aType, targetElementType: bType, connectionAngle }
+          });
+
+          b.relationships.push({
+            type: 'PATH_CONNECTS',
+            target: a.element_key || a.id,
+            sourceInterface: { kind: bEnd, node: node.id },
+            targetInterface: { kind: aEnd, node: node.id },
+            role: 'STRUCTURAL_CONTINUITY',
+            metadata: { shellRole: null, sourceElementType: bType, targetElementType: aType, connectionAngle }
+          });
+
+          pathConnectCount++;
+        }
       }
-    }
-
-    // For tunnel topology: also connect the PARENT TUNNEL_SEGMENT elements (hollow manifold).
-    // Shell piece PATH_CONNECTS above are skipped in generate because shell pieces are replaced
-    // by a single hollow solid — so we must add connections on the parent elements too.
-    // Tunnel runs use branchKey (not elementKey) as their structural parent identifier.
-    if (runA.shellPieces && runB.shellPieces && runA.branchKey && runB.branchKey) {
-      const a = elemByKey.get(runA.branchKey);
-      const b = elemByKey.get(runB.branchKey);
-      if (a && b) {
-        const aType = a.type || 'UNKNOWN';
-        const bType = b.type || 'UNKNOWN';
-        const aEnd = inferRunEnd(runA, node.id);
-        const bEnd = inferRunEnd(runB, node.id);
-        // Connection angle between parent segments (may be null for non-wall types)
-        const parentAngle = (aType === 'WALL' || aType === 'TUNNEL_SEGMENT')
-          ? computeWallConnectionAngle(a, b)
-          : null;
-
-        if (!a.relationships) a.relationships = [];
-        if (!b.relationships) b.relationships = [];
-
-        a.relationships.push({
-          type: 'PATH_CONNECTS',
-          target: b.element_key || b.id,
-          sourceInterface: { kind: aEnd, node: node.id },
-          targetInterface: { kind: bEnd, node: node.id },
-          role: 'STRUCTURAL_CONTINUITY',
-          metadata: { shellRole: null, sourceElementType: aType, targetElementType: bType, connectionAngle: parentAngle }
-        });
-        b.relationships.push({
-          type: 'PATH_CONNECTS',
-          target: a.element_key || a.id,
-          sourceInterface: { kind: bEnd, node: node.id },
-          targetInterface: { kind: aEnd, node: node.id },
-          role: 'STRUCTURAL_CONTINUITY',
-          metadata: { shellRole: null, sourceElementType: bType, targetElementType: aType, connectionAngle: parentAngle }
-        });
-        pathConnectCount++;
-      }
-    }
-
-    // For architectural topology (wall endpoints)
-    if (runA.elementKey && runB.elementKey && !runA.shellPieces?.LEFT_WALL) {
-      const a = elemByKey.get(runA.elementKey);
-      const b = elemByKey.get(runB.elementKey);
-      if (!a || !b) continue;
-
-      const aType = a.type || 'UNKNOWN';
-      const bType = b.type || 'UNKNOWN';
-      const compatible = PATH_CONNECT_COMPATIBLE[aType];
-      if (compatible && !compatible.has(bType)) continue;
-
-      const aEnd = inferRunEnd(runA, node.id);
-      const bEnd = inferRunEnd(runB, node.id);
-
-      // Compute connection angle for wall-to-wall junctions (mitre/bevel/butt)
-      let connectionAngle = null;
-      if (aType === 'WALL' && bType === 'WALL') {
-        connectionAngle = computeWallConnectionAngle(a, b);
-      }
-
-      if (!a.relationships) a.relationships = [];
-      if (!b.relationships) b.relationships = [];
-
-      a.relationships.push({
-        type: 'PATH_CONNECTS',
-        target: b.element_key || b.id,
-        sourceInterface: { kind: aEnd, node: node.id },
-        targetInterface: { kind: bEnd, node: node.id },
-        role: 'STRUCTURAL_CONTINUITY',
-        metadata: { shellRole: null, sourceElementType: aType, targetElementType: bType, connectionAngle }
-      });
-
-      b.relationships.push({
-        type: 'PATH_CONNECTS',
-        target: a.element_key || a.id,
-        sourceInterface: { kind: bEnd, node: node.id },
-        targetInterface: { kind: aEnd, node: node.id },
-        role: 'STRUCTURAL_CONTINUITY',
-        metadata: { shellRole: null, sourceElementType: bType, targetElementType: aType, connectionAngle }
-      });
-
-      pathConnectCount++;
     }
   }
 
