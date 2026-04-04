@@ -182,3 +182,19 @@ Dumped actual IfcAxis2Placement3D values from two segments:
 - IFC entity counts: 169 IfcExtrudedAreaSolid, 165 IfcRectangleProfileDef, 0 IfcRectangleHollowProfileDef
 - Visual: connected tunnel with roof panels visible, but angled segments have splayed walls
 - This is the stable baseline — do not iterate without IFC-data-driven verification
+
+---
+
+## Next Session — Queued Tasks
+
+### 1. DXF pipeline investigation (FIRST PRIORITY)
+- DXF-only render (GMU_Sample_UGF_BeggarsTomb.dxf) fails with OOM then empty-elements error
+- **builting-resolve** was at 256MB, bumped to 1024MB (749MB used for 41MB claims.json, 34707 claims → 18760 observations). Memory fix is live but NOT committed.
+- After resolve passes, **builting-topology-engine** errors: `CSS loaded from S3 has no elements`. The claims→CSS conversion produces the canonical_observed.json (14MB) but topology-engine can't find elements in it. Likely a DXF→claims→legacyCss conversion gap — the claimsToLegacyCss path for DXF may not be reconstructing elements correctly.
+- This is a separate pipeline path from VSM and was broken before today's changes.
+
+### 2. Panel rotation fix for angled tunnel segments
+- Known issue from Phase 6: solid Position offsets use identity axes, so walls splay on angled segments
+- IFC analysis complete (see Phase 6 notes above) — root cause confirmed
+- v46/v47 fix attempts overcorrected and caused scatter regressions
+- Next attempt must: (a) start from v48 baseline, (b) change ONE thing, (c) verify with IFC dump before deploying
