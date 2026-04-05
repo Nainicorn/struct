@@ -52,7 +52,11 @@ export const ALLOWED_SEMANTIC_TYPES = {
 // ── Domain Minimums (first-pass viability checks) ──────────────────────────
 
 export const DOMAIN_MINIMUMS = {
-  TUNNEL:     { WALL: 1, SLAB: 1 },
+  // TUNNEL uses TUNNEL_SEGMENT elements for structural shells; cast-in-place
+  // floors are modeled as shell faces on those segments, NOT as IfcSlab.
+  // Requiring SLAB causes spurious domain_minimum_not_met errors on every
+  // tunnel render. WALL minimum retained for portal end-walls.
+  TUNNEL:     { WALL: 1 },
   BUILDING:   { WALL: 4, SLAB: 2 },
   CIVIL:      { WALL: 1 },
   INDUSTRIAL: { WALL: 1 }

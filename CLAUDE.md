@@ -1,16 +1,10 @@
 # Text-to-3D Project — Architecture & Reference
 
 **Constraints**
-- Update claude.md file everytime you or user finishes a part of the major implementation & when you or user updates code/zip
-- Everytime a task is complete, remove the context associated with it in the claude.md file and put it into completed.md
-- claude.md should only contain main context of project and remaining steps and completed.md should contain everything that has been implemented both in frontend and backend
-- Ask user before you compact
-- When compacting, look at previous chat AND updated.md AND claude.md to get full scope so you don't forget important context
+- completed.md should contain everything that has been implemented, phases, tasks, & detailed information about the project
 - Separate each task into sub-tasks if needed and only after completion, move to the next task (go step by step)
 - Use plan mode everytime you plan out the next phase or tasks
-- When you start working on the backend implementation via AWS suggest any improvements IF necessary
-- Everytime lambda function updated and user needs to upload new zip file, YOU take care of the zip function
-- AWS CLI is configured and available (profile: `leidos`) — use `aws --profile leidos` commands to upload Lambda zips, update Lambda code, update Step Functions, configure S3 CORS, etc. directly. Ask user only for things that require console-only actions (IAM policy edits, API Gateway deployments, ECR pushes).
+- Claude takes care of the zip, push image, deployment of all lambdas and any changes in AWS via AWS CLI which has been configured
 
 **Pipeline Engineering Principles**
 - All pipeline changes must be universal — no render-type-specific hacks in generate. Fix problems upstream in extract/structure/geometry.
@@ -215,4 +209,3 @@ All functions run on arm64 and share `builting-role`.
 
 ---
 
-**References**: See `backend/schemas/builting-css-spec.md`, `COMPLETED.md`, `DEMO_PREP.md`

@@ -31,7 +31,7 @@ const setupWasm = {
       fs.mkdirSync('./public', { recursive: true });
     }
 
-    const wasmFiles = ['web-ifc.wasm', 'web-ifc-mt.wasm'];
+    const wasmFiles = ['web-ifc.wasm', 'web-ifc-mt.wasm', 'web-ifc-mt.worker.js'];
     for (const wasmFile of wasmFiles) {
       const wasmSrc = path.resolve(`./node_modules/web-ifc/${wasmFile}`);
       const wasmDest = path.resolve(`./public/${wasmFile}`);
@@ -61,6 +61,10 @@ export default defineConfig({
   server: {
     port: 5001,
     host: 'localhost',
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:5002',

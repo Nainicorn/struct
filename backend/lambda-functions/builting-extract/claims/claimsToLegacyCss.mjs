@@ -46,54 +46,22 @@ function claimsToVentSimCss(claimsDoc, artifacts) {
 }
 
 /**
- * Reconstruct DXF CSS from claims.
- * DXF CSS has a different shape: { metadata, storeys: [{ id, name, elevation_m, height_m, elements }] }
+ * Reconstruct DXF CSS from claims — flat CSS v1.0 contract.
  */
 function claimsToDxfCss(claimsDoc, artifacts) {
-  // Reconstruct storeys from level_definition claims
-  const levelClaims = claimsDoc.claims.filter(c => c.kind === CLAIM_KINDS.LEVEL_DEFINITION);
-  const allElements = extractElementsFromClaims(claimsDoc.claims);
-
-  // Group elements by their container (storey id)
-  const storeys = [];
-  if (levelClaims.length > 0) {
-    for (const lc of levelClaims) {
-      const storeyId = lc.attributes.id;
-      const storeyElements = allElements.filter(el => el.container === storeyId);
-      // Also include elements without a container in the first storey
-      storeys.push({
-        id: storeyId,
-        name: lc.attributes.name,
-        elevation_m: lc.attributes.elevation_m,
-        height_m: lc.attributes.height_m,
-        elements: storeyElements,
-      });
-    }
-    // Add any uncontained elements to the first storey
-    const containedIds = new Set(levelClaims.map(lc => lc.attributes.id));
-    const uncontained = allElements.filter(el => !el.container || !containedIds.has(el.container));
-    if (uncontained.length > 0 && storeys.length > 0) {
-      storeys[0].elements = [...storeys[0].elements, ...uncontained];
-    }
-  } else {
-    // Fallback: single storey with all elements
-    storeys.push({
-      id: 'storey-0',
-      name: 'Ground Floor',
-      elevation_m: 0,
-      height_m: 3.5,
-      elements: allElements,
-    });
-  }
+  const elements = extractElementsFromClaims(claimsDoc.claims);
 
   return {
+    cssVersion: artifacts.cssVersion || '1.0',
+    domain: artifacts.domain || claimsDoc.domain || 'BUILDING',
+    levelsOrSegments: artifacts.levelsOrSegments || extractLevelsFromClaims(claimsDoc.claims),
+    elements,
     metadata: artifacts.metadata || {
       title: 'DXF Import',
       source: 'DXF',
       confidence: 0.5,
       schema_version: '1.0',
     },
-    storeys,
   };
 }
 

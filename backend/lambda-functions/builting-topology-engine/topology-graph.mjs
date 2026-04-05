@@ -8,7 +8,10 @@ import { vecDist, vecNormalize, vecDot, vecSub, vecAdd, vecLen, vecScale, canoni
 const INTERFACE_KINDS = new Set(['ATSTART', 'ATEND', 'ATPATH', 'NOTDEFINED']);
 
 function buildTopologyGraph(css, options = {}) {
-  const domain = options.domain || css.metadata?.structureClass || 'BUILDING';
+  // Data-driven domain detection: element types are authoritative, not the domain string.
+  // Mirrors index.mjs logic — handles cases where css.metadata.structureClass is stale or wrong.
+  const hasTunnelSegs = css.elements.some(e => e.type === 'TUNNEL_SEGMENT');
+  const domain = options.domain || (hasTunnelSegs ? 'TUNNEL' : (css.domain || css.metadata?.structureClass || 'BUILDING').toUpperCase());
   const exportProfile = options.exportProfile || css.metadata?.exportProfile || 'authoring_safe';
 
   css.topology = css.topology || { nodes: [], runs: [], junctions: [], interfaces: [], hosts: [], openings: [] };

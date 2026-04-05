@@ -109,6 +109,18 @@ function getSemanticUpgrade(layer, entityType, length, isClosed, radius) {
   if (!layer || isExcludedLayer(layer)) return null;
   const upper = layer.toUpperCase();
 
+  // AIA CAD standard layer names (A-WALL, A-FLOR, etc.) from Revit/AutoCAD exports
+  if (/^A-WALL/i.test(upper)) {
+    if (entityType === 'LINE' || entityType === 'LWPOLYLINE' || entityType === 'POLYLINE' || entityType === 'POLYFACE_MESH') {
+      if (entityType === 'POLYFACE_MESH') return 'WALL';
+      if (isClosed && length >= DXF_WALL_MIN_SEGMENT_LENGTH) return 'WALL';
+      if (!isClosed && length >= DXF_WALL_OPEN_MIN_LENGTH) return 'WALL';
+    }
+  }
+  if (/^A-FLOR/i.test(upper)) return 'SLAB';
+  if (/^S-COLS/i.test(upper) && entityType === 'CIRCLE' && radius >= DXF_COLUMN_RADIUS_MIN && radius <= DXF_COLUMN_RADIUS_MAX) return 'COLUMN';
+
+  // Generic layer name patterns
   if (upper.startsWith('WALL') && (entityType === 'LINE' || entityType === 'LWPOLYLINE' || entityType === 'POLYLINE')) {
     if (isClosed && length >= DXF_WALL_MIN_SEGMENT_LENGTH) return 'WALL';
     if (!isClosed && length >= DXF_WALL_OPEN_MIN_LENGTH) return 'WALL';
@@ -157,7 +169,59 @@ function processLine(entity, layer, scale) {
   }];
 }
 
+function processPolyFaceMesh(entity, layer, scale) {
+  // Position vertices have flag 192 (AcDbPolyFaceMeshVertex); face records have
+  // flag 128 (AcDbFaceRecord) with x=y=z=0. Filter to real positions only.
+  const posVerts = (entity.vertices || [])
+    .filter(v => v.flags !== undefined
+      ? (v.flags & 192) === 192
+      : Math.abs(v.x) + Math.abs(v.y) + Math.abs(v.z) > 0)
+    .map(v => scalePoint(v, scale));
+
+  if (posVerts.length < 2) return [];
+
+  let xMin = Infinity, xMax = -Infinity;
+  let yMin = Infinity, yMax = -Infinity;
+  let zMin = Infinity, zMax = -Infinity;
+  for (const v of posVerts) {
+    xMin = Math.min(xMin, v.x); xMax = Math.max(xMax, v.x);
+    yMin = Math.min(yMin, v.y); yMax = Math.max(yMax, v.y);
+    zMin = Math.min(zMin, v.z); zMax = Math.max(zMax, v.z);
+  }
+
+  const centroid = { x: (xMin + xMax) / 2, y: (yMin + yMax) / 2, z: (zMin + zMax) / 2 };
+  const width = xMax - xMin;
+  const depth = yMax - yMin;
+  const height = zMax - zMin;
+  const span = Math.max(width, depth);
+  const upgrade = getSemanticUpgrade(layer, 'POLYFACE_MESH', span, false, null);
+
+  return [{
+    element_key: makeElementKey(layer, 'POLYFACE', centroid, span),
+    id: elemHash({ type: 'POLYFACE', centroid, width, depth, height }),
+    semantic_type: upgrade || 'PROXY',
+    placement: { position: { x: centroid.x, y: centroid.y, z: zMin } },
+    geometry: {
+      width_m: roundTo(width, 4),
+      depth_m: roundTo(depth, 4),
+      height_m: roundTo(height, 4),
+      bbox: {
+        min: { x: roundTo(xMin, 4), y: roundTo(yMin, 4), z: roundTo(zMin, 4) },
+        max: { x: roundTo(xMax, 4), y: roundTo(yMax, 4), z: roundTo(zMax, 4) },
+      },
+      vertexCount: posVerts.length,
+    },
+    sourceLayer: layer,
+    sourceEntityType: 'POLYFACE_MESH',
+    sourceHandle: entity.handle || null,
+    metadata: { primitive: 'POLYFACE_MESH' },
+  }];
+}
+
 function processPolyline(entity, layer, scale) {
+  // PolyFaceMesh (Revit 3D solid export, flag 64) — extract bounding box footprint
+  if ((entity.flags & 64) || entity.mesh) return processPolyFaceMesh(entity, layer, scale);
+
   const rawVertices = (entity.vertices || []).map(v => scalePoint(v, scale));
   const vertices = dedupeVertices(rawVertices);
 
@@ -460,13 +524,44 @@ function processEntity(entity, scale) {
 }
 
 // =============================================================================
+// CSS v1.0 FIELD HELPERS
+// =============================================================================
+
+/** Infer geometry.method from raw DXF geometry shape */
+function inferGeometryMethod(geo) {
+  if (geo.vertices && geo.vertices.length > 0) return 'BREP';
+  if (geo.bbox) return 'BREP';
+  return 'EXTRUSION';
+}
+
+/** Strip _m suffixes from geometry fields to match CSS v1.0 contract */
+function normalizeCssGeometry(geo) {
+  const out = { method: inferGeometryMethod(geo) };
+  if (geo.length_m !== undefined) out.length = geo.length_m;
+  if (geo.depth_m !== undefined) out.depth = geo.depth_m;
+  if (geo.width_m !== undefined) out.width = geo.width_m;
+  if (geo.height_m !== undefined) out.height = geo.height_m;
+  if (geo.direction) out.direction = geo.direction;
+  if (geo.profile) {
+    out.profile = { type: geo.profile.type };
+    if (geo.profile.width_m !== undefined) out.profile.width = geo.profile.width_m;
+    if (geo.profile.height_m !== undefined) out.profile.height = geo.profile.height_m;
+    if (geo.profile.radius_m !== undefined) out.profile.radius = geo.profile.radius_m;
+  }
+  if (geo.vertices) out.vertices = geo.vertices;
+  if (geo.bbox) out.bbox = geo.bbox;
+  if (geo.vertexCount !== undefined) out.vertexCount = geo.vertexCount;
+  return out;
+}
+
+// =============================================================================
 // MAIN EXPORT
 // =============================================================================
 
 /**
  * Parse DXF text content into CSS v1.0 JSON.
  * @param {string} dxfText - Raw DXF file content
- * @returns {object} CSS v1.0 JSON
+ * @returns {object} CSS v1.0 JSON (flat contract: elements[], levelsOrSegments[])
  */
 export function parseDxfToCSS(dxfText) {
   console.log('Parsing DXF format to CSS...');
@@ -494,6 +589,26 @@ export function parseDxfToCSS(dxfText) {
     // insunits=0 or not in table → use DXF_UNIT_SCALE default
   }
 
+  // Sanity-check declared units against actual model extents.
+  // Revit DXF exports commonly set INSUNITS=6 (meters) while coordinates are
+  // actually in millimeters. Detect by checking if any extent value exceeds
+  // 10,000 — a 10km span is impossible for a single building in meters.
+  if (scaleFactor === 1.0 && dxf.header) {
+    const extMax = dxf.header['$EXTMAX'];
+    const extMin = dxf.header['$EXTMIN'];
+    if (extMax) {
+      const span = Math.max(
+        Math.abs(extMax.x || 0), Math.abs(extMax.y || 0), Math.abs(extMax.z || 0),
+        Math.abs((extMin || {}).x || 0), Math.abs((extMin || {}).y || 0), Math.abs((extMin || {}).z || 0)
+      );
+      if (span > 10000) {
+        scaleFactor = 0.001;
+        unitSource = 'extent-override-mm';
+        console.warn(`DXF INSUNITS=${insunits} declares meters but max extent=${span.toFixed(0)} — overriding to mm (×0.001)`);
+      }
+    }
+  }
+
   console.log(`DXF units: INSUNITS=${insunits}, scaleFactor=${scaleFactor}, source=${unitSource}`);
 
   // Step 2: Scale all coordinates, then compute derived geometry
@@ -505,14 +620,14 @@ export function parseDxfToCSS(dxfText) {
   }
 
   // Step 3: Expand INSERTs and process entities
-  const elements = expandInserts(dxf.entities, blocks, scaleFactor);
+  const rawElements = expandInserts(dxf.entities, blocks, scaleFactor);
 
   // Step 4: Compute statistics
   let proxyCount = 0;
   let semanticUpgradeCount = 0;
   let zMin = Infinity, zMax = -Infinity;
 
-  for (const el of elements) {
+  for (const el of rawElements) {
     if (el.semantic_type === 'PROXY') proxyCount++;
     else semanticUpgradeCount++;
     const z = el.placement?.position?.z || 0;
@@ -526,12 +641,37 @@ export function parseDxfToCSS(dxfText) {
   }
 
   // Step 5: Compute confidence
-  const totalElements = elements.length;
+  const totalElements = rawElements.length;
   const upgradeRatio = totalElements > 0 ? semanticUpgradeCount / totalElements : 0;
   const confidence = upgradeRatio > 0.5 ? 0.6 : 0.4;
 
-  // Step 6: Build CSS output
+  // Step 6: Build flat CSS v1.0 output
+  const levelId = 'level-1';
+
   return {
+    cssVersion: '1.0',
+    domain: 'BUILDING',
+    levelsOrSegments: [{
+      id: levelId,
+      type: 'STOREY',
+      name: 'Ground Floor',
+      elevation_m: 0,
+      height_m: 3.5,
+    }],
+    elements: rawElements.map(el => ({
+      id: el.id,
+      element_key: el.element_key,
+      type: el.semantic_type,
+      container: levelId,
+      placement: { origin: el.placement.position },
+      geometry: normalizeCssGeometry(el.geometry),
+      confidence,
+      source: 'DXF',
+      sourceLayer: el.sourceLayer,
+      sourceEntityType: el.sourceEntityType,
+      sourceHandle: el.sourceHandle,
+      metadata: el.metadata || {},
+    })),
     metadata: {
       title: 'DXF Import',
       source: 'DXF',
@@ -549,18 +689,15 @@ export function parseDxfToCSS(dxfText) {
         truncatedFiles: []
       }
     },
-    storeys: [{
-      id: 'storey-0',
-      name: 'Ground Floor',
-      elevation_m: 0,
-      height_m: 3.5,
-      elements
-    }]
   };
 }
 
 function buildFallbackCSS(reason) {
   return {
+    cssVersion: '1.0',
+    domain: 'BUILDING',
+    levelsOrSegments: [],
+    elements: [],
     metadata: {
       title: 'DXF Import (empty)',
       source: 'DXF',
@@ -577,6 +714,5 @@ function buildFallbackCSS(reason) {
         truncatedFiles: []
       }
     },
-    storeys: []
   };
 }

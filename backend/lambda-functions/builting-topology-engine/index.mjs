@@ -43,7 +43,7 @@ import {
   cleanBuildingWallAxes, checkEnvelopeFallback, validateBuildingStructure,
   clampAbsurdDimensions, clampWallsToEnvelope, snapWallEndpoints, alignSlabsToWalls,
   countAmbiguousProfiles, resetAmbiguousProfileCount, getAmbiguousProfileCount,
-  deduplicateRoofs, deriveRoofElevation, snapSlabsToWallBases,
+  deduplicateRoofs, deriveRoofElevation, snapSlabsToWallBases, snapWallsToStoreyFloor,
   mergeShortTunnelSegments, validateSpaceContainment, inferSpaces
 } from './building-envelope.mjs';
 
@@ -179,6 +179,65 @@ function _computePathLength(pathPoints) {
 }
 
 /**
+ * [TUNNEL] After decomposeTunnelShell assigns elem-* keys to TUNNEL_SEGMENT
+ * elements, remap stale VSM branch ID container refs on ALL elements to the
+ * new element_key values.
+ *
+ * VentSim equipment/child elements may arrive with container refs pointing to
+ * the original VentSim branch ID (e.g. "ventsim_branch_260") rather than the
+ * canonical levelsOrSegments entry or the resolved element_key. After
+ * decomposeTunnelShell assigns element_key via elemId(), the old branch ID
+ * no longer matches anything in buildSegmentIndex — causing findParentSegment
+ * to fall through to projection-only matching, and leaving stale refs that
+ * trigger invalid_container_ref in model-validate.
+ *
+ * Reverse-lookup sources (all checked):
+ *   • elem.id → elem.element_key          (original id before key assignment)
+ *   • properties.vsm_id → element_key     (explicit VSM ID field, if present)
+ *   • "ventsim_branch_N" → element_key    (constructed from properties.unique_no)
+ */
+function remapVSMContainerRefs(css) {
+  if ((css.domain || '').toUpperCase() !== 'TUNNEL') return;
+  if (!css.elements) return;
+
+  // Build reverse lookup: old VSM id → new element_key
+  const vsmIdToElemKey = new Map();
+  for (const e of css.elements) {
+    if (e.type !== 'TUNNEL_SEGMENT') continue;
+    if (!e.element_key) continue;
+    // Map original id → element_key (covers hash-based ids that were renamed)
+    if (e.id && e.id !== e.element_key) vsmIdToElemKey.set(e.id, e.element_key);
+    // Map explicit vsm_id property (if present in properties)
+    if (e.properties?.vsm_id) vsmIdToElemKey.set(e.properties.vsm_id, e.element_key);
+    // Map ventsim_branch_N alias constructed from unique_no
+    if (e.properties?.unique_no != null) {
+      vsmIdToElemKey.set(`ventsim_branch_${e.properties.unique_no}`, e.element_key);
+    }
+  }
+
+  if (vsmIdToElemKey.size === 0) return;
+
+  const validContainerIds = new Set((css.levelsOrSegments || []).map(l => l.id));
+
+  let remapped = 0, unresolved = 0;
+  for (const e of css.elements) {
+    const cb = e.container;
+    if (!cb || validContainerIds.has(cb)) continue; // already valid or absent
+    const newKey = vsmIdToElemKey.get(cb);
+    if (newKey) {
+      e.container = newKey;
+      remapped++;
+    } else {
+      // Stale ref that couldn't be resolved — warn for inspection
+      unresolved++;
+      console.warn(`CONTAINER_REF_REMAP: unresolved ref "${cb}" on ${e.type} ${e.id || e.element_key || 'unknown'}`);
+    }
+  }
+
+  console.log(`CONTAINER_REF_REMAP: remapped=${remapped}, unresolved=${unresolved}`);
+}
+
+/**
  * Path-author all PATH_SWEEP elements: ensure they have validated pathPoints,
  * _runAxis, and _pathLength. Does NOT force geometry.method = 'SWEEP' —
  * the generator chooses the best IFC representation.
@@ -210,8 +269,17 @@ function annotateSweepGeometry(css) {
     const origin = placement.origin || { x: 0, y: 0, z: 0 };
 
     // Determine run axis: refDirection (CSS convention: axis=world-up, refDirection=bearing)
-    // upAxis from facilityMeta drives the default — fall back to Z-up only if unspecified
-    const runDir = placement.refDirection || geom.direction || placement.axis || _defaultAxis;
+    // upAxis from facilityMeta drives the default — fall back to Z-up only if unspecified.
+    const MEP_TYPES = new Set(['DUCT', 'PIPE', 'CABLE_TRAY']);
+    let runDir = placement.refDirection || geom.direction || placement.axis;
+    if (!runDir && MEP_TYPES.has((elem.type || '').toUpperCase())
+        && Array.isArray(geom.pathPoints) && geom.pathPoints.length >= 2) {
+      const p0 = geom.pathPoints[0], p1 = geom.pathPoints[geom.pathPoints.length - 1];
+      const dx = (p1.x || 0) - (p0.x || 0), dy = (p1.y || 0) - (p0.y || 0), dz = (p1.z || 0) - (p0.z || 0);
+      const pLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (pLen > 0.001) runDir = { x: dx / pLen, y: dy / pLen, z: dz / pLen };
+    }
+    if (!runDir) runDir = _defaultAxis;
     const typicalDepth = css.facilityMeta?.typicalElementDepth || css.metadata?.facilityMeta?.typicalElementDepth;
     const depth = geom.depth || typicalDepth || 1.0;
     if (!geom.depth) depthFallbackCount++;
@@ -455,6 +523,11 @@ export const handler = async (event) => {
     timedStep('generatePortalEndWalls', () => generatePortalEndWalls(css));
     // mergeShortTunnelSegments operates on segments, not fragments — keep it
     timedStep('mergeShortTunnelSegments', () => mergeShortTunnelSegments(css));
+    // After decomposeTunnelShell assigns elem-* keys to TUNNEL_SEGMENT elements,
+    // remap any stale VSM branch ID container refs on child elements (FAN, PUMP, etc.)
+    // to match the new element_key values. Must run before splitTunnelSubSegments
+    // so container refs are clean before Z-based splitting reassigns them.
+    timedStep('remapVSMContainerRefs', () => remapVSMContainerRefs(css));
     // Split flat segment into main/upper sub-segments by Z range (before bridges are created)
     timedStep('splitTunnelSubSegments', () => splitTunnelSubSegments(css));
     // Detect disconnected orphan segments
@@ -521,6 +594,12 @@ export const handler = async (event) => {
 
   // Step 6B-DEDUP: Post-envelope roof deduplication
   timedStep('deduplicateRoofsPostEnvelope', () => deduplicateRoofs(css));
+
+  // Step 6B-CLIP: Re-clip any envelope-generated slabs to wall footprint
+  timedStep('alignSlabsToWallsPostEnvelope', () => alignSlabsToWalls(css));
+
+  // Step 6C: Snap wall bases to storey floor (close wall-to-floor gaps)
+  timedStep('snapWallsToStoreyFloor', () => snapWallsToStoreyFloor(css));
 
   // Step 7: Envelope fallback check
   timedStep('checkEnvelopeFallback', () => checkEnvelopeFallback(css));
@@ -885,6 +964,17 @@ export const handler = async (event) => {
 
   // Legacy CSS (for Generate)
   const legacyCss = resolvedToLegacyCss(resolved);
+
+  // Relationship property integrity check
+  const anglesBefore = css.elements
+    .flatMap(e => e.relationships || [])
+    .filter(r => r.connectionAngle !== null && r.connectionAngle !== undefined).length;
+  const anglesAfter = legacyCss.elements
+    .flatMap(e => e.relationships || [])
+    .filter(r => r.connectionAngle !== null && r.connectionAngle !== undefined).length;
+  if (anglesBefore !== anglesAfter) {
+    console.warn(`RELATIONSHIP_PROP_LOSS: anglesBefore=${anglesBefore} anglesAfter=${anglesAfter} lost=${anglesBefore - anglesAfter}`);
+  }
 
   // Round-trip fidelity check
   const mismatches = [];

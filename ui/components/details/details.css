@@ -333,47 +333,6 @@
     line-height: 1.4;
 }
 
-/* ─── Validation Checks ─── */
-.__val-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 5px 8px;
-    border-radius: var(--radius-sm);
-    font-size: var(--font-size-xs);
-}
-
-.__val-icon {
-    width: 18px;
-    height: 18px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    font-size: 11px;
-    font-weight: 700;
-    flex-shrink: 0;
-}
-
-.__val-pass .__val-icon { background: rgba(74, 222, 128, 0.15); color: var(--sensor-normal); }
-.__val-warn .__val-icon { background: rgba(250, 204, 21, 0.15); color: var(--sensor-warning); }
-.__val-fail .__val-icon { background: rgba(248, 113, 113, 0.15); color: var(--status-error); }
-
-.__val-pass { background: rgba(74, 222, 128, 0.05); }
-.__val-warn { background: rgba(250, 204, 21, 0.05); }
-.__val-fail { background: rgba(248, 113, 113, 0.05); }
-
-.__val-label {
-    color: var(--text-secondary);
-    flex: 1;
-}
-
-.__val-detail {
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
-}
-
 /* ─── Model Statistics ─── */
 .__stats-total {
     font-size: var(--font-size-xs);

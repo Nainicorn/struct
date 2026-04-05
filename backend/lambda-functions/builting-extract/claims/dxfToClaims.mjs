@@ -25,19 +25,18 @@ export function dxfCssToClaims(css, sourceFileName) {
     COORDINATE_SOURCES.DIRECT_2D
   );
 
-  // DXF CSS uses storeys[].elements instead of top-level elements
-  const storeys = css.storeys || [];
-  for (const storey of storeys) {
-    // Create a level_definition claim for each storey
+  // CSS v1.0 flat contract: levelsOrSegments[] + elements[]
+  const levels = css.levelsOrSegments || [];
+  for (const level of levels) {
     claims.push(buildClaim(
       CLAIM_KINDS.LEVEL_DEFINITION,
-      storey.id,
+      level.id,
       {
-        id: storey.id,
-        type: 'STOREY',
-        name: storey.name,
-        elevation_m: storey.elevation_m,
-        height_m: storey.height_m,
+        id: level.id,
+        type: level.type || 'STOREY',
+        name: level.name,
+        elevation_m: level.elevation_m,
+        height_m: level.height_m,
       },
       {
         evidence: [evidence],
@@ -46,72 +45,72 @@ export function dxfCssToClaims(css, sourceFileName) {
         discipline: 'architectural',
       }
     ));
+  }
 
-    // Convert each element in this storey to a claim
-    for (const el of (storey.elements || [])) {
-      const kind = typeToKind(el.type);
-      const subjectId = el.element_key || el.id;
+  const elements = css.elements || [];
+  for (const el of elements) {
+    const kind = typeToKind(el.type);
+    const subjectId = el.element_key || el.id;
 
-      const elEvidence = { ...evidence };
-      if (el.dxfLayer) {
-        elEvidence.dxfLayer = el.dxfLayer;
-      }
-      if (el.dxfHandle) {
-        elEvidence.dxfHandle = el.dxfHandle;
-      }
-
-      // DXF elements have lower confidence than simulation data
-      const fieldConfidence = {
-        dimensions: 0.70,
-        placement: 0.70,
-        material: 0.40,
-      };
-
-      // Semantic upgrades (WALL, COLUMN etc.) have slightly higher confidence
-      if (el.semanticType !== 'PROXY' && el.type !== 'EQUIPMENT') {
-        fieldConfidence.dimensions = 0.80;
-      }
-
-      const attributes = {
-        id: el.id,
-        element_key: el.element_key,
-        type: el.type,
-        semanticType: el.semanticType,
-        name: el.name,
-        placement: el.placement,
-        geometry: el.geometry,
-        container: storey.id,
-        relationships: el.relationships || [],
-        properties: el.properties || {},
-        material: el.material,
-        source: el.source,
-        sourceFile: el.sourceFile,
-        metadata: el.metadata,
-        dxfLayer: el.dxfLayer,
-        dxfHandle: el.dxfHandle,
-      };
-
-      const aliases = [];
-      if (el.dxfHandle) {
-        aliases.push(`dxf_handle_${el.dxfHandle}`);
-      }
-      if (el.name && el.name !== el.element_key) {
-        aliases.push(el.name);
-      }
-
-      claims.push(buildClaim(
-        kind,
-        subjectId,
-        attributes,
-        {
-          evidence: [elEvidence],
-          confidence: el.confidence ?? 0.50,
-          fieldConfidence,
-          discipline: inferDiscipline(el.type, el.properties),
-          aliases,
-        }
-      ));
+    const elEvidence = { ...evidence };
+    if (el.sourceLayer) {
+      elEvidence.dxfLayer = el.sourceLayer;
     }
+    if (el.sourceHandle) {
+      elEvidence.dxfHandle = el.sourceHandle;
+    }
+
+    // DXF elements have lower confidence than simulation data
+    const fieldConfidence = {
+      dimensions: 0.70,
+      placement: 0.70,
+      material: 0.40,
+    };
+
+    // Semantic upgrades (WALL, COLUMN etc.) have slightly higher confidence
+    if (el.type !== 'PROXY' && el.type !== 'EQUIPMENT') {
+      fieldConfidence.dimensions = 0.80;
+    }
+
+    const attributes = {
+      id: el.id,
+      element_key: el.element_key,
+      type: el.type,
+      semanticType: el.semanticType,
+      name: el.name,
+      placement: el.placement,
+      geometry: el.geometry,
+      container: el.container,
+      relationships: el.relationships || [],
+      properties: el.properties || {},
+      material: el.material,
+      source: el.source,
+      sourceFile: el.sourceFile,
+      metadata: el.metadata,
+      sourceLayer: el.sourceLayer,
+      sourceHandle: el.sourceHandle,
+    };
+
+    const aliases = [];
+    if (el.sourceHandle) {
+      aliases.push(`dxf_handle_${el.sourceHandle}`);
+    }
+    if (el.name && el.name !== el.element_key) {
+      aliases.push(el.name);
+    }
+
+    claims.push(buildClaim(
+      kind,
+      subjectId,
+      attributes,
+      {
+        evidence: [elEvidence],
+        confidence: el.confidence ?? 0.50,
+        fieldConfidence,
+        discipline: inferDiscipline(el.type, el.properties),
+        aliases,
+      }
+    ));
   }
 
   // Extract facility metadata (DXF doesn't have explicit facility data)

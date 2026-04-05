@@ -104,9 +104,6 @@ const details = {
         // Display quality score
         this._displayQualityScore(render);
 
-        // Display validation summary
-        this._displayValidation(render);
-
         // Display model statistics
         this._displayStats(render);
 
@@ -161,7 +158,7 @@ const details = {
         if (filesContainer) filesContainer.innerHTML = '';
 
         // Clear and hide all collapsible sections
-        const sections = ['traceability', 'quality', 'validation', 'stats', 'refinement', 'structural', 'warnings', 'omitted', 'sensors'];
+        const sections = ['traceability', 'quality', 'stats', 'refinement', 'structural', 'warnings', 'omitted', 'sensors'];
         for (const name of sections) {
             const section = this.element.querySelector(`.__details-${name}`);
             const content = this.element.querySelector(`.__details-${name}-content`);
@@ -419,54 +416,6 @@ const details = {
                 </div>
             </div>
         `;
-    },
-
-    /**
-     * Display validation summary
-     */
-    _displayValidation(render) {
-        const section = this.element.querySelector('.__details-validation');
-        const content = this.element.querySelector('.__details-validation-content');
-        if (!section || !content) return;
-
-        const vs = render.validationSummary;
-        if (!vs) { section.classList.add('hidden'); return; }
-
-        section.classList.remove('hidden');
-
-        const checks = [
-            { label: 'Geometry Valid', pass: vs.valid, icon: vs.valid ? '✓' : '✗' },
-            { label: 'Spatial Hierarchy', pass: vs.valid, icon: vs.valid ? '✓' : '✗' },
-            { label: 'Revit Compatibility', pass: vs.revitCompatScore >= 70,
-              detail: `${vs.revitCompatScore || 0}%`,
-              icon: vs.revitCompatScore >= 70 ? '✓' : '!' },
-        ];
-
-        // Proxy check
-        const proxyPct = vs.totalElements > 0 ? Math.round(vs.proxyCount * 100 / vs.totalElements) : 0;
-        checks.push({
-            label: 'Proxy Elements',
-            pass: proxyPct < 30,
-            detail: `${vs.proxyCount} (${proxyPct}%)`,
-            icon: proxyPct < 30 ? '✓' : '!'
-        });
-
-        // Errors/warnings
-        if (vs.errorCount > 0) {
-            checks.push({ label: 'Validation Errors', pass: false, detail: `${vs.errorCount}`, icon: '✗' });
-        }
-        if (vs.warningCount > 0) {
-            checks.push({ label: 'Warnings', pass: vs.warningCount < 5, detail: `${vs.warningCount}`, icon: '!' });
-        }
-
-        content.innerHTML = checks.map(c => {
-            const cls = c.pass ? '__val-pass' : (c.icon === '!' ? '__val-warn' : '__val-fail');
-            return `<div class="__val-row ${cls}">
-                <span class="__val-icon">${c.icon}</span>
-                <span class="__val-label">${c.label}</span>
-                ${c.detail ? `<span class="__val-detail">${c.detail}</span>` : ''}
-            </div>`;
-        }).join('');
     },
 
     /**

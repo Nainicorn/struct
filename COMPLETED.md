@@ -1,5 +1,26 @@
 # Completed Implementation History
 
+## Extraction Quality Fixes — Session Apr 2 2026
+
+### Extract Lambda (`dist/index.mjs`) — prompt changes
+- **Deployment fix**: Handler updated to `dist/index.handler`; `mupdf-wasm.wasm` must be copied into `dist/` before zipping (it is already there now)
+- **Replaced Rule 1** (omit if no coords) → include with confidence ≤0.35; missing element unrecoverable, approximate element is not
+- **Replaced Rule 2** (NEVER assume dimensions) → allow type/context-implied dimensions at confidence 0.35
+- **Replaced Rule 3** (omit storey height) → infer from occupancy: HOSPITAL 4.0m, OFFICE 3.5m, WAREHOUSE 6.0m, RESIDENTIAL 2.8m, INDUSTRIAL 5.0m, TUNNEL 5.0m at confidence 0.4
+- **Added MANDATORY EXTRACTION section** (separate from DO NOT): every explicitly named room → SPACE element; interior walls from room boundaries; window/door uniqueness (no duplicate placement origins); one slab per storey per elevation
+- **Moved interior wall rule** out of DO NOT block into MANDATORY EXTRACTION so the LLM reads it as an obligation, not a prohibition
+- **Window cap**: max 4–6 per exterior wall face, evenly spaced with unique x positions
+- **Slab dedup**: explicitly forbids duplicate slabs (Floor Slab F1 + Main Building Floor F1 at same elevation)
+- **Wall depth CRITICAL**: geometry.depth = storey height, never = profile.width (wall length)
+
+### Topology Engine (`validation.mjs`) — wall depth normalization
+- `normalizeGeometry` now normalizes WALL `geometry.depth` to storey height when: depth equals profile.width (LLM set extrusion height = wall length), or depth < 0.8m, or depth > levelHeight × 1.6
+- Runs on all WALL elements universally; tunnel WALLs are safe (generated after this step by `decomposeTunnelShell`)
+
+### Topology Engine (`building-envelope.mjs`) — slab clamp fix
+- `clampAbsurdDimensions` SLAB entry: `maxH` was `3.0` (capped Y-footprint from 45.72m → 3m, destroying every slab footprint); corrected to `500`; `maxW` raised to `500`; `maxD` (slab thickness) lowered to `1.5m`
+- This was the root cause of missing roof/ceiling across all multi-storey building renders
+
 ## AWS Infrastructure
 - API Gateway (`builting-api`) with full REST resource structure and CORS on all endpoints
 - DynamoDB tables: `builting-users` (auth) and `builting-renders` (render metadata, validation fields, export formats)

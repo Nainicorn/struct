@@ -16,6 +16,8 @@ export function validateCSSElements(css) {
     if (e.element_key && elementKeys.has(e.element_key))
       cssIssues.push(`Duplicate element_key: ${e.element_key}`);
     if (e.element_key) elementKeys.add(e.element_key);
+    // Also index by id so relationships that target id (not element_key) are not falsely flagged
+    if (e.id && e.id !== e.element_key) elementKeys.add(e.id);
     const o = e.placement?.origin;
     if (o && (!Number.isFinite(o.x) || !Number.isFinite(o.y) || !Number.isFinite(o.z)))
       cssIssues.push(`NaN/Inf placement: ${e.id}`);

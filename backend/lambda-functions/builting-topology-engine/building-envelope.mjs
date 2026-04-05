@@ -52,14 +52,32 @@ function guaranteeBuildingEnvelope(css) {
     }
   }
 
-  // Try to infer external walls geometrically before generating fallback
-  // Compute global bbox for boundary inference only
+  // Compute global bbox from WALLS only — prevents equipment/MEP from inflating
+  // the building footprint, which would cause slabs and roof to overshoot.
   let gMinX = Infinity, gMaxX = -Infinity, gMinY = Infinity, gMaxY = -Infinity;
-  for (const e of css.elements) {
-    const o = e.placement?.origin;
+  for (const w of allWalls) {
+    const o = w.placement?.origin;
     if (!o) continue;
-    if (o.x < gMinX) gMinX = o.x; if (o.x > gMaxX) gMaxX = o.x;
-    if (o.y < gMinY) gMinY = o.y; if (o.y > gMaxY) gMaxY = o.y;
+    const dir = canonicalWallDirection(w);
+    const len = canonicalWallLength(w);
+    if (dir && len > 0) {
+      const s = vecAdd(o, vecScale(dir, -len / 2));
+      const e = vecAdd(o, vecScale(dir, len / 2));
+      gMinX = Math.min(gMinX, s.x, e.x); gMaxX = Math.max(gMaxX, s.x, e.x);
+      gMinY = Math.min(gMinY, s.y, e.y); gMaxY = Math.max(gMaxY, s.y, e.y);
+    } else {
+      if (o.x < gMinX) gMinX = o.x; if (o.x > gMaxX) gMaxX = o.x;
+      if (o.y < gMinY) gMinY = o.y; if (o.y > gMaxY) gMaxY = o.y;
+    }
+  }
+  // Fallback to all elements if no walls have geometry yet
+  if (!isFinite(gMinX)) {
+    for (const e of css.elements) {
+      const o = e.placement?.origin;
+      if (!o) continue;
+      if (o.x < gMinX) gMinX = o.x; if (o.x > gMaxX) gMaxX = o.x;
+      if (o.y < gMinY) gMinY = o.y; if (o.y > gMaxY) gMaxY = o.y;
+    }
   }
   if (!isFinite(gMinX)) return;
 
@@ -386,7 +404,7 @@ function validateOpeningPlacement(css) {
       const container = opening.container;
       const level = levels.find(l => l.id === container);
       const floorZ = level?.elevation_m || 0;
-      if (Math.abs(oo.z - floorZ) < 0.3) {
+      if (Math.abs(oo.z - floorZ) < 0.5) {
         oo.z = floorZ;
       }
     }
@@ -624,7 +642,7 @@ function clampAbsurdDimensions(css) {
 
   const CLAMPS = {
     WALL: { minW: 0.05, maxW: 200, minH: 0.05, maxH: 2.0, minD: 0.5, maxD: 50 },
-    SLAB: { minW: 0.5, maxW: 200, minH: 0.05, maxH: 3.0, minD: 0.05, maxD: 3.0 },
+    SLAB: { minW: 0.5, maxW: 500, minH: 0.5, maxH: 500, minD: 0.05, maxD: 1.5 },
     COLUMN: { minW: 0.1, maxW: 2.0, minH: 0.1, maxH: 2.0, minD: 0.5, maxD: 20 },
     BEAM: { minW: 0.1, maxW: 2.0, minH: 0.1, maxH: 2.0, minD: 0.5, maxD: 50 },
     SPACE: { minW: 0.5, maxW: 200, minH: 0.5, maxH: 200, minD: 0.5, maxD: 5000 },
@@ -1006,6 +1024,23 @@ function inferOpenings(css) {
         candidate.metadata.hostWallMatchScore = Math.max(0, 1 - bestDist / 15.0);
         candidate.metadata.hostIsPortalEndWall = bestIsPortal;
         matched++;
+
+        // Tunnel door Z-snap: set door Z to tunnel floor level (bottom of host segment).
+        // validateOpeningPlacement skips tunnels, so this is the only Z correction path.
+        if ((candidate.type || '').toUpperCase() === 'DOOR' && candidate.placement?.origin) {
+          const host = tunnelHosts.find(h => (h.element_key || h.id) === bestKey);
+          if (host) {
+            const hostZ = host.placement?.origin?.z ?? 0;
+            const hostH = host.geometry?.profile?.height ?? 5;
+            const shellT = host.properties?.shellThickness_m ?? 0.3;
+            const floorZ = hostZ - hostH / 2 + shellT;
+            const doorH = candidate.geometry?.profile?.height
+                       || candidate.geometry?.depth || 2.1;
+            // Place door origin at floor + half door height (origin = center)
+            candidate.placement.origin.z = floorZ + doorH / 2;
+            console.log(`Tunnel door Z-snap: ${candidate.name || candidate.id} z=${candidate.placement.origin.z.toFixed(2)} (floor=${floorZ.toFixed(2)}, hostZ=${hostZ.toFixed(2)})`);
+          }
+        }
       }
     }
     console.log(`InferOpenings (tunnel): ${matched} of ${openingCandidates.length} doors/windows matched (portal end walls included)`);
@@ -1403,9 +1438,10 @@ function createOpeningRelationships(css) {
         skipped++;
         continue;
       }
-      // All checks passed — create VOIDS relationship
+      // All checks passed — create VOIDS relationship.
+      // Use element_key as the canonical target (validator builds elementKeys from element_key).
       if (!opening.relationships) opening.relationships = [];
-      opening.relationships.push({ type: 'VOIDS', target: hostWall.id || hostWall.element_key });
+      opening.relationships.push({ type: 'VOIDS', target: hostWall.element_key || hostWall.id });
       if (!opening.metadata) opening.metadata = {};
       opening.metadata.openingVoidsCreated = true;
       created++;
@@ -1471,9 +1507,10 @@ function createOpeningRelationships(css) {
       }
     }
 
-    // All checks passed — create VOIDS relationship
+    // All checks passed — create VOIDS relationship.
+    // Use element_key as the canonical target (validator builds elementKeys from element_key).
     if (!opening.relationships) opening.relationships = [];
-    opening.relationships.push({ type: 'VOIDS', target: hostWall.id || hostWall.element_key });
+    opening.relationships.push({ type: 'VOIDS', target: hostWall.element_key || hostWall.id });
     if (!opening.metadata) opening.metadata = {};
     opening.metadata.openingVoidsCreated = true;
     created++;
@@ -1638,10 +1675,12 @@ function validateBuildingStructure(css) {
   const warnings = [];
   const STOREY_Z_TOL = 0.5; // elements should be within ±0.5m of storey elevation
 
-  // Build storey elevation map
+  // Build storey elevation and height maps
   const storeyElevations = {};
+  const storeyHeights = {};
   for (const level of css.levelsOrSegments || []) {
     storeyElevations[level.id] = level.elevation_m || 0;
+    storeyHeights[level.id] = level.height_m || 3;
   }
 
   // Check exterior wall completeness
@@ -1674,7 +1713,7 @@ function validateBuildingStructure(css) {
     if (!container || !storeyElevations.hasOwnProperty(container)) continue;
     const expectedZ = storeyElevations[container];
     const actualZ = elem.placement?.origin?.z;
-    if (actualZ !== undefined && Math.abs(actualZ - expectedZ) > STOREY_Z_TOL + (storeyElevations[container] || 3)) {
+    if (actualZ !== undefined && Math.abs(actualZ - expectedZ) > STOREY_Z_TOL + (storeyHeights[container] || 3)) {
       storeyInconsistentCount++;
     }
   }
@@ -1928,7 +1967,7 @@ export {
   cleanBuildingWallAxes, checkEnvelopeFallback, validateBuildingStructure,
   clampAbsurdDimensions, clampWallsToEnvelope, snapWallEndpoints, alignSlabsToWalls,
   countAmbiguousProfiles, deduplicateRoofs,
-  deriveRoofElevation, snapSlabsToWallBases, snapTunnelSegmentEndpoints,
+  deriveRoofElevation, snapSlabsToWallBases, snapWallsToStoreyFloor, snapTunnelSegmentEndpoints,
   validateSpaceContainment, inferSpaces
 };
 
@@ -2055,6 +2094,15 @@ function snapWallEndpoints(css) {
         o.x += originShift.x;
         o.y += originShift.y;
         o.z += originShift.z;
+
+        // Propagate Z shift to child openings hosted on this wall
+        if (Math.abs(originShift.z) > 1e-6) {
+          const wallId = wall.element_key || wall.id;
+          for (const el of css.elements) {
+            if (el.properties?.hostWallKey !== wallId) continue;
+            if (el.placement?.origin) el.placement.origin.z += originShift.z;
+          }
+        }
 
         const lenChange = (ep.which === 'start') ? -alongDir : alongDir;
         const newLen = wd.len + lenChange;
@@ -2237,6 +2285,70 @@ function snapSlabsToWallBases(css) {
 }
 
 // ============================================================================
+// WALL-TO-FLOOR Z SNAP
+// Ensures wall bases sit exactly on their storey floor elevation — closes the
+// visible gap between interior walls and the floor slab.
+// ============================================================================
+
+function snapWallsToStoreyFloor(css) {
+  if (!css.elements || css.elements.length === 0) return;
+  if (hasTunnelSegments(css)) return;
+
+  const levels = css.levelsOrSegments || [];
+  if (levels.length === 0) return;
+
+  // Build storey elevation map from levels
+  const storeyElevation = new Map();
+  for (const level of levels) {
+    storeyElevation.set(level.id, level.elevation_m || 0);
+  }
+
+  // Also derive floor-slab top Z per container for higher accuracy
+  const slabTopByContainer = new Map();
+  for (const e of css.elements) {
+    if ((e.type || '').toUpperCase() !== 'SLAB') continue;
+    if (e.properties?.slabType && e.properties.slabType !== 'FLOOR') continue;
+    const c = e.container || '_default';
+    const z = e.placement?.origin?.z;
+    const d = e.geometry?.depth || 0.2;
+    if (typeof z === 'number') {
+      const top = z + d;
+      if (!slabTopByContainer.has(c) || top > slabTopByContainer.get(c)) {
+        slabTopByContainer.set(c, top);
+      }
+    }
+  }
+
+  let snapped = 0;
+
+  for (const elem of css.elements) {
+    const t = (elem.type || '').toUpperCase();
+    if (t !== 'WALL') continue;
+
+    const o = elem.placement?.origin;
+    if (!o || typeof o.z !== 'number') continue;
+
+    const container = elem.container || '_default';
+
+    // Prefer slab-top Z, fall back to storey elevation
+    let targetZ = slabTopByContainer.get(container);
+    if (targetZ === undefined) targetZ = storeyElevation.get(container);
+    if (targetZ === undefined) continue;
+
+    // Snap if within 500mm — wall should sit on its storey floor
+    const gap = Math.abs(o.z - targetZ);
+    if (gap > 0.001 && gap <= 0.5) {
+      o.z = targetZ;
+      snapped++;
+    }
+  }
+
+  if (snapped > 0) {
+    console.log(`snapWallsToStoreyFloor: snapped ${snapped} wall(s) to storey floor elevation`);
+  }
+}
+
+// ============================================================================
 // WALL-SLAB ALIGNMENT (Phase 2G)
 // ============================================================================
 
@@ -2296,9 +2408,16 @@ function alignSlabsToWalls(css) {
     const slabW = p.width || 0;
     const slabH = p.height || 0;
 
-    if (slabW < wallExtentX * 0.9 || slabH < wallExtentY * 0.9) {
-      p.width = Math.max(slabW, wallExtentX);
-      p.height = Math.max(slabH, wallExtentY);
+    // Clip slabs to wall footprint — both undersized AND oversized slabs get corrected
+    const needsAlign = (
+      Math.abs(slabW - wallExtentX) > 0.1 ||
+      Math.abs(slabH - wallExtentY) > 0.1 ||
+      Math.abs(o.x - wallCenterX) > 0.1 ||
+      Math.abs(o.y - wallCenterY) > 0.1
+    );
+    if (needsAlign) {
+      p.width = wallExtentX;
+      p.height = wallExtentY;
       o.x = wallCenterX;
       o.y = wallCenterY;
       alignedCount++;
@@ -2306,7 +2425,7 @@ function alignSlabsToWalls(css) {
   }
 
   if (alignedCount > 0) {
-    console.log(`alignSlabsToWalls: extended ${alignedCount} slab(s) to match container wall footprint`);
+    console.log(`alignSlabsToWalls: aligned ${alignedCount} slab(s) to container wall footprint`);
   }
 }
 

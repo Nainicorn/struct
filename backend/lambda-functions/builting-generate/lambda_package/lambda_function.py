@@ -385,6 +385,9 @@ def derive_shell_thickness(profile_w, profile_h, explicit_t=None, material_hint=
             t = max(0.05, smallest * 0.05)
         else:
             t = max(0.15, smallest * 0.06)
+        # Never exceed 10% of the smallest cross-section dimension —
+        # prevents visually thick walls on small-bore tunnels/ducts.
+        t = min(t, smallest * 0.10)
     # Cap: two shell walls must fit inside profile
     w = float(profile_w) if profile_w else 1.0
     h = float(profile_h) if profile_h else 1.0
@@ -499,23 +502,37 @@ def derive_duct_profile(area_m2=None, system_type=None, parent_width=None, paren
 
 
 def derive_junction_overlap(profile_w, profile_h, turn_angle_deg=90.0):
-    """Compute shell-piece extension past a junction so adjacent panels meet without gaps.
+    """Compute segment extension past a junction so the mitre clip has material to cut.
 
-    Engineering basis: at a mitre joint, the cut face extends diagonally into the segment.
-    The extension needed = max_half_dim * tan(turn_angle/2).
-    A 0.5 safety factor ensures the overlap is trimmed away cleanly by the mitre clip.
-    Capped at 1.0m to prevent excessive extension on very large-bore tunnels.
+    Engineering basis: at a mitre joint with turn angle α, the bisector plane tilts
+    at α/2 from each segment axis. At the outermost lateral point of the profile
+    (x = ±width/2), the bisector extends (width/2) / tan(α/2) past the junction in
+    the run direction. The segment must extend at least this far for the mitre clip
+    to produce a clean angled face without gaps at the outer corner.
+
+    Only the profile WIDTH matters — the mitre cut is in the XZ plane (lateral × run)
+    and does not vary with height (Y). Capped at profile width to prevent absurd
+    extensions on very sharp turns (< 30°).
     Returns extension in meters per end (total depth increase = 2 × this value)."""
     w = float(profile_w) if profile_w else 1.0
-    h = float(profile_h) if profile_h else 1.0
-    max_half = max(w, h) / 2.0
-    angle_rad = math.radians(float(turn_angle_deg) / 2.0)
+    half_w = w / 2.0
+    angle_deg = float(turn_angle_deg)
+    # Near-straight junctions (> 170°) need minimal extension — mitre clip is skipped
+    if angle_deg >= 170.0:
+        return 0.05
+    # Near-zero angles are degenerate — clamp to 30° minimum
+    angle_deg = max(angle_deg, 30.0)
+    half_angle_rad = math.radians(angle_deg / 2.0)
     try:
-        tan_half = math.tan(angle_rad)
+        tan_half = math.tan(half_angle_rad)
     except (ValueError, OverflowError):
-        tan_half = 1.0  # 90° default
-    overlap = max_half * tan_half * 0.5
-    return round(min(max(overlap, 0.05), 1.0), 4)
+        tan_half = 1.0
+    # Extension = (width/2) / tan(α/2) = (width/2) * cot(α/2)
+    if tan_half < 1e-6:
+        overlap = w  # fallback cap
+    else:
+        overlap = half_w / tan_half
+    return round(min(max(overlap, 0.05), w), 4)
 
 
 def sanitize_axis_ref(axis_data, ref_data, elem_id=None):
@@ -1207,6 +1224,19 @@ def create_element_geometry(f, subcontext, geometry, elem_id=None):
             if elem_id:
                 print(f"Depth from pathPoints for {elem_id}: {depth:.2f}m")
 
+    # For MEP EXTRUSION elements with pathPoints, always derive direction from path
+    # even when depth is already set. VSM airway DUCTs carry pathPoints but arrive
+    # with method=EXTRUSION and a Z-up default axis — pathPoints encode the real direction.
+    if method == 'EXTRUSION' and geometry.get('pathPoints') and len(geometry.get('pathPoints', [])) >= 2:
+        pp = geometry['pathPoints']
+        p0, p1 = pp[0], pp[-1]
+        dx = float(p1.get('x', 0)) - float(p0.get('x', 0))
+        dy = float(p1.get('y', 0)) - float(p0.get('y', 0))
+        dz = float(p1.get('z', 0)) - float(p0.get('z', 0))
+        path_len = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if path_len > 0.001 and abs(dz / path_len) < 0.95:  # skip vertical shafts
+            direction = {'x': dx / path_len, 'y': dy / path_len, 'z': dz / path_len}
+
     # Rule G1: If SWEEP was requested but failed, and no valid depth exists,
     # return None instead of creating a degenerate 0.01m extrusion
     if method == 'SWEEP' and fallback_used and (depth is None or depth <= 0):
@@ -1217,8 +1247,8 @@ def create_element_geometry(f, subcontext, geometry, elem_id=None):
     if depth is None or depth <= 0:
         depth = 0.01  # clamp to minimum
 
-    # Bug 1 fix: Compute correct solid orientation for ARCH/ARBITRARY profiles
-    # so that profile local-Y (arch crown) maps to world-Z (up)
+    # Compute correct solid orientation so profile local-Y maps to world-Z (up).
+    # Only for ARCH/ARBITRARY profiles — RECTANGLE/CIRCLE use placement-driven orientation.
     solid_axis_param = None
     solid_ref_param = None
     profile_type = profile_data.get('type', 'RECTANGLE')
@@ -1841,6 +1871,7 @@ def generate_ifc4_from_css(css):
     geom_depth_by_css_key = {}        # css_key → extrusion depth (may include junction overlap extension)
     geom_orig_depth_by_css_key = {}   # css_key → original depth BEFORE junction overlap extension
     geom_junction_overlap_by_css_key = {} # css_key → overlap amount added per end (for shell pieces)
+    hollow_shell_solids_by_key = {}      # css_key → [lw, rw, roof, floor] solids (hollow manifold only)
 
     # Type grouping tracking for IfcRelDefinesByType
     type_group_data = []  # list of (ifc_element, ifc_entity_type, material_name, profile_key)
@@ -1971,6 +2002,123 @@ def generate_ifc4_from_css(css):
                     })
         if tunnel_segments_index:
             print(f"Tunnel segment index: {len(tunnel_segments_index)} segments for duct/pipe containment")
+        # Slope diagnostic: check if any segments have different entry/exit Z values.
+        # If none appear, elevation data is flat in the VSM (data gap, not code gap).
+        _slope_count = 0
+        for e in elements:
+            if e.get('type') != 'TUNNEL_SEGMENT':
+                continue
+            props = e.get('properties', {})
+            entry_z = props.get('entry_z') or props.get('start_z')
+            exit_z = props.get('exit_z') or props.get('end_z')
+            if entry_z is not None and exit_z is not None:
+                dz = float(exit_z) - float(entry_z)
+                if abs(dz) > 0.01:
+                    _slope_count += 1
+                    if _slope_count <= 5:
+                        print(f"SLOPED_SEGMENT: {e.get('element_key', e.get('id', ''))} "
+                              f"dZ={dz:.3f}m entry_z={float(entry_z):.2f} exit_z={float(exit_z):.2f}")
+        if _slope_count == 0:
+            print("SLOPE_DIAGNOSTIC: No sloped segments detected — all Z values are flat. "
+                  "Elevation data may be missing from source (DWG/VSM data gap).")
+        else:
+            print(f"SLOPE_DIAGNOSTIC: {_slope_count} sloped segments detected.")
+
+    # Mitre clip pre-pass: build junction node → [(elem_key, bearing_x, bearing_y, endpoint_type)]
+    # for bisector plane computation inside the hollow manifold generation below.
+    # Must run BEFORE the element loop so every segment sees the full junction map.
+    node_to_segs_for_clip = {}  # str(node_id) → [(ek, rx, ry, 'entry'|'exit')]
+    if has_tunnel_segments:
+        for _mcp_e in elements:
+            if _mcp_e.get('type') != 'TUNNEL_SEGMENT':
+                continue
+            if _mcp_e.get('properties', {}).get('branchClass') != 'STRUCTURAL':
+                continue
+            _mcp_ek = _mcp_e.get('element_key') or _mcp_e.get('id', '')
+            if not _mcp_ek:
+                continue
+            _mcp_pl = _mcp_e.get('placement', {})
+            _mcp_rd = _mcp_pl.get('refDirection', _mcp_pl.get('axis', {'x': 1, 'y': 0, 'z': 0}))
+            _mcp_rx = float(_mcp_rd.get('x', 1))
+            _mcp_ry = float(_mcp_rd.get('y', 0))
+            _mcp_rlen = math.sqrt(_mcp_rx * _mcp_rx + _mcp_ry * _mcp_ry)
+            if _mcp_rlen > 1e-6:
+                _mcp_rx /= _mcp_rlen
+                _mcp_ry /= _mcp_rlen
+            _mcp_en = _mcp_e.get('properties', {}).get('entry_node')
+            _mcp_ex = _mcp_e.get('properties', {}).get('exit_node')
+            if _mcp_en is not None:
+                node_to_segs_for_clip.setdefault(str(_mcp_en), []).append(
+                    (_mcp_ek, _mcp_rx, _mcp_ry, 'entry'))
+            if _mcp_ex is not None:
+                node_to_segs_for_clip.setdefault(str(_mcp_ex), []).append(
+                    (_mcp_ek, _mcp_rx, _mcp_ry, 'exit'))
+        if node_to_segs_for_clip:
+            print(f"Mitre clip pre-pass: {len(node_to_segs_for_clip)} junction nodes indexed")
+            # Diagnostic: compute and log the angle at every junction node
+            for _diag_node_id, _diag_segs in sorted(node_to_segs_for_clip.items(), key=lambda x: x[0]):
+                _diag_n = len(_diag_segs)
+                if _diag_n < 2:
+                    print(f"MITRE_ANGLE_CHECK: node={_diag_node_id} segments=1 (terminal, no angle)")
+                    continue
+                # Compute angle between every pair at this node
+                for _di in range(_diag_n):
+                    for _dj in range(_di + 1, _diag_n):
+                        _ek_i, _rx_i, _ry_i, _ep_i = _diag_segs[_di]
+                        _ek_j, _rx_j, _ry_j, _ep_j = _diag_segs[_dj]
+                        # Flip bearing to "away from junction" direction:
+                        #   exit_node means segment runs TOWARD this node → bearing is toward node, flip it
+                        #   entry_node means segment runs AWAY from this node → bearing already points away
+                        _ax = _rx_i if _ep_i == 'entry' else -_rx_i
+                        _ay = _ry_i if _ep_i == 'entry' else -_ry_i
+                        _bx = _rx_j if _ep_j == 'entry' else -_rx_j
+                        _by = _ry_j if _ep_j == 'entry' else -_ry_j
+                        # Angle between the two "away" directions
+                        _dot = _ax * _bx + _ay * _by
+                        _dot = max(-1.0, min(1.0, _dot))
+                        _angle_deg = math.acos(_dot) * (180.0 / math.pi)
+                        # Would this qualify for mitre? Topology requires 10-170, generate requires 5-175
+                        _topo_qualified = 10 <= _angle_deg <= 170
+                        _gen_qualified = 5 <= _angle_deg <= 175
+                        _has_path_rel = False
+                        # Check if a PATH_CONNECTS relationship with MITRE actually exists between these two
+                        for _chk_e in elements:
+                            _chk_ek = _chk_e.get('element_key') or _chk_e.get('id', '')
+                            if _chk_ek != _ek_i:
+                                continue
+                            for _chk_r in (_chk_e.get('relationships') or []):
+                                if _chk_r.get('type') == 'PATH_CONNECTS' and _chk_r.get('target') == _ek_j:
+                                    _ca = (_chk_r.get('metadata', {}) or {}).get('connectionAngle', {})
+                                    _has_path_rel = True if _ca and _ca.get('connectionType') == 'MITRE' else False
+                        print(f"MITRE_ANGLE_CHECK: node={_diag_node_id} pair={_ek_i[:20]}|{_ek_j[:20]} "
+                              f"angle={_angle_deg:.1f}° topo_qualifies={_topo_qualified} gen_qualifies={_gen_qualified} "
+                              f"has_mitre_rel={_has_path_rel} endpoints={_ep_i}/{_ep_j}")
+
+    # Build mitre angle lookup: for each junction node, store the min bend angle.
+    # The min angle between any pair of segments at a node determines the extension
+    # needed: sharper bends (smaller angle) require more overlap (cot(α/2) grows).
+    node_mitre_angles = {}  # str(node_id) → min angle (degrees) between "away" directions
+    for _nma_node_id, _nma_segs in node_to_segs_for_clip.items():
+        if len(_nma_segs) < 2:
+            continue
+        _nma_min_angle = 360.0
+        for _nma_i in range(len(_nma_segs)):
+            for _nma_j in range(_nma_i + 1, len(_nma_segs)):
+                _ek_i, _rx_i, _ry_i, _ep_i = _nma_segs[_nma_i]
+                _ek_j, _rx_j, _ry_j, _ep_j = _nma_segs[_nma_j]
+                # Flip bearing to "away from junction" direction
+                _ax = _rx_i if _ep_i == 'entry' else -_rx_i
+                _ay = _ry_i if _ep_i == 'entry' else -_ry_i
+                _bx = _rx_j if _ep_j == 'entry' else -_rx_j
+                _by = _ry_j if _ep_j == 'entry' else -_ry_j
+                _dot = max(-1.0, min(1.0, _ax * _bx + _ay * _by))
+                _ang = math.acos(_dot) * (180.0 / math.pi)
+                if _ang < _nma_min_angle:
+                    _nma_min_angle = _ang
+        node_mitre_angles[_nma_node_id] = _nma_min_angle
+    if node_mitre_angles:
+        print(f"Mitre angle lookup: {len(node_mitre_angles)} junction nodes, "
+              f"angles: {[f'{k}={v:.0f}°' for k, v in sorted(node_mitre_angles.items())[:10]]}")
 
     # Portal attachment: snap portal walls to nearest tunnel segment endpoint
     # so they overlap the tunnel mouth instead of floating independently.
@@ -2616,7 +2764,22 @@ def generate_ifc4_from_css(css):
                         new_oy = seg_oy + seg_ay * t + up_y * (seg_half_h * mount_frac)
                         new_oz = seg_oz + seg_az * t + up_z * (seg_half_h * mount_frac)
                         old_orig = placement_data['origin']
+                        placement_data = dict(placement_data)
                         placement_data['origin'] = {'x': new_ox, 'y': new_oy, 'z': new_oz}
+                        # Align duct extrusion axis to parent segment run direction.
+                        # Without this, the duct retains its original CSS orientation which
+                        # may point diagonal/vertical instead of following the tunnel bore.
+                        placement_data['axis'] = {'x': seg_ax, 'y': seg_ay, 'z': seg_az}
+                        # Lateral direction (perpendicular to run, in horizontal plane)
+                        lat_ref_len = math.sqrt(seg_ay ** 2 + seg_ax ** 2)
+                        if lat_ref_len > 1e-6:
+                            placement_data['refDirection'] = {
+                                'x': -seg_ay / lat_ref_len,
+                                'y':  seg_ax / lat_ref_len,
+                                'z': 0.0
+                            }
+                        else:
+                            placement_data['refDirection'] = {'x': 1.0, 'y': 0.0, 'z': 0.0}
                         # Cap duct depth — hard max per type to prevent massive extrusions
                         TUNNEL_MEP_MAX_DEPTH = {'DUCT': 30.0, 'PIPE': 20.0, 'CABLE_TRAY': 20.0}
                         max_mep_d = TUNNEL_MEP_MAX_DEPTH.get(css_type, 3.0)
@@ -2644,6 +2807,8 @@ def generate_ifc4_from_css(css):
                                     'z': seg_oz + seg_az * pt_t + up_z * (seg_half_h * mount_frac),
                                 })
                             geometry_data['pathPoints'] = clamped_pts
+                            # Also set geometry direction to match segment axis for sweep directrix
+                            geometry_data['direction'] = {'x': seg_ax, 'y': seg_ay, 'z': seg_az}
 
             # MEP hard depth cap inside segment-based structures — catches ducts/pipes/cables
             # by css_type OR semantic_type OR name. Driven by segment index, not domain name.
@@ -2699,8 +2864,8 @@ def generate_ifc4_from_css(css):
                       f"pathPts={len(_t_pp)} container={container_id} "
                       f"zAligned={_t_meta.get('zAligned')} parentSeg={_t_meta.get('parentSegment','none')}")
 
-            # Create placement (with sanitized axis/ref)
-            elem_lp = create_element_placement(f, storey_lp, placement_data, elem_id=css_id)
+            # Placement created after geometry modifications (hollow manifold, junction overlap)
+            # that rewrite placement_data axis/refDirection/origin — see below.
 
             # Equipment size override: replace placeholder 1×1×1 OR absurd dimensions with realistic defaults
             # Skip for generated systems (they already have intentional dimensions)
@@ -2895,6 +3060,38 @@ def generate_ifc4_from_css(css):
                             geometry_data['profile']['radius'] = max_radius
                             print(f"Duct/pipe radius cap: {css_id} {cur_radius:.3f} -> {max_radius:.3f}")
 
+            # Bug #4 fix: EXTRUSION ducts/pipes with pathPoints but Z-up axis — derive
+            # placement axis from the path direction so they extrude along the tunnel, not
+            # vertically. Only applies when axis is near-vertical and pathPoints provide a
+            # valid horizontal direction.
+            if (semantic_type in ('IfcDuctSegment', 'IfcPipeSegment', 'IfcCableCarrierSegment')
+                    and geometry_data.get('method', 'EXTRUSION') == 'EXTRUSION'
+                    and geometry_data.get('pathPoints') and len(geometry_data.get('pathPoints', [])) >= 2):
+                _pp = geometry_data['pathPoints']
+                _p0, _p1 = _pp[0], _pp[-1]
+                _pdx = float(_p1.get('x', 0)) - float(_p0.get('x', 0))
+                _pdy = float(_p1.get('y', 0)) - float(_p0.get('y', 0))
+                _pdz = float(_p1.get('z', 0)) - float(_p0.get('z', 0))
+                _plen = math.sqrt(_pdx * _pdx + _pdy * _pdy + _pdz * _pdz)
+                _cur_ax = placement_data.get('axis', {}) if isinstance(placement_data, dict) else {}
+                _cur_az = abs(float(_cur_ax.get('z', 1)))
+                if _plen > 0.01 and _cur_az > 0.95:
+                    # Axis is near-vertical but path is not — override axis with path direction
+                    placement_data = dict(placement_data)
+                    placement_data['axis'] = {'x': _pdx / _plen, 'y': _pdy / _plen, 'z': _pdz / _plen}
+                    placement_data['refDirection'] = {'x': 0.0, 'y': 0.0, 'z': 1.0}
+                    # Shift origin to path start
+                    placement_data['origin'] = {'x': float(_p0.get('x', 0)),
+                                                'y': float(_p0.get('y', 0)),
+                                                'z': float(_p0.get('z', 0))}
+                    geometry_data = dict(geometry_data)
+                    geometry_data['depth'] = _plen
+
+            # Per-end overlap caps: set by hollow manifold or shell piece path below,
+            # read by the mitre clip overlap recording further down.
+            entry_cap = 0.0
+            exit_cap = 0.0
+
             # Extend shell pieces slightly past junction boundaries so adjacent panels meet
             # without gaps. IfcBooleanClippingResult mitre clips in the second pass trim the
             # overlapping corners flush. Overlap derived from profile size and turn geometry
@@ -2976,6 +3173,10 @@ def generate_ifc4_from_css(css):
                 elif _ms_prof_type not in ('RECTANGLE', ''):
                     pass  # unknown profile type: fall through to normal element processing
                 else:
+                    # Rectangular hollow tube — same universal approach as curved profiles.
+                    # Set wallThickness on the profile so create_profile produces
+                    # IfcRectangleHollowProfileDef, then fall through to generic
+                    # create_element_geometry. No per-piece thin panels needed.
                     wt = float(properties.get('shellThickness_m', 0) or 0)
                     if wt <= 0:
                         seg_w_prelim = float(prof.get('width', 5.0))
@@ -2984,178 +3185,62 @@ def generate_ifc4_from_css(css):
                                                     material_hint=properties.get('material', ''))
                         print(f"Rectangular shell thickness derived: {css_id} "
                               f"({seg_w_prelim:.2f}x{seg_h_prelim:.2f}) → {wt:.4f}m")
+                    # Set wallThickness on the profile for IfcRectangleHollowProfileDef
+                    if not prof.get('wallThickness'):
+                        geometry_data = dict(geometry_data)
+                        geometry_data['profile'] = dict(prof)
+                        geometry_data['profile']['wallThickness'] = wt
+                    # Read bearing from refDirection (same as curved path)
+                    ref_d = placement_data.get('refDirection', placement_data.get('axis', {'x': 1, 'y': 0, 'z': 0}))
+                    rx_x = float(ref_d.get('x', 1))
+                    rx_y = float(ref_d.get('y', 0))
+                    r_len = math.sqrt(rx_x ** 2 + rx_y ** 2)
+                    if r_len > 1e-6:
+                        rx_x /= r_len
+                        rx_y /= r_len
+                    else:
+                        rx_x, rx_y = 1.0, 0.0
+                    seg_depth = safe_float(geometry_data.get('depth'), 1.0)
+                    # Terminal-aware end caps for junction overlap
                     seg_w = float(prof.get('width', 5.0))
                     seg_h = float(prof.get('height', 5.0))
-                    seg_depth = safe_float(geometry_data.get('depth'), 1.0)
-
-                    # Branch run direction — read from refDirection (horizontal branch bearing).
-                    # The CSS schema sets:
-                    #   placement.axis        = (0,0,1)  = world-up (element local Z)
-                    #   placement.refDirection = (rx,ry,0) = actual branch direction (element local X)
-                    # Reading from 'axis' gives (0,0,1) → ax_xy_len=0 → fallback (1,0,0) for ALL segments.
-                    ref_d = placement_data.get('refDirection', placement_data.get('axis', {'x': 1, 'y': 0, 'z': 0}))
-                    rx_x_raw = float(ref_d.get('x', 1))
-                    rx_y_raw = float(ref_d.get('y', 0))
-                    ax_xy_len = math.sqrt(rx_x_raw**2 + rx_y_raw**2)
-                    if ax_xy_len > 1e-6:
-                        rx_x = rx_x_raw / ax_xy_len
-                        rx_y = rx_y_raw / ax_xy_len
-                    else:
-                        # Near-vertical shaft or missing refDirection — fall back to world X
-                        rx_x, rx_y = 1.0, 0.0
-                        print(f"Segment bearing fallback to world-X for {css_id}: "
-                              f"no finite horizontal refDirection (shaft or missing data)")
-
-                    # Build element placement: world-up Z-axis, branch-direction X-axis.
-                    # CSS origin = segment MIDPOINT (topology engine convention).
-                    # Extend extrusion slightly beyond both ends so adjacent segments
-                    # overlap and visual seams at bends/junctions are eliminated.
-                    # END_CAP derived from profile: max_half_dim * tan(45°) * 0.5 — same
-                    # formula as derive_junction_overlap for a 90° turn.
-                    END_CAP = derive_junction_overlap(seg_w, seg_h, turn_angle_deg=90.0)
-                    extrude_depth = seg_depth + 2 * END_CAP
-
+                    _tc_eid = elem.get('element_key') or css_id
+                    _tc_en = str(properties.get('entry_node')) if properties.get('entry_node') is not None else None
+                    _tc_ex = str(properties.get('exit_node'))  if properties.get('exit_node')  is not None else None
+                    _entry_terminal = not any(t[0] != _tc_eid for t in node_to_segs_for_clip.get(_tc_en, [])) if _tc_en else True
+                    _exit_terminal  = not any(t[0] != _tc_eid for t in node_to_segs_for_clip.get(_tc_ex, [])) if _tc_ex else True
+                    # Use actual junction angle from node_mitre_angles for overlap sizing
+                    _entry_angle = node_mitre_angles.get(_tc_en, 90.0) if _tc_en else 90.0
+                    _exit_angle = node_mitre_angles.get(_tc_ex, 90.0) if _tc_ex else 90.0
+                    END_CAP_TERMINAL = derive_junction_overlap(seg_w, seg_h, turn_angle_deg=90.0)
+                    entry_cap = END_CAP_TERMINAL if _entry_terminal else derive_junction_overlap(seg_w, seg_h, turn_angle_deg=_entry_angle)
+                    exit_cap = END_CAP_TERMINAL if _exit_terminal else derive_junction_overlap(seg_w, seg_h, turn_angle_deg=_exit_angle)
+                    extrude_depth = seg_depth + entry_cap + exit_cap
+                    # Update geometry depth with end caps
+                    geometry_data = dict(geometry_data) if not isinstance(geometry_data, dict) or 'profile' not in geometry_data else geometry_data
+                    geometry_data['depth'] = extrude_depth
+                    # Compute solid frame: axis=bearing, refDirection=world-up
+                    # Origin shifted back by half-depth from CSS midpoint
                     orig = placement_data.get('origin', {'x': 0, 'y': 0, 'z': 0})
-                    seg_placement = dict(placement_data)
-                    seg_placement['axis'] = {'x': 0.0, 'y': 0.0, 'z': 1.0}
-                    seg_placement['refDirection'] = {'x': rx_x, 'y': rx_y, 'z': 0.0}
-                    # Shift origin back by half-depth + END_CAP along bearing (midpoint→start-cap).
-                    seg_placement['origin'] = {
-                        'x': float(orig.get('x', 0)) - rx_x * (seg_depth / 2 + END_CAP),
-                        'y': float(orig.get('y', 0)) - rx_y * (seg_depth / 2 + END_CAP),
+                    placement_data = dict(placement_data)
+                    placement_data['axis'] = {'x': rx_x, 'y': rx_y, 'z': 0.0}
+                    placement_data['refDirection'] = {'x': 0.0, 'y': 0.0, 'z': 1.0}
+                    placement_data['origin'] = {
+                        'x': float(orig.get('x', 0)) - rx_x * (seg_depth / 2 + entry_cap),
+                        'y': float(orig.get('y', 0)) - rx_y * (seg_depth / 2 + entry_cap),
                         'z': float(orig.get('z', 0)),
                     }
+                    print(f"Rectangular tunnel segment {css_id}: "
+                          f"{seg_w:.1f}x{seg_h:.1f} wallThickness={wt:.3f}m "
+                          f"depth={seg_depth:.1f}→{extrude_depth:.1f} "
+                          f"entry={'T' if _entry_terminal else 'J'}={entry_cap:.2f} "
+                          f"exit={'T' if _exit_terminal else 'J'}={exit_cap:.2f}")
+                    # Fall through to generic create_element_geometry
+                    # (which uses create_profile → IfcRectangleHollowProfileDef)
 
-                    try:
-                        # 3-piece shell: left wall + right wall + roof (NO bottom).
-                        # A closed IfcArbitraryClosedProfileDef always creates a bottom
-                        # member. Using 3 separate rectangle extrusions avoids that.
-                        safe_wt = min(wt, min(seg_w, seg_h) / 2.0 - 0.01)
-                        safe_wt = max(0.01, safe_wt)
-                        hh = seg_h / 2.0
-                        hw = seg_w / 2.0
-
-                        # Shared solid frame: extrude along branch direction
-                        # In product local space: local-X = branch dir, local-Z = up
-                        # Solid Axis (local-Z) = (1,0,0) = branch direction
-                        # Solid RefDirection (local-X) = (0,0,1) = world-up
-                        solid_axis_dir = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0))
-                        solid_ref_dir = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
-                        extrude_dir = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
-
-                        mat_name = properties.get('material', 'shotcrete')
-                        shell_color = MATERIAL_COLORS.get(mat_name, (0.753, 0.753, 0.753))
-
-                        shell_solids = []
-
-                        # In the solid's local 2D profile space:
-                        #   profile-X (first coord) = solid RefDirection = world-up
-                        #   profile-Y (second coord) = cross(solid Axis, solid RefDir) = lateral
-
-                        # Left wall: full height, thickness wt, at lateral = -hw + wt/2
-                        lw_origin = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, -hw + safe_wt / 2.0))
-                        lw_xdir = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0))
-                        lw_place = f.create_entity('IfcAxis2Placement2D', Location=lw_origin, RefDirection=lw_xdir)
-                        lw_prof = f.create_entity('IfcRectangleProfileDef', ProfileType='AREA',
-                                                   XDim=float(seg_h), YDim=float(safe_wt), Position=lw_place)
-                        lw_solid_pos = f.create_entity('IfcAxis2Placement3D',
-                                                        Location=f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0)),
-                                                        Axis=solid_axis_dir, RefDirection=solid_ref_dir)
-                        lw_solid = f.create_entity('IfcExtrudedAreaSolid', SweptArea=lw_prof,
-                                                    Position=lw_solid_pos, ExtrudedDirection=extrude_dir,
-                                                    Depth=float(extrude_depth))
-                        apply_style(f, lw_solid, shell_color, transparency=0.0, entity_name=f"{css_id}_lw")
-                        shell_solids.append(lw_solid)
-
-                        # Right wall: full height, thickness wt, at lateral = +hw - wt/2
-                        rw_origin = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, hw - safe_wt / 2.0))
-                        rw_place = f.create_entity('IfcAxis2Placement2D', Location=rw_origin,
-                                                    RefDirection=f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0)))
-                        rw_prof = f.create_entity('IfcRectangleProfileDef', ProfileType='AREA',
-                                                   XDim=float(seg_h), YDim=float(safe_wt), Position=rw_place)
-                        rw_solid_pos = f.create_entity('IfcAxis2Placement3D',
-                                                        Location=f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0)),
-                                                        Axis=solid_axis_dir, RefDirection=solid_ref_dir)
-                        rw_solid = f.create_entity('IfcExtrudedAreaSolid', SweptArea=rw_prof,
-                                                    Position=rw_solid_pos, ExtrudedDirection=extrude_dir,
-                                                    Depth=float(extrude_depth))
-                        apply_style(f, rw_solid, shell_color, transparency=0.0, entity_name=f"{css_id}_rw")
-                        shell_solids.append(rw_solid)
-
-                        # Roof: spans between wall inner faces, thickness wt, at top
-                        roof_w = max(0.01, seg_w - 2 * safe_wt)  # inner width
-                        roof_origin = f.create_entity('IfcCartesianPoint', Coordinates=(hh - safe_wt / 2.0, 0.0))
-                        roof_place = f.create_entity('IfcAxis2Placement2D', Location=roof_origin,
-                                                      RefDirection=f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0)))
-                        roof_prof = f.create_entity('IfcRectangleProfileDef', ProfileType='AREA',
-                                                     XDim=float(safe_wt), YDim=float(roof_w), Position=roof_place)
-                        roof_solid_pos = f.create_entity('IfcAxis2Placement3D',
-                                                          Location=f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0)),
-                                                          Axis=solid_axis_dir, RefDirection=solid_ref_dir)
-                        roof_solid = f.create_entity('IfcExtrudedAreaSolid', SweptArea=roof_prof,
-                                                      Position=roof_solid_pos, ExtrudedDirection=extrude_dir,
-                                                      Depth=float(extrude_depth))
-                        apply_style(f, roof_solid, shell_color, transparency=0.0, entity_name=f"{css_id}_roof")
-                        shell_solids.append(roof_solid)
-
-                        # Floor: mirrors roof at bottom — spans between wall inner faces
-                        floor_origin = f.create_entity('IfcCartesianPoint', Coordinates=(-hh + safe_wt / 2.0, 0.0))
-                        floor_place = f.create_entity('IfcAxis2Placement2D', Location=floor_origin,
-                                                       RefDirection=f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0)))
-                        floor_prof = f.create_entity('IfcRectangleProfileDef', ProfileType='AREA',
-                                                      XDim=float(safe_wt), YDim=float(roof_w), Position=floor_place)
-                        floor_solid_pos = f.create_entity('IfcAxis2Placement3D',
-                                                           Location=f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0)),
-                                                           Axis=solid_axis_dir, RefDirection=solid_ref_dir)
-                        floor_solid = f.create_entity('IfcExtrudedAreaSolid', SweptArea=floor_prof,
-                                                       Position=floor_solid_pos, ExtrudedDirection=extrude_dir,
-                                                       Depth=float(extrude_depth))
-                        apply_style(f, floor_solid, (0.65, 0.65, 0.65), transparency=0.0, entity_name=f"{css_id}_floor")
-                        shell_solids.append(floor_solid)
-
-                        # Combine 4 solids into one shape representation
-                        body_rep = f.create_entity('IfcShapeRepresentation',
-                                                    ContextOfItems=subcontext,
-                                                    RepresentationIdentifier='Body',
-                                                    RepresentationType='SweptSolid',
-                                                    Items=tuple(shell_solids))
-                        hollow_pds = f.create_entity('IfcProductDefinitionShape',
-                                                      Representations=(body_rep,))
-                        seg_lp = create_element_placement(f, storey_lp, seg_placement, elem_id=css_id)
-
-                        ifc_wall = f.create_entity('IfcWall',
-                                                    GlobalId=new_guid(),
-                                                    OwnerHistory=owner,
-                                                    Name=f"{elem.get('name', css_id)} — Tunnel Shell",
-                                                    ObjectType='Tunnel Shell',
-                                                    ObjectPlacement=seg_lp,
-                                                    Representation=hollow_pds)
-
-                        ifc_elements_by_css_id[css_id] = ifc_wall
-                        ek = elem.get('element_key', css_id)
-                        if ek:
-                            ifc_by_key[ek] = ifc_wall
-
-                        add_property_set(f, owner, ifc_wall, 'Pset_TunnelSegmentCommon', {
-                            'SegmentType': (str(properties.get('segmentType', 'MAIN_TUNNEL')), 'IfcLabel'),
-                            'ProfileType': ('RECTANGULAR', 'IfcLabel'),
-                            'LiningType': (str(properties.get('liningType', 'SHOTCRETE')), 'IfcLabel'),
-                            'ShellMethod': ('WORLD_UP_FOOTPRINT', 'IfcLabel'),
-                            'ChainageStart_m': (float(properties.get('chainageStart_m', 0)), 'IfcReal'),
-                            'ChainageEnd_m': (float(properties.get('chainageEnd_m', 0)), 'IfcReal'),
-                        })
-
-                        if container_id not in elements_by_container:
-                            elements_by_container[container_id] = []
-                        elements_by_container[container_id].append(ifc_wall)
-                        element_count += 1
-
-                        # Floor is now the 4th solid in shell_solids — no separate slab needed.
-
-                        continue  # hollow solid replaces all 4 thin shell panels
-
-                    except Exception as hollow_err:
-                        print(f"Warning: hollow solid failed for {css_id}: {hollow_err}, using fallback")
+            # Create placement AFTER all placement_data modifications (hollow manifold,
+            # junction overlap, portal buildings) so the IFC placement reflects final axes.
+            elem_lp = create_element_placement(f, storey_lp, placement_data, elem_id=css_id)
 
             # Create geometry (with normalized direction + fallback chain)
             solid_or_surface, pds, fallback_used = create_element_geometry(f, subcontext, geometry_data, elem_id=css_id)
@@ -3167,12 +3252,26 @@ def generate_ifc4_from_css(css):
                 geom_profile_by_css_key[elem_key_for_clip] = geometry_data.get('profile', {})
                 ext_depth = safe_float(geometry_data.get('depth'), 0.0)
                 geom_depth_by_css_key[elem_key_for_clip] = ext_depth
-                # For tunnel shell pieces, record the overlap extension so the mitre clip
-                # pass can compute actual junction positions (junction is at ±overlap from ends).
+                # Record overlap extension so mitre clip can compute actual junction positions.
+                # Shell pieces: symmetric overlap (JUNCTION_OVERLAP_M per end).
+                # Hollow manifold TUNNEL_SEGMENT: asymmetric (entry_cap / exit_cap).
+                # Convention: junc_overlap = entry-side overlap, orig_depth = ext_depth - entry - exit.
                 is_shell_pc = bool(shell_piece) and shell_piece in ('LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF')
-                junc_overlap = JUNCTION_OVERLAP_M if is_shell_pc else 0.0
+                is_hollow_manifold_seg = (css_type == 'TUNNEL_SEGMENT'
+                                          and properties.get('branchClass') == 'STRUCTURAL'
+                                          and elem_key_for_clip in manifold_rendered_branches)
+                if is_shell_pc:
+                    junc_overlap = JUNCTION_OVERLAP_M
+                    orig_depth = ext_depth - 2 * junc_overlap
+                elif is_hollow_manifold_seg:
+                    # entry_cap/exit_cap set in the hollow manifold block above
+                    junc_overlap = entry_cap
+                    orig_depth = ext_depth - entry_cap - exit_cap
+                else:
+                    junc_overlap = 0.0
+                    orig_depth = ext_depth
                 geom_junction_overlap_by_css_key[elem_key_for_clip] = junc_overlap
-                geom_orig_depth_by_css_key[elem_key_for_clip] = ext_depth - 2 * junc_overlap
+                geom_orig_depth_by_css_key[elem_key_for_clip] = orig_depth
             if solid_or_surface is None or pds is None:
                 # Per-element resilience: create geometry-less proxy instead of skipping
                 print(f"Warning: All geometry failed for {css_id}, creating proxy fallback")
@@ -4096,6 +4195,7 @@ def generate_ifc4_from_css(css):
             shell_role = rel_metadata.get('shellRole', '')
             role = rel.get('role', 'STRUCTURAL_CONTINUITY')
             connection_angle = rel_metadata.get('connectionAngle')  # {angleDeg, connectionType}
+            print(f"MITRE_EVAL: angle={connection_angle} type={connection_angle.get('connectionType') if isinstance(connection_angle, dict) else None} relatingKey={elem_key} relatedKey={target_key} has_mitre={isinstance(connection_angle, dict) and connection_angle.get('connectionType') == 'MITRE'} metadata_keys={list(rel_metadata.keys())}")
 
             # Validate interface kinds
             if source_kind not in IFC_CONNECTION_TYPES:
@@ -4155,16 +4255,185 @@ def generate_ifc4_from_css(css):
     if path_connect_count > 0:
         print(f"IfcRelConnectsPathElements: created {path_connect_count} path connections ({mitre_count} mitre joints)")
 
+    # ---- JUNCTION FILL PASS: triangular fill piece at each bend junction inner corner ----
+    # At every bend junction, the two hollow tube segments leave a triangular void on the
+    # inner (concave) side where their flat end faces meet at an angle. This pass adds a
+    # solid triangular prism that fills that void. The triangle is derived from the two
+    # bearing vectors and the junction node position. Terminal ends are skipped.
+    _jf_fill_count = 0
+    _jf_processed_nodes = set()
+    # Get the tunnel storey for spatial containment of fill pieces
+    _jf_storey_entry = (storey_map.get('seg-tunnel-main')
+                        or next(iter(storey_map.values()), None))
+    _jf_fill_elements = []
+
+    if _jf_storey_entry and node_to_segs_for_clip:
+        _jf_storey_entity, _jf_storey_lp, _ = _jf_storey_entry
+        for _jf_nid, _jf_segs in node_to_segs_for_clip.items():
+            if len(_jf_segs) < 2 or _jf_nid in _jf_processed_nodes:
+                continue
+            _jf_processed_nodes.add(_jf_nid)
+
+            # For each pair of segments meeting at this node, add a fill piece
+            for _jf_i in range(len(_jf_segs)):
+                for _jf_j in range(_jf_i + 1, len(_jf_segs)):
+                    _jf_ek_a, _jf_rx_a, _jf_ry_a, _jf_ep_a = _jf_segs[_jf_i]
+                    _jf_ek_b, _jf_rx_b, _jf_ry_b, _jf_ep_b = _jf_segs[_jf_j]
+
+                    # Away-from-junction bearing vectors (2D)
+                    _jf_ax = _jf_rx_a if _jf_ep_a == 'entry' else -_jf_rx_a
+                    _jf_ay = _jf_ry_a if _jf_ep_a == 'entry' else -_jf_ry_a
+                    _jf_bx = _jf_rx_b if _jf_ep_b == 'entry' else -_jf_rx_b
+                    _jf_by = _jf_ry_b if _jf_ep_b == 'entry' else -_jf_ry_b
+
+                    # Skip near-straight junctions — no visible gap
+                    _jf_dot = max(-1.0, min(1.0, _jf_ax * _jf_bx + _jf_ay * _jf_by))
+                    _jf_angle = math.acos(_jf_dot) * 180.0 / math.pi
+                    if _jf_angle >= 170.0:
+                        continue
+
+                    # Get geometry info for segment A
+                    _jf_place_a = placement_by_css_key.get(_jf_ek_a, {})
+                    _jf_prof_a = geom_profile_by_css_key.get(_jf_ek_a, {})
+                    _jf_depth_a = geom_depth_by_css_key.get(_jf_ek_a, 0.0)
+                    _jf_jov_a = geom_junction_overlap_by_css_key.get(_jf_ek_a, 0.0)
+                    _jf_odep_a = geom_orig_depth_by_css_key.get(_jf_ek_a, _jf_depth_a)
+                    if not _jf_place_a or _jf_depth_a <= 0:
+                        continue
+
+                    # Compute junction world position from segment A
+                    _jf_orig_a = _jf_place_a.get('origin', {})
+                    _jf_ox = float(_jf_orig_a.get('x', 0))
+                    _jf_oy = float(_jf_orig_a.get('y', 0))
+                    _jf_oz = float(_jf_orig_a.get('z', 0))
+                    _jf_axis_a = _jf_place_a.get('axis', {})
+                    _jf_avx = float(_jf_axis_a.get('x', 1))
+                    _jf_avy = float(_jf_axis_a.get('y', 0))
+                    _jf_avz = float(_jf_axis_a.get('z', 0))
+                    _jf_avn = math.sqrt(_jf_avx**2 + _jf_avy**2 + _jf_avz**2)
+                    if _jf_avn > 1e-6:
+                        _jf_avx /= _jf_avn; _jf_avy /= _jf_avn; _jf_avz /= _jf_avn
+
+                    # Local Z of junction within segment A's solid
+                    if _jf_ep_a == 'entry':
+                        _jf_local_z_a = _jf_jov_a          # entry_cap into solid
+                    else:
+                        _jf_local_z_a = _jf_jov_a + _jf_odep_a   # entry_cap + orig_depth
+
+                    _jf_jx = _jf_ox + _jf_avx * _jf_local_z_a
+                    _jf_jy = _jf_oy + _jf_avy * _jf_local_z_a
+                    _jf_jz = _jf_oz + _jf_avz * _jf_local_z_a
+
+                    # Tunnel dimensions
+                    _jf_W = float(_jf_prof_a.get('width', 5.0))
+                    _jf_H = float(_jf_prof_a.get('height', 5.0))
+
+                    # Overlap for each segment at this junction endpoint
+                    # entry_cap stored as jov; exit_cap = depth - jov - orig_depth
+                    _jf_ov_a = (_jf_jov_a if _jf_ep_a == 'entry'
+                                 else _jf_depth_a - _jf_jov_a - _jf_odep_a)
+                    _jf_jov_b = geom_junction_overlap_by_css_key.get(_jf_ek_b, 0.0)
+                    _jf_depth_b = geom_depth_by_css_key.get(_jf_ek_b, 0.0)
+                    _jf_odep_b = geom_orig_depth_by_css_key.get(_jf_ek_b, _jf_depth_b)
+                    _jf_ov_b = (_jf_jov_b if _jf_ep_b == 'entry'
+                                 else _jf_depth_b - _jf_jov_b - _jf_odep_b)
+
+                    if _jf_ov_a < 0.05 or _jf_ov_b < 0.05:
+                        continue  # insufficient overlap data
+
+                    # Triangle vertices in local XY (relative to junction):
+                    # V1 at origin, V2 along A's away direction, V3 along B's away direction.
+                    _jf_v2x = float(_jf_ax * _jf_ov_a)
+                    _jf_v2y = float(_jf_ay * _jf_ov_a)
+                    _jf_v3x = float(_jf_bx * _jf_ov_b)
+                    _jf_v3y = float(_jf_by * _jf_ov_b)
+
+                    # Fill piece floor Z: junction center minus half tunnel height
+                    _jf_floor_z = float(_jf_jz - _jf_H / 2.0)
+
+                    try:
+                        # Triangular profile (2D, in XY plane of fill piece)
+                        _pt1 = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0))
+                        _pt2 = f.create_entity('IfcCartesianPoint', Coordinates=(_jf_v2x, _jf_v2y))
+                        _pt3 = f.create_entity('IfcCartesianPoint', Coordinates=(_jf_v3x, _jf_v3y))
+                        _pt_close = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0))
+                        _jf_poly = f.create_entity('IfcPolyline', Points=(_pt1, _pt2, _pt3, _pt_close))
+                        _jf_prof = f.create_entity('IfcArbitraryClosedProfileDef',
+                            ProfileType='AREA', ProfileName=None, OuterCurve=_jf_poly)
+
+                        # Solid: extrude triangle upward by tunnel height
+                        _jf_solid_origin = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0))
+                        _jf_solid_z = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+                        _jf_solid_x = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0))
+                        _jf_solid_pos = f.create_entity('IfcAxis2Placement3D',
+                            Location=_jf_solid_origin, Axis=_jf_solid_z, RefDirection=_jf_solid_x)
+                        _jf_extrude_dir = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+                        _jf_solid = f.create_entity('IfcExtrudedAreaSolid',
+                            SweptArea=_jf_prof, Position=_jf_solid_pos,
+                            ExtrudedDirection=_jf_extrude_dir, Depth=float(_jf_H))
+
+                        # Apply concrete color
+                        apply_style(f, _jf_solid, (0.60, 0.60, 0.62), 0.0, 'JunctionFill')
+
+                        _jf_shape_rep = f.create_entity('IfcShapeRepresentation',
+                            ContextOfItems=subcontext,
+                            RepresentationIdentifier='Body',
+                            RepresentationType='SweptSolid',
+                            Items=(_jf_solid,))
+                        _jf_pds = f.create_entity('IfcProductDefinitionShape',
+                            Representations=(_jf_shape_rep,))
+
+                        # Placement: origin at junction floor, world-aligned axes
+                        _jf_lp_origin = f.create_entity('IfcCartesianPoint',
+                            Coordinates=(float(_jf_jx), float(_jf_jy), _jf_floor_z))
+                        _jf_lp_z = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+                        _jf_lp_x = f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0))
+                        _jf_ax2pl = f.create_entity('IfcAxis2Placement3D',
+                            Location=_jf_lp_origin, Axis=_jf_lp_z, RefDirection=_jf_lp_x)
+                        _jf_lp = f.create_entity('IfcLocalPlacement',
+                            PlacementRelTo=_jf_storey_lp, RelativePlacement=_jf_ax2pl)
+
+                        _jf_proxy = f.create_entity('IfcBuildingElementProxy',
+                            GlobalId=new_guid(),
+                            OwnerHistory=owner,
+                            Name=f'JunctionFill_{_jf_nid}',
+                            Description=f'Junction corner fill angle={_jf_angle:.0f}deg',
+                            ObjectPlacement=_jf_lp,
+                            Representation=_jf_pds)
+
+                        _jf_fill_elements.append(_jf_proxy)
+                        _jf_fill_count += 1
+                        print(f"JunctionFill: node={_jf_nid} angle={_jf_angle:.1f}° "
+                              f"ov_a={_jf_ov_a:.2f} ov_b={_jf_ov_b:.2f} "
+                              f"v2=({_jf_v2x:.2f},{_jf_v2y:.2f}) v3=({_jf_v3x:.2f},{_jf_v3y:.2f})")
+                    except Exception as _jf_err:
+                        print(f"JunctionFill failed at node {_jf_nid}: {_jf_err}")
+
+    # Contain all fill pieces in the tunnel storey
+    if _jf_fill_elements and _jf_storey_entry:
+        _jf_storey_entity, _, _ = _jf_storey_entry
+        f.create_entity('IfcRelContainedInSpatialStructure',
+            GlobalId=new_guid(), OwnerHistory=owner,
+            RelatedElements=tuple(_jf_fill_elements),
+            RelatingStructure=_jf_storey_entity)
+    if _jf_fill_count > 0:
+        print(f"Junction fills: {_jf_fill_count} triangular corner pieces added at "
+              f"{len(_jf_processed_nodes)} nodes")
+
     # ---- MITRE CLIP PASS: Apply IfcBooleanClippingResult at mitre wall/tunnel junctions ----
     # For each WALL or TUNNEL_SEGMENT with MITRE PATH_CONNECTS, trim the overlapping corner
     # via a half-space cut. This produces Revit-quality flush mitre junctions in IFC geometry.
     #
     # Coordinate conventions differ by element type:
-    #   WALL:           run direction = local X (refDirection), junction at X = ±half_length
-    #   TUNNEL_SEGMENT: run direction = local Z (axis/extrusion direction), junction at Z = 0 or depth
+    #   WALL (shell piece): run direction = local Z (axis), junction at Z = junc_ov (ATSTART) or junc_ov+orig_depth (ATEND)
+    #   WALL (architectural): run direction = local X (refDirection), junction at X = ±half_length
+    #   TUNNEL_SEGMENT:     run direction = local Z (axis/extrusion direction), same Z convention as shell piece walls
     mitre_clip_count = 0
     mitre_clip_errors = 0
+    _mitre_clip_disabled = False
     for elem in elements:
+        if _mitre_clip_disabled:
+            continue
         css_type_c = (elem.get('type', '') or '').upper()
         if css_type_c not in ('WALL', 'TUNNEL_SEGMENT'):
             continue
@@ -4179,10 +4448,15 @@ def generate_ifc4_from_css(css):
         src_placement = placement_by_css_key.get(elem_key_c, {})
         src_profile   = geom_profile_by_css_key.get(elem_key_c, {})
 
+        _hm_cut_half_spaces = []  # half-spaces applied this element (for hollow manifold multi-solid re-application)
         if is_tunnel_seg:
             # Tunnel: run direction = placement.axis (= solid local Z after shear fix).
-            # Junction at Z=0 (ATSTART) or Z=depth (ATEND) in solid local space.
+            # Solid occupies Z=[0, seg_depth]. Origin was shifted back by entry_cap (junc_ov).
+            #   ATSTART junction at Z = junc_ov (start of original segment).
+            #   ATEND   junction at Z = junc_ov + orig_depth.
             seg_depth = geom_depth_by_css_key.get(elem_key_c, 0.0)
+            junc_ov_c = geom_junction_overlap_by_css_key.get(elem_key_c, 0.0)
+            orig_depth_c = geom_orig_depth_by_css_key.get(elem_key_c, seg_depth)
             if seg_depth <= 0:
                 continue
             src_ax = src_placement.get('axis', {})
@@ -4214,10 +4488,10 @@ def generate_ifc4_from_css(css):
                 # A's exit direction in A's local XZ frame (X=lateral, Z=run)
                 if source_kind_c == 'ATEND':
                     dir_a_local_z = 1.0    # exits in +Z direction
-                    junction_local_z = seg_depth
+                    junction_local_z = junc_ov_c + orig_depth_c
                 elif source_kind_c == 'ATSTART':
                     dir_a_local_z = -1.0   # exits in -Z direction
-                    junction_local_z = 0.0
+                    junction_local_z = junc_ov_c
                 else:
                     continue
 
@@ -4251,11 +4525,15 @@ def generate_ifc4_from_css(css):
                 try:
                     # Cut plane in A's solid local space. Tunnel junction is on the Z axis.
                     # Normal: (bisect_x, 0, bisect_z) in local = tilted in the XZ plane.
+                    print(f"MITRE_CLIP: {elem_key_c} angle={angle_deg}° junction={source_kind_c} "
+                          f"juncZ={junction_local_z:.3f} bisect=({bisect_x:.3f}, {bisect_z:.3f}) "
+                          f"target={target_key_c}")
                     cut_pt  = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, junction_local_z))
                     cut_nrm = f.create_entity('IfcDirection', DirectionRatios=(bisect_x, 0.0, bisect_z))
                     cut_ax2 = f.create_entity('IfcAxis2Placement3D', Location=cut_pt, Axis=cut_nrm)
                     cut_plane = f.create_entity('IfcPlane', Position=cut_ax2)
                     half_space = f.create_entity('IfcHalfSpaceSolid', BaseSurface=cut_plane, AgreementFlag=True)
+                    _hm_cut_half_spaces.append(half_space)
                     clipped_solid = f.create_entity(
                         'IfcBooleanClippingResult',
                         Operator='DIFFERENCE',
@@ -4436,6 +4714,9 @@ def generate_ifc4_from_css(css):
 
                     try:
                         # Cut plane in A's solid local space (solid origin at element center)
+                        print(f"MITRE_CLIP_WALL: {elem_key_c} angle={angle_deg}° "
+                              f"juncX={junction_local_x:.3f} bisect=({bisect_x:.3f}, {bisect_y:.3f}) "
+                              f"target={target_key_c} shell={elem_shell_piece_c or 'ARCH'}")
                         cut_pt  = f.create_entity('IfcCartesianPoint', Coordinates=(junction_local_x, 0.0, 0.0))
                         cut_nrm = f.create_entity('IfcDirection', DirectionRatios=(bisect_x, bisect_y, 0.0))
                         cut_ax2 = f.create_entity('IfcAxis2Placement3D', Location=cut_pt, Axis=cut_nrm)
@@ -4461,7 +4742,23 @@ def generate_ifc4_from_css(css):
                 if ifc_src and hasattr(ifc_src, 'Representation') and ifc_src.Representation:
                     for rep in ifc_src.Representation.Representations:
                         if rep.RepresentationIdentifier == 'Body':
-                            rep.Items = (clipped_solid,)
+                            hm_shells = hollow_shell_solids_by_key.get(elem_key_c)
+                            if hm_shells and len(hm_shells) > 1 and _hm_cut_half_spaces:
+                                # Hollow manifold: re-apply all half-space cuts to each of the 4
+                                # shell solids independently so all walls/roof/floor get clipped.
+                                final_items = []
+                                for base_sol in hm_shells:
+                                    s = base_sol
+                                    for hs in _hm_cut_half_spaces:
+                                        s = f.create_entity('IfcBooleanClippingResult',
+                                                            Operator='DIFFERENCE',
+                                                            FirstOperand=s,
+                                                            SecondOperand=hs)
+                                    final_items.append(s)
+                                rep.Items = tuple(final_items)
+                            else:
+                                rep.Items = (clipped_solid,)
+                            rep.RepresentationType = 'Clipping'
                             break
             except Exception as rep_err:
                 if mitre_clip_errors <= 5:
@@ -4997,7 +5294,8 @@ def generate_ifc4_from_css(css):
                                and e.get('properties', {}).get('branchClass') == 'STRUCTURAL'
                                and e.get('element_key') not in decomposed_branches)
         defaulted_thickness = sum(1 for e in elements if e.get('properties', {}).get('shellThicknessBasis') == 'DEFAULT')
-        space_suppressed = css.get('metadata', {}).get('tunnelDecomposition', {}).get('spaceSuppressedCount', 0)
+        space_suppressed = (css.get('metadata') or {}).get('tunnelDecomposition') or {}
+        space_suppressed = space_suppressed.get('spaceSuppressedCount', 0) if isinstance(space_suppressed, dict) else 0
 
         # v3 metrics
         duct_segment_count = sum(1 for ent in ifc_by_key.values() if ent.is_a('IfcDuctSegment'))
@@ -5083,7 +5381,7 @@ def generate_ifc4_from_css(css):
 def compute_css_hash(css):
     """Compute SHA-256 hash of CSS for caching.
     Version salt ensures geometry fixes bust stale cached IFC files."""
-    css_str = json.dumps(css, sort_keys=True) + '__geom_fix_v16_floor_datum_filter'
+    css_str = json.dumps(css, sort_keys=True) + '__v42_mep_narrow_guard'
     return hashlib.sha256(css_str.encode('utf-8')).hexdigest()
 
 

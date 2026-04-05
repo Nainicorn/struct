@@ -94,7 +94,7 @@ export function cssToInferred(css) {
         faces: geom.faces || null
       } : null,
       containerHypothesis: elem.container || null,
-      relationships: (elem.relationships || []).map(r => ({ type: r.type, target: r.target })),
+      relationships: (elem.relationships || []).map(r => ({ ...r, type: r.type, target: r.target })),
       material: elem.material || null,
       confidence: elem.confidence || 0.7,
       source: elem.source || 'LLM',
@@ -182,7 +182,7 @@ export function cssToResolved(css) {
       } : null,
       container: elem.container || null,
       unresolvedContainer: !elem.container,
-      relationships: (elem.relationships || []).map(r => ({ type: r.type, target: r.target })),
+      relationships: (elem.relationships || []).map(r => ({ ...r, type: r.type, target: r.target })),
       properties: elem.properties || {},
       material: elem.material || { name: 'default', color: [0.5, 0.5, 0.5], transparency: 0 },
       confidence: elem.confidence || 0.7,
@@ -290,7 +290,7 @@ export function resolvedToLegacyCss(resolved) {
         return g;
       })() : null,
       container: elem.container || null,
-      relationships: (elem.relationships || []).map(r => ({ type: r.type, target: r.target })),
+      relationships: (elem.relationships || []).map(r => ({ ...r, type: r.type, target: r.target })),
       properties: elem.properties || {},
       material: elem.material || { name: 'default', color: [0.5, 0.5, 0.5], transparency: 0 },
       confidence: elem.confidence || 0.7,
