@@ -71,8 +71,9 @@ body[data-collapsed="true"] .__header-toggle {
 
 .__header-logo-text {
     font-size: 0.8125rem;
-    font-weight: 600;
-    letter-spacing: 0.06em;
+    font-weight: 400;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
     color: var(--text-primary);
     white-space: nowrap;
     transition: opacity var(--transition-layout);
@@ -90,7 +91,7 @@ body[data-collapsed="true"] .__header-logo-text {
     padding: 0 20px;
     background: var(--bg-surface);
     font-size: var(--font-size-base);
-    font-weight: 500;
+    font-weight: 400;
     color: var(--text-secondary);
     text-align: center;
     overflow: hidden;
@@ -106,7 +107,7 @@ body[data-collapsed="true"] .__header-logo-text {
 }
 
 .__header-user-name {
-    font-weight: 500;
+    font-weight: 400;
     color: var(--text-secondary);
 }
 
@@ -127,10 +128,12 @@ body[data-collapsed="true"] .__header-logo-text {
     border: 1px solid var(--border-default);
     cursor: pointer;
     padding: 7px 14px;
-    border-radius: var(--radius-md);
+    border-radius: 2px;
     color: var(--text-secondary);
-    font-weight: 500;
+    font-weight: 400;
     font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     transition: all var(--transition);
     white-space: nowrap;
 }

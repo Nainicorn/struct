@@ -15,3 +15,5 @@ Investigate why refinement re-processing is less accurate than initial generatio
 ## Gesture / Spatial Model Control - THIS IS NOT PART OF THE TASKS THIS IS MY OWN FEATURE I WILL IMPLEMENT LATER
 
 Add gesture or spatial input controls for navigating and manipulating the 3D model — rotate, zoom, section cut, element select via hand/body tracking or device motion (think Tony Stark holographic UI). Explore WebXR, hand tracking APIs, or webcam-based gesture recognition as the input layer into the xeokit viewer.
+
+## after may 1, change aws to my account

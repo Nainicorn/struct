@@ -3,28 +3,28 @@
 
 /* ─── Design Tokens ─── */
 :root {
-    /* Background layers */
-    --bg-base: #0f1117;
-    --bg-surface: #161920;
-    --bg-elevated: #1c1f28;
-    --bg-hover: #242731;
-    --bg-active: #2a2d38;
+    /* Background layers — blue steel dark */
+    --bg-base: #000000;
+    --bg-surface: #0d1117;
+    --bg-elevated: #131a24;
+    --bg-hover: #192130;
+    --bg-active: #1e2838;
 
-    /* Borders */
-    --border-subtle: #2a2d38;
-    --border-default: #363940;
-    --border-strong: #4a4d57;
+    /* Borders — steel blue tinted */
+    --border-subtle: #192130;
+    --border-default: #223044;
+    --border-strong: #2e4060;
 
     /* Text */
-    --text-primary: #e8eaed;
-    --text-secondary: #a1a7b0;
-    --text-muted: #6b7280;
+    --text-primary: #e2e8f0;
+    --text-secondary: #8892a4;
+    --text-muted: #4d5a6e;
 
-    /* Accent (restrained purple) */
-    --accent: #7c6bbd;
-    --accent-hover: #8d7fd0;
-    --accent-subtle: rgba(124, 107, 189, 0.12);
-    --accent-ring: rgba(124, 107, 189, 0.35);
+    /* Accent — Mistral orange */
+    --accent: #fa520f;
+    --accent-hover: #fb6424;
+    --accent-subtle: rgba(250, 82, 15, 0.12);
+    --accent-ring: rgba(250, 82, 15, 0.25);
 
     /* Status */
     --status-success: #34d399;
@@ -45,11 +45,11 @@
     --font-size-md: 16px;
     --font-size-lg: 20px;
 
-    /* Spacing */
-    --radius-sm: 4px;
-    --radius-md: 6px;
-    --radius-lg: 8px;
-    --radius-xl: 12px;
+    /* Spacing — sharp Mistral corners */
+    --radius-sm: 1px;
+    --radius-md: 2px;
+    --radius-lg: 2px;
+    --radius-xl: 2px;
 
     /* Transitions */
     --transition: 0.15s ease;
@@ -60,11 +60,11 @@
     --sensor-warning: #facc15;
     --sensor-critical: #ef4444;
 
-    /* Telemetry overlay glass */
-    --glass-bg: rgba(30, 30, 30, 0.85);
-    --glass-border: rgba(255, 255, 255, 0.12);
-    --glass-border-hover: rgba(255, 255, 255, 0.2);
-    --glass-text: #94a3b8;
+    /* Telemetry overlay glass — steel blue tinted */
+    --glass-bg: rgba(10, 14, 22, 0.90);
+    --glass-border: rgba(100, 140, 200, 0.15);
+    --glass-border-hover: rgba(100, 140, 200, 0.28);
+    --glass-text: #7a8fa8;
     --glass-text-hover: #e2e8f0;
 }
 
@@ -75,8 +75,8 @@
 
 /* ─── Selection ─── */
 ::selection {
-    background: rgba(124, 107, 189, 0.35);
-    color: #f0edf9;
+    background: rgba(250, 82, 15, 0.25);
+    color: #fff;
 }
 
 /* ─── Toast Notification ─── */
@@ -143,7 +143,7 @@ button {
     border-radius: var(--radius-md);
     padding: 8px 16px;
     font-size: var(--font-size-base);
-    font-weight: 500;
+    font-weight: 400;
     font-family: var(--font-family);
     transition: all var(--transition);
     background: transparent;
