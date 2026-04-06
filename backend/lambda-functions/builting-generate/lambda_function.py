@@ -3190,6 +3190,32 @@ def generate_ifc4_from_css(css):
                         'z': float(orig_c.get('z', 0)),
                     }
                     print(f"Curved tunnel segment {css_id}: {_ms_prof_type} profile with wallThickness={wt_curved}")
+                    # Junction overlap caps for arch/curved profiles
+                    # (mirrors the rectangular path at lines 3236-3255 — without caps,
+                    # arch tubes end exactly at junction nodes leaving visible gaps)
+                    _tc_eid_c = elem.get('element_key') or css_id
+                    _tc_en_c = str(properties.get('entry_node')) if properties.get('entry_node') is not None else None
+                    _tc_ex_c = str(properties.get('exit_node'))  if properties.get('exit_node')  is not None else None
+                    _entry_term_c = not any(t[0] != _tc_eid_c for t in node_to_segs_for_clip.get(_tc_en_c, [])) if _tc_en_c else True
+                    _exit_term_c  = not any(t[0] != _tc_eid_c for t in node_to_segs_for_clip.get(_tc_ex_c, [])) if _tc_ex_c else True
+                    _cw = float(prof.get('width', prof.get('radius', 1) * 2))
+                    _ch = float(prof.get('height', prof.get('radius', 1) * 2))
+                    _END_CAP_C = derive_junction_overlap(_cw, _ch, turn_angle_deg=90.0)
+                    _entry_ang_c = node_mitre_angles.get(_tc_en_c, 90.0) if _tc_en_c and not _entry_term_c else 90.0
+                    _exit_ang_c  = node_mitre_angles.get(_tc_ex_c, 90.0) if _tc_ex_c and not _exit_term_c  else 90.0
+                    _entry_cap_c = _END_CAP_C if _entry_term_c else derive_junction_overlap(_cw, _ch, turn_angle_deg=_entry_ang_c)
+                    _exit_cap_c  = _END_CAP_C if _exit_term_c  else derive_junction_overlap(_cw, _ch, turn_angle_deg=_exit_ang_c)
+                    _extrude_depth_c = seg_depth_c + _entry_cap_c + _exit_cap_c
+                    geometry_data = dict(geometry_data)
+                    geometry_data['depth'] = _extrude_depth_c
+                    placement_data['origin'] = {
+                        'x': placement_data['origin']['x'] - rx_c * _entry_cap_c,
+                        'y': placement_data['origin']['y'] - ry_c * _entry_cap_c,
+                        'z': placement_data['origin']['z'],
+                    }
+                    print(f"Arch tunnel caps: {css_id} depth={seg_depth_c:.1f}→{_extrude_depth_c:.1f} "
+                          f"entry={'T' if _entry_term_c else 'J'}={_entry_cap_c:.2f} "
+                          f"exit={'T' if _exit_term_c else 'J'}={_exit_cap_c:.2f}")
                     # Fall through to generic create_element_geometry
                 elif _ms_prof_type not in ('RECTANGLE', ''):
                     pass  # unknown profile type: fall through to normal element processing

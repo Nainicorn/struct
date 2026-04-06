@@ -1323,6 +1323,14 @@ function decomposeTunnelShell(css) {
     elem.properties.decompositionMethod = isApproximated
       ? `SEMANTIC_${approximationType || 'CURVED'}` : 'SEMANTIC_RECTANGULAR';
 
+    // Apply arch profile to eligible structural segments so the generator uses
+    // IfcArbitraryProfileDefWithVoids (hollow horseshoe arch) instead of 4-panel
+    // rectangular decomposition. Produces curved ceiling visible from interior
+    // and cleaner junction overlap geometry (one tube vs. 4 separate panel edges).
+    if (props.branchClass === 'STRUCTURAL' && (elem.geometry?.profile?.type || 'RECTANGLE') === 'RECTANGLE') {
+      elem.geometry.profile = { ...(elem.geometry.profile || {}), type: 'ARCH', curveRatio: 0.3 };
+    }
+
     // Backfill geometry.path from frame if not present
     if (!elem.geometry.path) {
       const bearing = getTunnelBearing(elem);
@@ -2494,10 +2502,11 @@ function generateJunctionTransitions(css) {
       const jW = (branchEndpoints[0].W + branchEndpoints[1].W) / 2;
       const jH = (branchEndpoints[0].H + branchEndpoints[1].H) / 2;
       const gapDist = vecDist(branchEndpoints[0].endpoint, branchEndpoints[1].endpoint);
-      // Hollow-manifold approach: tubes already overlap 0.3m past their nominal ends.
-      // Bend plug only needs to fill the residual gap — cap at 0.6m (2 × overlap) to avoid protrusion.
-      const bendPlugDepth = Math.min(Math.max(gapDist * 1.1 + 0.1, 0.3), 0.6);
-      const bendProfile = { type: 'RECTANGLE', width: jW, height: jH };
+      // Hollow-manifold approach: tubes already overlap past their nominal ends.
+      // Bend plug fills the residual corner gap — cap at 1.2m (arch tubes have wider overlap
+      // zones than rectangular panels, so a larger cap ensures full coverage).
+      const bendPlugDepth = Math.min(Math.max(gapDist * 1.1 + 0.1, 0.3), 1.2);
+      const bendProfile = { type: 'ARCH', width: jW, height: jH, curveRatio: 0.3 };
 
       const bendFrame = buildTunnelFrame(center, vecAdd(center, bendAxis));
       const bendRef = bendFrame?.lateral || { x: 1, y: 0, z: 0 };
@@ -2505,9 +2514,9 @@ function generateJunctionTransitions(css) {
       transitionElements.push({
         id: `bend-plug-${node}`,
         element_key: `bend-plug-${node}`,
-        type: 'PROXY',
+        type: 'WALL',
         name: `Bend Transition — ${node}`,
-        semanticType: 'IfcBuildingElementProxy',
+        semanticType: 'IfcWall',
         confidence: 0.2,
         source: 'TRANSITION_APPROXIMATION',
         container: branchEndpoints[0].container,
