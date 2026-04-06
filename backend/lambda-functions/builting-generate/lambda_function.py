@@ -3208,6 +3208,10 @@ def generate_ifc4_from_css(css):
                     _extrude_depth_c = seg_depth_c + _entry_cap_c + _exit_cap_c
                     geometry_data = dict(geometry_data)
                     geometry_data['depth'] = _extrude_depth_c
+                    # Critical: set direction to the bearing so create_element_geometry
+                    # orients the ARCH extrusion horizontally (not the default Z-up, which
+                    # would produce vertical chimneys instead of horizontal tunnel tubes).
+                    geometry_data['direction'] = {'x': rx_c, 'y': ry_c, 'z': 0.0}
                     placement_data['origin'] = {
                         'x': placement_data['origin']['x'] - rx_c * _entry_cap_c,
                         'y': placement_data['origin']['y'] - ry_c * _entry_cap_c,
