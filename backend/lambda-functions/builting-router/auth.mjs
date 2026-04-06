@@ -81,36 +81,12 @@ const auth = {
     if (method === 'POST') {
       const body = JSON.parse(event.body || '{}');
       if (body.action === 'login') return auth.login(event.body);
-      if (body.action === 'signup') return auth.signup(event.body);
       return { error: 'Invalid action', statusCode: 400 };
     }
 
     if (method === 'GET') return auth.validate(event);
 
     return { error: 'Invalid method', statusCode: 400 };
-  },
-
-  signup: async (body) => {
-    const { email, password, name } = JSON.parse(body || '{}');
-    if (!email || !password || !name) return { error: 'Missing fields', statusCode: 400 };
-
-    const existing = await dynamo.send(new QueryCommand({
-      TableName,
-      IndexName: 'email-index',
-      KeyConditionExpression: 'email = :e',
-      ExpressionAttributeValues: { ':e': email }
-    }));
-
-    if (existing.Items?.length) return { error: 'User exists', statusCode: 409 };
-
-    const id = randomUUID();
-    const hashedPassword = await hashPassword(password);
-    await dynamo.send(new PutCommand({
-      TableName,
-      Item: { id, email, password: hashedPassword, name, created_at: Date.now() }
-    }));
-
-    return { user: { id, email, name }, token: createToken(id) };
   },
 
   login: async (body) => {

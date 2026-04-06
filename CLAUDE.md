@@ -31,10 +31,10 @@ The `backend` folder contains the most recent code identical to the current setu
 
 | Resource | Value |
 |---|---|
-| **Account** | 008368474482 (GovCloud) |
+| **Account** | [redacted — GovCloud] |
 | **Region** | us-gov-east-1 |
 | **ARN prefix** | `arn:aws-us-gov` |
-| **CLI profile** | `leidos` |
+| **CLI profile** | configured locally |
 
 ---
 
@@ -93,14 +93,6 @@ The `backend` folder contains the most recent code identical to the current setu
 - **builting-users** — user accounts
    - PK: `id` (String), GSI: `email-index`
    - Fields: id, created_at, email, name, password (scrypt-hashed)
-   - Test users:
-      | id | name | email | password (plaintext) |
-      |---|---|---|---|
-      | user-1 | Sreenaina | skoujal@gmu.edu | Bujji1125$ |
-      | user-2 | Gesu | gmahmads@gmu.edu | builting |
-      | user-3 | Ibrahim | ihassane@gmu.edu | builting |
-      | user-4 | Tamanno | talimova@gmu.edu | builting |
-
 - **builting-renders** — per-user render records
    - PK: `user_id` (String), SK: `render_id` (String)
    - Fields: ai_generated_description, ai_generated_title, created_at, description, ifc_s3_path, s3_path, source_files, status
@@ -143,12 +135,12 @@ All functions run on arm64 and share `builting-role`.
 
 ### ECR
 
-- `008368474482.dkr.ecr.us-gov-east-1.amazonaws.com/builting-json-to-ifc`
+- `[account-id].dkr.ecr.us-gov-east-1.amazonaws.com/builting-json-to-ifc`
 
 ### API Gateway
 
-- **builting-api** (ID: `b665o7k8bc`)
-- URL: `https://b665o7k8bc.execute-api.us-gov-east-1.amazonaws.com/prod`
+- **builting-api**
+- URL: configured via environment variable `VITE_API_BASE_URL`
 - Stages: `dev`, `prod`
 - Structure:
 ```
