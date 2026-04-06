@@ -3208,10 +3208,6 @@ def generate_ifc4_from_css(css):
                     _extrude_depth_c = seg_depth_c + _entry_cap_c + _exit_cap_c
                     geometry_data = dict(geometry_data)
                     geometry_data['depth'] = _extrude_depth_c
-                    # Critical: set direction to the bearing so create_element_geometry
-                    # orients the ARCH extrusion horizontally (not the default Z-up, which
-                    # would produce vertical chimneys instead of horizontal tunnel tubes).
-                    geometry_data['direction'] = {'x': rx_c, 'y': ry_c, 'z': 0.0}
                     placement_data['origin'] = {
                         'x': placement_data['origin']['x'] - rx_c * _entry_cap_c,
                         'y': placement_data['origin']['y'] - ry_c * _entry_cap_c,
@@ -3220,7 +3216,36 @@ def generate_ifc4_from_css(css):
                     print(f"Arch tunnel caps: {css_id} depth={seg_depth_c:.1f}→{_extrude_depth_c:.1f} "
                           f"entry={'T' if _entry_term_c else 'J'}={_entry_cap_c:.2f} "
                           f"exit={'T' if _exit_term_c else 'J'}={_exit_cap_c:.2f}")
-                    # Fall through to generic create_element_geometry
+                    # Create arch hollow solid DIRECTLY in element LOCAL frame — avoids
+                    # create_element_geometry which computes solid_axis/solid_ref in world
+                    # coords but IFC applies the element transform on top, doubling rotation.
+                    # Element local frame: Z=bearing, X=world-up, Y=cross(bearing,up)=lateral.
+                    # Solid frame for correct arch orientation:
+                    #   Axis=(0,0,1) → local-Z → extrude along bearing ✓
+                    #   RefDirection=(0,-1,0) → -local-Y → profile-X=-lateral(arch width,symmetric OK)
+                    #   Y=cross(Axis,Ref)=(1,0,0) → local-X → world-up → arch height ✓
+                    _arch_profile_def = create_profile(f, geometry_data.get('profile', {}))
+                    if _arch_profile_def is not None:
+                        _arch_orig = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0))
+                        _arch_ax   = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+                        _arch_ref  = f.create_entity('IfcDirection', DirectionRatios=(0.0, -1.0, 0.0))
+                        _arch_pos  = f.create_entity('IfcAxis2Placement3D', Location=_arch_orig,
+                                                      Axis=_arch_ax, RefDirection=_arch_ref)
+                        _arch_ext  = f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0))
+                        _arch_solid = f.create_entity('IfcExtrudedAreaSolid',
+                                                       SweptArea=_arch_profile_def, Position=_arch_pos,
+                                                       ExtrudedDirection=_arch_ext,
+                                                       Depth=float(_extrude_depth_c))
+                        _arch_body = f.create_entity('IfcShapeRepresentation',
+                                                      ContextOfItems=subcontext,
+                                                      RepresentationIdentifier='Body',
+                                                      RepresentationType='SweptSolid',
+                                                      Items=(_arch_solid,))
+                        _shell_pds = f.create_entity('IfcProductDefinitionShape',
+                                                      Representations=(_arch_body,))
+                        _panel_solids = [_arch_solid]  # mitre clip tracking reuses this slot
+                        _shell_decomposed = True
+                        print(f"Arch tunnel solid: {css_id} ({_cw:.1f}×{_ch:.1f} wt={wt_curved:.3f})")
                 elif _ms_prof_type not in ('RECTANGLE', ''):
                     pass  # unknown profile type: fall through to normal element processing
                 else:
