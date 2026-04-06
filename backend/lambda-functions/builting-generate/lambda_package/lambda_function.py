@@ -233,7 +233,7 @@ EQUIPMENT_MAX_DEPTH = {
 
 # CSS type → IFC entity mapping (confident, >= 0.7)
 SEMANTIC_IFC_MAP = {
-    'WALL': 'IfcWall',
+    'WALL': 'IfcWallStandardCase',
     'SLAB': 'IfcSlab',
     'COLUMN': 'IfcColumn',
     'BEAM': 'IfcBeam',
@@ -1252,7 +1252,7 @@ def create_element_geometry(f, subcontext, geometry, elem_id=None):
     solid_axis_param = None
     solid_ref_param = None
     profile_type = profile_data.get('type', 'RECTANGLE')
-    if profile_type in ('ARCH', 'ARBITRARY'):
+    if profile_type in ('ARCH', 'ARBITRARY') and not geometry.get('_placementDriven'):
         dx = float(direction.get('x', 0))
         dy = float(direction.get('y', 0))
         dz = float(direction.get('z', 1))
@@ -1476,12 +1476,20 @@ def apply_material_layer(f, owner, ifc_element, material_name, thickness, layer_
         layer = f.create_entity('IfcMaterialLayer', Material=mat, LayerThickness=float(thickness))
         layer_set = f.create_entity('IfcMaterialLayerSet', MaterialLayers=(layer,), LayerSetName=material_name)
         _material_cache[cache_key] = layer_set
+    # Walls (AXIS2): NEGATIVE sense with offset at -half_thickness (Revit/IFC convention).
+    # Slabs (AXIS3): POSITIVE sense, offset 0.0.
+    if layer_direction == 'AXIS2':
+        direction_sense = 'NEGATIVE'
+        offset = -(float(thickness) / 2.0)
+    else:
+        direction_sense = 'POSITIVE'
+        offset = 0.0
     usage = f.create_entity(
         'IfcMaterialLayerSetUsage',
         ForLayerSet=layer_set,
         LayerSetDirection=layer_direction,
-        DirectionSense='POSITIVE',
-        OffsetFromReferenceLine=0.0
+        DirectionSense=direction_sense,
+        OffsetFromReferenceLine=offset
     )
     f.create_entity(
         'IfcRelAssociatesMaterial',
@@ -1498,6 +1506,7 @@ def get_predefined_type(ifc_entity_type, css_type):
         return 'ROOF' if css_type == 'ROOF' else 'FLOOR'
     mapping = {
         'IfcWall': 'SOLIDWALL',
+        'IfcWallStandardCase': 'SOLIDWALL',
         'IfcColumn': 'COLUMN',
         'IfcBeam': 'BEAM',
         'IfcDoor': 'DOOR',
@@ -2464,6 +2473,10 @@ def generate_ifc4_from_css(css):
                 else:
                     elem_name = f"{type_label} — {css_id}"
 
+            # Sanitize elem_name to ASCII — web-ifc 0.0.51 parser crashes on X2-encoded
+            # unicode (e.g. em dash U+2014 -> \X2\2014\X0\) with "offset is out of bounds"
+            elem_name = elem_name.replace('\u2014', ' - ').replace('\u2013', ' - ')
+
             container_id = elem.get('container', 'level-1')
             placement_data = elem.get('placement', {'origin': {'x': 0, 'y': 0, 'z': 0}})
             geometry_data = elem.get('geometry', {'method': 'EXTRUSION', 'profile': {'type': 'RECTANGLE', 'width': 1, 'height': 1}, 'depth': 1})
@@ -3159,15 +3172,23 @@ def generate_ifc4_from_css(css):
                         rx_c, ry_c = 1.0, 0.0
                     seg_depth_c = safe_float(geometry_data.get('depth'), 1.0)
                     orig_c = placement_data.get('origin', {'x': 0, 'y': 0, 'z': 0})
-                    # Compute solid frame for arch/circle: axis=bearing, refDirection=world-up
+                    # Placement: axis=bearing (element Z=run dir), refDirection=lateral (element X=lateral).
+                    # Element frame: Z=bearing, X=lateral=(-ry,rx,0), Y=cross(bearing,lateral)=worldUp.
+                    # Identity solid frame (no solid_axis override via _placementDriven) then gives:
+                    #   solid Z = elem Z = bearing (extrusion along run) ✓
+                    #   solid X = elem X = lateral (arch width horizontal) ✓
+                    #   solid Y = elem Y = worldUp (arch height vertical) ✓
+                    lat_x = -ry_c  # cross(worldUp, bearing).x
+                    lat_y = rx_c   # cross(worldUp, bearing).y
                     placement_data = dict(placement_data)
                     placement_data['axis'] = {'x': rx_c, 'y': ry_c, 'z': 0.0}
-                    placement_data['refDirection'] = {'x': 0.0, 'y': 0.0, 'z': 1.0}
+                    placement_data['refDirection'] = {'x': lat_x, 'y': lat_y, 'z': 0.0}
                     placement_data['origin'] = {
                         'x': float(orig_c.get('x', 0)) - rx_c * seg_depth_c / 2,
                         'y': float(orig_c.get('y', 0)) - ry_c * seg_depth_c / 2,
                         'z': float(orig_c.get('z', 0)),
                     }
+                    geometry_data['_placementDriven'] = True
                     print(f"Curved tunnel segment {css_id}: {_ms_prof_type} profile with wallThickness={wt_curved}")
                     # Fall through to generic create_element_geometry
                 elif _ms_prof_type not in ('RECTANGLE', ''):
@@ -3219,12 +3240,14 @@ def generate_ifc4_from_css(css):
                     # Update geometry depth with end caps
                     geometry_data = dict(geometry_data) if not isinstance(geometry_data, dict) or 'profile' not in geometry_data else geometry_data
                     geometry_data['depth'] = extrude_depth
-                    # Compute solid frame: axis=bearing, refDirection=world-up
-                    # Origin shifted back by half-depth from CSS midpoint
+                    # Placement: axis=bearing (Z=run dir), refDirection=lateral (X=lateral).
+                    # Element frame: Z=bearing, X=lateral=(-ry,rx,0), Y=worldUp.
+                    # Identity solid → XDim goes laterally (width), YDim goes vertically (height). ✓
+                    lat_rx, lat_ry = -rx_y, rx_x   # cross(worldUp, bearing) horizontal
                     orig = placement_data.get('origin', {'x': 0, 'y': 0, 'z': 0})
                     placement_data = dict(placement_data)
                     placement_data['axis'] = {'x': rx_x, 'y': rx_y, 'z': 0.0}
-                    placement_data['refDirection'] = {'x': 0.0, 'y': 0.0, 'z': 1.0}
+                    placement_data['refDirection'] = {'x': lat_rx, 'y': lat_ry, 'z': 0.0}
                     placement_data['origin'] = {
                         'x': float(orig.get('x', 0)) - rx_x * (seg_depth / 2 + entry_cap),
                         'y': float(orig.get('y', 0)) - rx_y * (seg_depth / 2 + entry_cap),
@@ -3237,6 +3260,26 @@ def generate_ifc4_from_css(css):
                           f"exit={'T' if _exit_terminal else 'J'}={exit_cap:.2f}")
                     # Fall through to generic create_element_geometry
                     # (which uses create_profile → IfcRectangleHollowProfileDef)
+
+            # Universal tunnel orientation fix — runs after all branchClass-specific logic.
+            # geometry.direction is the authoritative bearing (proven: it drives the horizontal
+            # Axis/Curve2D representation correctly). Set ObjectPlacement axis=bearing so the
+            # identity solid frame extrudes along element-local Z = bearing = horizontal run.
+            if css_type == 'TUNNEL_SEGMENT':
+                _ut_dir = geometry_data.get('direction', {})
+                _ut_bx = float(_ut_dir.get('x', 0))
+                _ut_by = float(_ut_dir.get('y', 0))
+                _ut_bl = math.sqrt(_ut_bx ** 2 + _ut_by ** 2)
+                if _ut_bl > 0.1:
+                    _ut_bx /= _ut_bl
+                    _ut_by /= _ut_bl
+                    _ut_latx = -_ut_by
+                    _ut_laty = _ut_bx
+                    placement_data = dict(placement_data)
+                    placement_data['axis'] = {'x': _ut_bx, 'y': _ut_by, 'z': 0.0}
+                    placement_data['refDirection'] = {'x': _ut_latx, 'y': _ut_laty, 'z': 0.0}
+                    geometry_data = dict(geometry_data)
+                    geometry_data['_placementDriven'] = True
 
             # Create placement AFTER all placement_data modifications (hollow manifold,
             # junction overlap, portal buildings) so the IFC placement reflects final axes.
@@ -3280,8 +3323,7 @@ def generate_ifc4_from_css(css):
                 error_count += 1
 
             # Dual Axis+Body representation for structural elements (like Revit)
-            # Suppressed in segment-based structures — centerlines render as visible diagonal lines
-            if css_type in ('WALL', 'SLAB', 'TUNNEL_SEGMENT') and pds and not fallback_used and not has_tunnel_segments:
+            if css_type in ('WALL', 'SLAB', 'TUNNEL_SEGMENT') and pds and not fallback_used:
                 try:
                     direction_data = geometry_data.get('direction', {'x': 0, 'y': 0, 'z': 1})
                     depth_val = geometry_data.get('depth', 1)
@@ -3775,7 +3817,7 @@ def generate_ifc4_from_css(css):
             if shell_thickness and shell_piece in ('LEFT_WALL', 'RIGHT_WALL', 'FLOOR', 'ROOF'):
                 # Shell pieces: always apply (thickness from decomposition is reliable)
                 mat_name = material_data.get('name', 'concrete') if material_data else 'concrete'
-                layer_dir = 'AXIS2' if ifc_entity_type == 'IfcWall' else 'AXIS3'
+                layer_dir = 'AXIS2' if ifc_entity_type in ('IfcWall', 'IfcWallStandardCase') else 'AXIS3'
                 apply_material_layer(f, owner, ifc_element, mat_name, shell_thickness, layer_dir)
                 mat_layer_applied = True
             elif not mat_layer_applied and confidence >= 0.6:
@@ -3787,7 +3829,7 @@ def generate_ifc4_from_css(css):
                 g_d = safe_float(geometry_data.get('depth'), 0.0)
                 # Skip placeholder 1×1×1 geometry
                 is_placeholder = (abs(g_w - 1.0) < 0.01 and abs(g_h - 1.0) < 0.01 and abs(g_d - 1.0) < 0.01)
-                if ifc_entity_type == 'IfcWall' and not is_placeholder:
+                if ifc_entity_type in ('IfcWall', 'IfcWallStandardCase') and not is_placeholder:
                     wall_thickness = min(g_w, g_h) if g_w > 0 and g_h > 0 else 0
                     if 0.01 <= wall_thickness <= 2.0:
                         apply_material_layer(f, owner, ifc_element, mat_name, wall_thickness, 'AXIS2')
@@ -4419,6 +4461,138 @@ def generate_ifc4_from_css(css):
     if _jf_fill_count > 0:
         print(f"Junction fills: {_jf_fill_count} triangular corner pieces added at "
               f"{len(_jf_processed_nodes)} nodes")
+
+    # ---- JUNCTION NODE CUBE PROXIES ----
+    # One IfcBuildingElementProxy per junction node (≥2 tunnel segments meeting).
+    # Uses a shared IfcRepresentationMap + IfcMappedItem for geometry reuse.
+    _jnp_elements = []
+    _jnp_count = 0
+
+    if _jf_storey_entry and node_to_segs_for_clip and has_tunnel_segments:
+        _jnp_storey_entity, _jnp_storey_lp, _ = _jf_storey_entry
+
+        # Determine average tunnel cross-section dimensions across all segments
+        _jnp_widths = []
+        _jnp_heights = []
+        for _jnp_segs_v in node_to_segs_for_clip.values():
+            for _jnp_ek_v, _, _, _ in _jnp_segs_v:
+                _jnp_p = geom_profile_by_css_key.get(_jnp_ek_v, {})
+                if _jnp_p.get('width'):
+                    _jnp_widths.append(float(_jnp_p['width']))
+                if _jnp_p.get('height'):
+                    _jnp_heights.append(float(_jnp_p['height']))
+        _jnp_cube_w = (sum(_jnp_widths) / len(_jnp_widths)) if _jnp_widths else 5.0
+        _jnp_cube_h = (sum(_jnp_heights) / len(_jnp_heights)) if _jnp_heights else 5.0
+        _jnp_cube_d = _jnp_cube_w  # square footprint
+
+        # Build shared geometry: box solid extruded along Z
+        _jnp_rect = f.create_entity('IfcRectangleProfileDef',
+            ProfileType='AREA', ProfileName='JunctionProxyCross',
+            XDim=float(_jnp_cube_w), YDim=float(_jnp_cube_d))
+        _jnp_solid_origin_pt = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0))
+        _jnp_solid_pos = f.create_entity('IfcAxis2Placement3D',
+            Location=_jnp_solid_origin_pt,
+            Axis=f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0)),
+            RefDirection=f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0)))
+        _jnp_solid = f.create_entity('IfcExtrudedAreaSolid',
+            SweptArea=_jnp_rect, Position=_jnp_solid_pos,
+            ExtrudedDirection=f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0)),
+            Depth=float(_jnp_cube_h))
+        apply_style(f, _jnp_solid, (0.50, 0.50, 0.52), 0.0, 'JunctionProxy')
+
+        # Wrap solid in IfcRepresentationMap for instancing
+        _jnp_map_pt = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0))
+        _jnp_map_placement = f.create_entity('IfcAxis2Placement3D',
+            Location=_jnp_map_pt,
+            Axis=f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0)),
+            RefDirection=f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0)))
+        _jnp_mapped_shape = f.create_entity('IfcShapeRepresentation',
+            ContextOfItems=subcontext,
+            RepresentationIdentifier='Body',
+            RepresentationType='SweptSolid',
+            Items=(_jnp_solid,))
+        _jnp_rep_map = f.create_entity('IfcRepresentationMap',
+            MappingOrigin=_jnp_map_placement,
+            MappedRepresentation=_jnp_mapped_shape)
+
+        _jnp_done = set()
+        for _jnp_nid, _jnp_segs in node_to_segs_for_clip.items():
+            if len(_jnp_segs) < 2 or _jnp_nid in _jnp_done:
+                continue
+            _jnp_done.add(_jnp_nid)
+
+            # Compute junction world position from first segment at this node
+            _jnp_ek0, _, _, _jnp_ep0 = _jnp_segs[0]
+            _jnp_pl0 = placement_by_css_key.get(_jnp_ek0, {})
+            if not _jnp_pl0:
+                continue
+            _jnp_o = _jnp_pl0.get('origin', {})
+            _jnp_ox0 = float(_jnp_o.get('x', 0))
+            _jnp_oy0 = float(_jnp_o.get('y', 0))
+            _jnp_oz0 = float(_jnp_o.get('z', 0))
+            _jnp_ax0 = _jnp_pl0.get('axis', {})
+            _jnp_avx0 = float(_jnp_ax0.get('x', 1))
+            _jnp_avy0 = float(_jnp_ax0.get('y', 0))
+            _jnp_avz0 = float(_jnp_ax0.get('z', 0))
+            _jnp_avn = math.sqrt(_jnp_avx0**2 + _jnp_avy0**2 + _jnp_avz0**2)
+            if _jnp_avn > 1e-6:
+                _jnp_avx0 /= _jnp_avn; _jnp_avy0 /= _jnp_avn; _jnp_avz0 /= _jnp_avn
+            _jnp_jov0 = geom_junction_overlap_by_css_key.get(_jnp_ek0, 0.0)
+            _jnp_odep0 = geom_orig_depth_by_css_key.get(_jnp_ek0,
+                geom_depth_by_css_key.get(_jnp_ek0, 0.0))
+            _jnp_lz = _jnp_jov0 if _jnp_ep0 == 'entry' else (_jnp_jov0 + _jnp_odep0)
+            _jnp_jx = _jnp_ox0 + _jnp_avx0 * _jnp_lz
+            _jnp_jy = _jnp_oy0 + _jnp_avy0 * _jnp_lz
+            _jnp_jz = _jnp_oz0 + _jnp_avz0 * _jnp_lz
+            _jnp_floor_z = _jnp_jz - _jnp_cube_h / 2.0
+
+            try:
+                # Identity MappingTarget — placement encodes world position
+                _jnp_xform_pt = f.create_entity('IfcCartesianPoint', Coordinates=(0.0, 0.0, 0.0))
+                _jnp_xform = f.create_entity('IfcCartesianTransformationOperator3D',
+                    Axis1=f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0)),
+                    Axis2=f.create_entity('IfcDirection', DirectionRatios=(0.0, 1.0, 0.0)),
+                    LocalOrigin=_jnp_xform_pt,
+                    Scale=1.0,
+                    Axis3=f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0)))
+                _jnp_mapped_item = f.create_entity('IfcMappedItem',
+                    MappingSource=_jnp_rep_map,
+                    MappingTarget=_jnp_xform)
+                _jnp_inst_shape = f.create_entity('IfcShapeRepresentation',
+                    ContextOfItems=subcontext,
+                    RepresentationIdentifier='Body',
+                    RepresentationType='MappedRepresentation',
+                    Items=(_jnp_mapped_item,))
+                _jnp_pds = f.create_entity('IfcProductDefinitionShape',
+                    Representations=(_jnp_inst_shape,))
+
+                _jnp_lp_origin = f.create_entity('IfcCartesianPoint',
+                    Coordinates=(float(_jnp_jx), float(_jnp_jy), float(_jnp_floor_z)))
+                _jnp_ax2pl = f.create_entity('IfcAxis2Placement3D',
+                    Location=_jnp_lp_origin,
+                    Axis=f.create_entity('IfcDirection', DirectionRatios=(0.0, 0.0, 1.0)),
+                    RefDirection=f.create_entity('IfcDirection', DirectionRatios=(1.0, 0.0, 0.0)))
+                _jnp_lp = f.create_entity('IfcLocalPlacement',
+                    PlacementRelTo=_jnp_storey_lp, RelativePlacement=_jnp_ax2pl)
+
+                _jnp_proxy = f.create_entity('IfcBuildingElementProxy',
+                    GlobalId=new_guid(), OwnerHistory=owner,
+                    Name=f'JunctionNode_{_jnp_nid}',
+                    Description='Tunnel junction node cube proxy',
+                    ObjectPlacement=_jnp_lp,
+                    Representation=_jnp_pds)
+                _jnp_elements.append(_jnp_proxy)
+                _jnp_count += 1
+            except Exception as _jnp_err:
+                print(f"JunctionProxy failed at node {_jnp_nid}: {_jnp_err}")
+
+    if _jnp_elements and _jf_storey_entry:
+        f.create_entity('IfcRelContainedInSpatialStructure',
+            GlobalId=new_guid(), OwnerHistory=owner,
+            RelatedElements=tuple(_jnp_elements),
+            RelatingStructure=_jf_storey_entry[0])
+    if _jnp_count > 0:
+        print(f"Junction proxies: {_jnp_count} node cube proxies added")
 
     # ---- MITRE CLIP PASS: Apply IfcBooleanClippingResult at mitre wall/tunnel junctions ----
     # For each WALL or TUNNEL_SEGMENT with MITRE PATH_CONNECTS, trim the overlapping corner
@@ -5381,7 +5555,7 @@ def generate_ifc4_from_css(css):
 def compute_css_hash(css):
     """Compute SHA-256 hash of CSS for caching.
     Version salt ensures geometry fixes bust stale cached IFC files."""
-    css_str = json.dumps(css, sort_keys=True) + '__v42_mep_narrow_guard'
+    css_str = json.dumps(css, sort_keys=True) + '__v43_tunnel_orient_fix'
     return hashlib.sha256(css_str.encode('utf-8')).hexdigest()
 
 
