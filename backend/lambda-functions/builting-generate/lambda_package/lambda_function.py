@@ -631,7 +631,11 @@ def apply_style(f, solid, color_rgb, transparency=0.0, entity_name=None, reflect
     Creates the full IFC4 styling chain:
     IfcStyledItem → IfcPresentationStyleAssignment → IfcSurfaceStyle → IfcSurfaceStyleRendering
     Reuses shared IfcSurfaceStyle + IfcPresentationStyleAssignment when color+transparency match.
+    NOTE: entity_name is sanitized to ASCII here — X2-encoded Unicode in IfcSurfaceStyle.Name
+    causes web-ifc WASM buffer offset errors in the browser geometry parser.
     This ensures compatibility with xeokit, Revit, BIMvision, and other IFC viewers."""
+    if entity_name:
+        entity_name = entity_name.replace('\u2014', ' - ').replace('\u2013', ' - ')
     cache_key = (tuple(round(c, 4) for c in color_rgb), round(float(transparency), 2), reflectance_method)
     if cache_key in _style_cache:
         style_assignment = _style_cache[cache_key]
