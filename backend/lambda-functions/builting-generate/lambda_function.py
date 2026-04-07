@@ -5559,7 +5559,7 @@ def generate_ifc4_from_css(css):
 def compute_css_hash(css):
     """Compute SHA-256 hash of CSS for caching.
     Version salt ensures geometry fixes bust stale cached IFC files."""
-    css_str = json.dumps(css, sort_keys=True) + '__v43_tunnel_orient_fix'
+    css_str = json.dumps(css, sort_keys=True) + '__v44_degree_sym_fix'
     return hashlib.sha256(css_str.encode('utf-8')).hexdigest()
 
 
@@ -6239,6 +6239,9 @@ def handler(event, context):
     css_hash = compute_css_hash(css)
     cached_ifc = check_cache(css_hash)
 
+    elements = css.get('elements', [])
+    element_count = len(elements)
+    error_count = 0
     gen_orientation_warnings = []
     gen_tunnel_shell_report = None
     if cached_ifc:
