@@ -4276,7 +4276,7 @@ def generate_ifc4_from_css(css):
             if conn_angle and isinstance(conn_angle, dict):
                 angle_deg = conn_angle.get('angleDeg', 0)
                 conn_type = conn_angle.get('connectionType', 'UNKNOWN')
-                desc = f"{role} [{conn_type} {angle_deg}°]"
+                desc = f"{role} [{conn_type} {angle_deg}deg]"
                 if conn_type == 'MITRE':
                     mitre_count += 1
 
