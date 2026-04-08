@@ -21,6 +21,8 @@ RUN /opt/conda/envs/ifc/bin/python -m pip install --no-cache-dir awslambdaric
 COPY requirements.txt /var/task/requirements.txt
 RUN /opt/conda/envs/ifc/bin/python -m pip install --no-cache-dir -r /var/task/requirements.txt
 
+ARG BUILD_VERSION=1
+ENV LAMBDA_BUILD_VERSION=$BUILD_VERSION
 COPY lambda_function.py /var/task/lambda_function.py
 COPY lambda_package/ /var/task/lambda_package/
 
